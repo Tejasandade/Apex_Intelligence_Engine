@@ -1,0 +1,33 @@
+# Virtual Environment
+venv/
+.venv/
+
+# Environment Variables (SECRETS!)
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Historical Data (too large for git)
+data/historical/
+
+# Model Weights (large binary files)
+src/models/final_model.json
+models/weights/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

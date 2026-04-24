@@ -1,0 +1,53 @@
+# Apex Market Intelligence Engine v2.5 - Progress Tracker
+
+## Phase 1: The Quant Agent
+
+### Epic 1: Infrastructure & Scaffolding
+- [x] Task 1.1: Initialize project structure, Docker configurations, and requirements.txt.
+- [x] Task 1.2: Set up Redis and TimescaleDB containers in docker-compose.yml.
+- [x] Task 1.3: Create base async database connection utilities.
+
+### Epic 2: High-Frequency Data Ingestion
+- [x] Task 2.1: Build robust WebSocket client manager with auto-reconnect.
+- [x] Task 2.2: Implement exchange-specific parsers (Binance AggTrades, Depth Updates, Liquidations).
+- [x] Task 2.3: Route parsed streams to Redis (real-time state) and TimescaleDB (historical).
+
+### Epic 3: Feature Engineering Engine
+- [x] Task 3.1: Implement Local Order Book (LOB) reconstruction logic from depth updates.
+- [x] Task 3.2: Create real-time CVD calculation module.
+- [x] Task 3.3: Map liquidation events and calculate liquidation intensity metrics.
+
+### Epic 4: The Quant Model
+- [x] Task 4.1: Script to dump normalized feature datasets from DB.
+- [x] Task 4.2: Build PyTorch/XGBoost training pipeline.
+- [x] Task 4.3: Expose inference API (FastAPI) to output the directional probability score.
+
+## Phase 2: Building the Macro Oracle
+
+### Epic 5: Data Ingestion & Filtration
+- [x] Task 5.1: Integrate News APIs for headline ingestion.
+- [x] Task 5.2: Build Information Filtration pipeline.
+
+### Epic 6: Sentiment Engine (NLP)
+- [x] Task 6.1: Initialize SentimentAnalyzer placeholder module.
+- [x] Task 6.2: Integrate FinBERT for robust scoring.
+- [x] Task 6.3: Compute rolling Macro Sentiment Score and save to DB.
+
+### Epic 7: Oracle Integration
+- [x] Task 7.1: Expose the Macro Sentiment Score via a FastAPI endpoint.
+- [x] Task 7.2: Update dataset_builder to fetch Macro Sentiment Score for the Quant Model.
+
+## Phase 3: The Executive Risk Manager
+
+### Epic 8: Risk & Position Sizing Engine
+- [x] Task 8.1: Initialize RiskManager scaffolding and placeholder methods.
+- [x] Task 8.2: Implement dynamic capital allocation and Kelly criterion.
+- [x] Task 8.3: Build drawdown limits and daily loss constraints.
+
+### Epic 9: Trade Execution Integration
+- [x] Task 9.1: Connect to exchange API for order execution.
+- [x] Task 9.2: Translate quant signals into secure order routing.
+- [x] Task 9.3: Develop active position management and trailing stops.
+
+*** PHASE 3 COMPLETE: 100% ***
+*** APEX INTELLIGENCE ENGINE V2.5 FULLY ASSEMBLED ***

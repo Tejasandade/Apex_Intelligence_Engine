@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  quant_agent:
+    build: .
+    container_name: apex_quant_agent
+    restart: unless-stopped
+    volumes:
+      - ./src:/app/src
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - TIMESCALE_URL=postgres://user:password@timescaledb:5432/apex
+    depends_on:
+      - redis
+      - timescaledb
+    command: python -m src.main
+
+  redis:
+    image: redis:alpine
+    container_name: apex_redis
+    ports:
+      - "6379:6379"
+
+  timescaledb:
+    image: timescale/timescaledb:latest-pg15
+    container_name: apex_timescaledb
+    environment:
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=apex
+    ports:
+      - "5432:5432"
+    volumes:
+      - timescaledb_data:/var/lib/postgresql/data
+
+volumes:
+  timescaledb_data:
