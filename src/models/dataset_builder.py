@@ -32,6 +32,24 @@ def compute_macd(series: pd.Series):
         float(macd_hist.iloc[-1]) if not pd.isna(macd_hist.iloc[-1]) else 0.0,
     )
 
+def compute_vwap(df: pd.DataFrame) -> float:
+    """Volume Weighted Average Price — institutional benchmark."""
+    typical_price = (df['high'] + df['low'] + df['close']) / 3
+    vwap = (typical_price * df['volume']).cumsum() / df['volume'].cumsum()
+    return float(vwap.iloc[-1]) if not vwap.empty and not pd.isna(vwap.iloc[-1]) else 0.0
+
+def compute_atr(df: pd.DataFrame, length: int = 14) -> float:
+    """Average True Range — volatility measurement for adaptive stops."""
+    high = df['high']
+    low = df['low']
+    close = df['close']
+    tr1 = high - low
+    tr2 = (high - close.shift(1)).abs()
+    tr3 = (low - close.shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=length, min_periods=length).mean()
+    return float(atr.iloc[-1]) if not atr.empty and not pd.isna(atr.iloc[-1]) else 0.0
+
 class DataFetcher:
     """
     Fetches raw data from TimescaleDB, Redis, and Binance REST API,
@@ -120,6 +138,8 @@ class DataFetcher:
             ema_14 = compute_ema(close, span=14)
             ema_50 = compute_ema(close, span=50)
             macd, macd_signal, macd_hist = compute_macd(close)
+            vwap = compute_vwap(klines_df)
+            atr = compute_atr(klines_df, length=14)
             
             # Use the latest candle for OHLCV
             latest = klines_df.iloc[-1]
@@ -133,11 +153,12 @@ class DataFetcher:
             direction = (klines_df['close'] - klines_df['open']).apply(lambda x: 1 if x >= 0 else -1)
             cvd = float((klines_df['volume'] * direction).sum())
             
-            logger.debug(f"Live indicators: RSI={rsi:.1f} | EMA14={ema_14:.1f} | MACD={macd:.4f} | Close={close_price:.1f}")
+            logger.debug(f"Live indicators: RSI={rsi:.1f} | VWAP={vwap:.1f} | ATR={atr:.2f} | MACD={macd:.4f} | Close={close_price:.1f}")
         else:
             logger.warning("Insufficient kline data. Using neutral defaults.")
             rsi, ema_14, ema_50 = 50.0, 0.0, 0.0
             macd, macd_signal, macd_hist = 0.0, 0.0, 0.0
+            vwap, atr = 0.0, 0.0
             open_price = high_price = low_price = close_price = 0.0
             volume, cvd = 0.0, 0.0
 
@@ -162,7 +183,7 @@ class DataFetcher:
             short_liq_vol = liq_df[liq_df['side'] == 'BUY']['quantity'].sum()
         liq_imbalance = long_liq_vol - short_liq_vol
 
-        # --- Build the EXACT 21-feature vector matching training order ---
+        # --- Build the 23-feature vector (Level 2: VWAP + ATR added) ---
         feature_vector = {
             'symbol': symbol,
             'timestamp': pd.Timestamp.utcnow(),
@@ -177,6 +198,8 @@ class DataFetcher:
             'MACD': macd,
             'MACD_signal': macd_signal,
             'MACD_hist': macd_hist,
+            'VWAP': vwap,
+            'ATR': atr,
             'spread': spread,
             'CVD': cvd,
             'best_bid': best_bid,

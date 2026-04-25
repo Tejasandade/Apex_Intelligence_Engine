@@ -55,11 +55,20 @@ async def build_training_data():
     logger.info(f"Loaded {len(df)} rows of historical data.")
 
     # --- Feature Engineering: Technical Indicators ---
-    logger.info("Calculating Technical Indicators (RSI, EMA, MACD)...")
+    logger.info("Calculating Technical Indicators (RSI, EMA, MACD, VWAP, ATR)...")
     df['RSI'] = compute_rsi(df['close'], length=14)
     df['EMA_14'] = compute_ema(df['close'], span=14)
     df['EMA_50'] = compute_ema(df['close'], span=50)
     df['MACD'], df['MACD_signal'], df['MACD_hist'] = compute_macd(df['close'])
+
+    # Level 2 Institutional Features
+    typical_price = (df['high'] + df['low'] + df['close']) / 3
+    df['VWAP'] = (typical_price * df['volume']).cumsum() / df['volume'].cumsum()
+
+    tr1 = df['high'] - df['low']
+    tr2 = (df['high'] - df['close'].shift(1)).abs()
+    tr3 = (df['low'] - df['close'].shift(1)).abs()
+    df['ATR'] = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1).rolling(window=14, min_periods=14).mean()
 
     # --- Synthetic LOB / CVD features (derived from OHLCV as proxies) ---
     df['spread'] = (df['high'] - df['low']) * 0.1

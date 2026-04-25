@@ -63,3 +63,5 @@ async def get_inference(symbol: str):
     except Exception as e:
         logger.error(f"Inference pipeline error for {symbol}: {e}")
         raise HTTPException(status_code=500, detail="Internal server error during inference")
+
+

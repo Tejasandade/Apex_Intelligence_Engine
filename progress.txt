@@ -51,3 +51,31 @@
 
 *** PHASE 3 COMPLETE: 100% ***
 *** APEX INTELLIGENCE ENGINE V2.5 FULLY ASSEMBLED ***
+
+## Phase 4: Apex Command Center (FastAPI + React Pivot)
+
+### Epic 10: Dashboard Architecture Pivot
+- [x] Task 10.1: (DEPRECATED) Streamlit prototype — replaced with FastAPI+React.
+- [x] Task 10.2: Build FastAPI WebSocket broadcast server (port 8080).
+- [x] Task 10.3: Initialize Vite + React frontend (port 5173).
+- [x] Task 10.4: Build Cinematic Dark Mode + Glassmorphism CSS.
+- [x] Task 10.5: Implement Probability Oscillator (Canvas rendering).
+- [x] Task 10.6: Build Smart Order Cards with /inference/details/{order_id}.
+
+### Epic 11: Institutional Features
+- [x] Task 11.1: Implement Instrument & Style Selector (BTC/Nifty/Forex × Scalp/Intra/Swing).
+- [x] Task 11.2: Build Live Capital Control with PUT /api/capital sync.
+- [x] Task 11.3: Add VWAP (Volume Weighted Average Price) to feature vector.
+- [x] Task 11.4: Add ATR (Average True Range) to feature vector.
+- [x] Task 11.5: Retrain XGBoost model with 23 features (295,172 samples).
+
+### Epic 12: Future-Proof Architecture
+- [x] Task 12.1: Design users and exchange_credentials DB schemas.
+- [ ] Task 12.2: Implement user authentication flow.
+- [ ] Task 12.3: Build encrypted API key management per user.
+
+### Epic 13: Advanced Intelligence (Phase 5 Preview)
+- [ ] Task 13.1: Implement FVG (Fair Value Gap) detection.
+- [ ] Task 13.2: Implement SMC (Smart Money Concepts) — BOS/CHoCH.
+- [ ] Task 13.3: Add Volume Profile features.
+- [ ] Task 13.4: Train Transformer-based sequence model.
