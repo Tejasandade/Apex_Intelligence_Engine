@@ -12,6 +12,10 @@ class LocalOrderBook:
         Updates the order book state.
         Removes price levels if the quantity drops to 0.
         """
+        if update.is_top_of_book:
+            self.bids = {}
+            self.asks = {}
+
         # Apply bid updates
         for price_str, qty_str in update.bids:
             price, qty = float(price_str), float(qty_str)

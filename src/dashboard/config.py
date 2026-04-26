@@ -61,28 +61,37 @@ TRADING_PROFILES = {
     },
 }
 
-# Database schema for future multi-user support
+# Database schema for future multi-user SaaS support
 DB_SCHEMA_USERS = """
 CREATE TABLE IF NOT EXISTS users (
-    id SERIAL PRIMARY KEY,
+    id BIGSERIAL PRIMARY KEY,
     username VARCHAR(50) UNIQUE NOT NULL,
     email VARCHAR(120) UNIQUE NOT NULL,
     password_hash VARCHAR(256) NOT NULL,
+    full_name VARCHAR(120),
+    role VARCHAR(32) NOT NULL DEFAULT 'trader',
+    professional_trader_enabled BOOLEAN NOT NULL DEFAULT FALSE,
     is_active BOOLEAN DEFAULT TRUE,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 """
 
-DB_SCHEMA_EXCHANGE_CREDENTIALS = """
-CREATE TABLE IF NOT EXISTS exchange_credentials (
-    id SERIAL PRIMARY KEY,
-    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-    exchange_name VARCHAR(50) NOT NULL,
+DB_SCHEMA_BROKER_CREDENTIALS = """
+CREATE TABLE IF NOT EXISTS broker_credentials (
+    id BIGSERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    provider_name VARCHAR(50) NOT NULL,
+    broker_label VARCHAR(80) NOT NULL DEFAULT 'primary',
+    account_type VARCHAR(24) NOT NULL DEFAULT 'paper',
     api_key_encrypted TEXT NOT NULL,
     api_secret_encrypted TEXT NOT NULL,
-    is_testnet BOOLEAN DEFAULT TRUE,
+    passphrase_encrypted TEXT,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    last_validated_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT NOW(),
-    UNIQUE(user_id, exchange_name)
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(user_id, provider_name, broker_label)
 );
 """

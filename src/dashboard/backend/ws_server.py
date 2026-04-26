@@ -1,59 +1,955 @@
-"""
-Apex Intelligence Engine v3.0 — WebSocket Broadcast Server
-High-frequency data broadcaster for the React Command Center.
-Port: 8080
-"""
-import sys
-import os
 import asyncio
-import json
+import math
 import uuid
-from datetime import datetime
-from typing import List
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import List, Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+import pandas as pd
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
+from collections import deque
 
-# Ensure project root is in path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
+console_queues = []
+recent_logs = deque(maxlen=50)
 
-from src.data.db import db_manager
+def ws_log_sink(message):
+    msg_str = str(message)
+    recent_logs.append(msg_str)
+    try:
+        loop = asyncio.get_running_loop()
+        for q in console_queues:
+            loop.call_soon_threadsafe(q.put_nowait, msg_str)
+    except RuntimeError:
+        pass
+
+# Add sink to pipe backend thinking
+logger.add(
+    ws_log_sink,
+    format="{message}",
+    filter=lambda r: "⚡" in r["message"] or "💹" in r["message"] or "Routing" in r["message"] or "Executed" in r["message"] or "Evaluating" in r["message"] or "Signal" in r["message"],
+    enqueue=True
+)
+
+from src.agents.executor import TradeExecutor
+from src.agents.risk_manager import RiskManager
+from src.dashboard.backend.broadcaster import WebSocketBroadcaster
+from src.dashboard.backend.schemas import (
+    ActiveTrade,
+    CapitalUpdate,
+    DashboardMarket,
+    DashboardSession,
+    DashboardSnapshot,
+    ExecutionPlan,
+    ManualExecutionRequest,
+    ProfessionalTraderUpdate,
+    SignalAnalysis,
+    SmartOrderCard,
+    TradeTicket,
+)
+from src.dashboard.config import TRADING_PROFILES
+from src.data.db import REDIS_CANDLE_KEY, WARMUP_CANDLES_REQUIRED, db_manager
+from src.data.db_sanitizer import purge_stale_market_data
+from src.data.news_fetcher import CryptoNewsFetcher
 from src.models.dataset_builder import DataFetcher
 from src.models.quant_model import ApexXGBoostModel
-from src.dashboard.config import TRADING_PROFILES
-from src.data.news_fetcher import CryptoNewsFetcher
-
-# ─── Global State ───────────────────────────────────────────────────
-quant_model = ApexXGBoostModel()
-news_fetcher = CryptoNewsFetcher()
-trade_history: List[dict] = []
-sim_pnl: float = 0.0
-total_capital: float = 10000.0
-latest_news: List[str] = []
 
 
-class CapitalUpdate(BaseModel):
-    total_capital: float
+PROVIDER_NAME = "binance_futures"
+DEFAULT_SYMBOL = "BTCUSDT"
+DEFAULT_STYLE = "Intraday"
+INFERENCE_LOOP_INTERVAL_SECONDS = 1.0
+
+
+def _default_warmup_status() -> dict:
+    return {
+        "symbol": DEFAULT_SYMBOL,
+        "ready": False,
+        "candle_count": 0,
+        "required_candles": WARMUP_CANDLES_REQUIRED,
+    }
+
+
+async def _get_redis_live_price() -> float:
+    """Zero-latency bridge — reads the best-bid/ask mid-price directly from the
+    order book Redis key for tick-for-tick price parity with the live feed.
+    Falls back to the latest candle close if the order book key is unavailable."""
+    try:
+        if not db_manager.redis_pool:
+            return 0.0
+        import json as _json
+
+        # Primary: live order book mid-price (matches what the AI model sees)
+        book_payload = await db_manager.redis_pool.get(f"book:{DEFAULT_SYMBOL.upper()}")
+        if book_payload:
+            book = _json.loads(book_payload)
+            bids = book.get("bids", [])
+            asks = book.get("asks", [])
+            if bids and asks:
+                try:
+                    mid = (float(bids[0][0]) + float(asks[0][0])) / 2.0
+                    if mid > 0:
+                        return round(mid, 2)
+                except (ValueError, TypeError, IndexError):
+                    pass
+
+        # Fallback: last candle close from Redis candle key
+        payload = await db_manager.redis_pool.get(REDIS_CANDLE_KEY)
+        if not payload:
+            return 0.0
+        candles = _json.loads(payload)
+        if not isinstance(candles, list) or not candles:
+            return 0.0
+        latest = candles[-1]
+        try:
+            price = float(latest.get("close", 0.0))
+        except (ValueError, TypeError):
+            return 0.0
+        return price if price > 0.0 else 0.0
+    except Exception as exc:
+        logger.warning("Redis live-price read failed: {}", exc)
+        return 0.0
+
+
+
+@dataclass
+class DashboardRuntime:
+    risk_manager: RiskManager = field(default_factory=RiskManager)
+    executor: TradeExecutor = field(default_factory=lambda: TradeExecutor(live_trading_enabled=False))
+    broadcaster: WebSocketBroadcaster = field(default_factory=WebSocketBroadcaster)
+    quant_model: ApexXGBoostModel = field(default_factory=ApexXGBoostModel)
+    news_fetcher: CryptoNewsFetcher = field(default_factory=CryptoNewsFetcher)
+    trade_history: List[TradeTicket] = field(default_factory=list)
+    latest_news: List[str] = field(default_factory=list)
+    latest_snapshot: Optional[DashboardSnapshot] = None
+    latest_signal_card: Optional[SmartOrderCard] = None
+    last_signal: str = "HOLD"
+    sim_pnl: float = 0.0
+    cycle_count: int = 0
+    synthetic_tick: int = 0
+    latest_features: dict = field(default_factory=dict)
+    latest_probability: float = 0.5
+    latest_sentiment: float = 0.5
+    last_probability_zone: str = "NEUTRAL"
+    latest_warmup_status: dict = field(default_factory=_default_warmup_status)
+    db_status: str = "connected"
+
+
+runtime = DashboardRuntime()
+
+
+def _sanitize_features(features: Optional[dict]) -> dict:
+    merged = {**_build_synthetic_features(), **(features or {})}
+    return merged
+
+
+def _safe_predict(features: dict) -> float:
+    try:
+        probability = runtime.quant_model.predict(
+            pd.DataFrame(
+                [{"symbol": DEFAULT_SYMBOL.lower(), "timestamp": datetime.utcnow(), **features}]
+            )
+        )
+        if not isinstance(probability, (float, int)) or not math.isfinite(float(probability)):
+            logger.warning("Model returned a non-finite probability. Falling back to neutral.")
+            return 0.5
+        return float(probability)
+    except Exception as exc:
+        logger.error(f"Safe predict fallback triggered: {exc}")
+        return 0.5
+
+
+def _build_order_details(
+    signal: str,
+    features: dict,
+    style_key: str,
+    capital: float,
+    probability: float,
+) -> ExecutionPlan:
+    style = TRADING_PROFILES["styles"].get(
+        style_key,
+        TRADING_PROFILES["styles"][DEFAULT_STYLE],
+    )
+    entry = float(features.get("close", 0.0))
+    atr = float(features.get("ATR", entry * 0.005 if entry else 1.0))
+
+    if signal == "BUY":
+        stop_loss = round(entry - (atr * 1.5), 2)
+        take_profit = round(entry + (atr * 3.0), 2)
+    else:
+        stop_loss = round(entry + (atr * 1.5), 2)
+        take_profit = round(entry - (atr * 3.0), 2)
+
+    risk_per_unit = abs(entry - stop_loss)
+    reward_per_unit = abs(entry - take_profit)
+    risk_reward = round(reward_per_unit / risk_per_unit, 2) if risk_per_unit > 0 else 0.0
+
+    original_capital = runtime.risk_manager.total_capital
+    runtime.risk_manager.total_capital = capital
+    high_confidence_confluence = (
+        (signal == "BUY" and features.get("fvg_signal", 0.0) > 0 and features.get("liquidity_sweep_signal", 0.0) > 0)
+        or (signal == "SELL" and features.get("fvg_signal", 0.0) < 0 and features.get("liquidity_sweep_signal", 0.0) < 0)
+    )
+    try:
+        allocation = runtime.risk_manager.calculate_position_size(
+            symbol=DEFAULT_SYMBOL,
+            action=signal,
+            confidence=probability,
+            reward_risk_ratio=max(risk_reward, 1.0),
+            kelly_fraction=style["kelly_fraction"],
+            high_confidence_confluence=high_confidence_confluence,
+        )
+    finally:
+        runtime.risk_manager.total_capital = original_capital
+
+    position_qty = round(allocation / entry, 4) if entry > 0 and allocation > 0 else 0.0
+    leverage = round(allocation / capital, 1) if capital > 0 else 1.0
+
+    return ExecutionPlan(
+        entry_price=round(entry, 2),
+        stop_loss=stop_loss,
+        take_profit=take_profit,
+        risk_reward=risk_reward,
+        position_qty=position_qty,
+        allocation=allocation,
+        leverage=leverage,
+        est_pnl=round(position_qty * reward_per_unit, 2),
+        max_loss=round(position_qty * risk_per_unit, 2),
+        sl_distance_pct=round((risk_per_unit / entry) * 100, 3) if entry > 0 else 0.0,
+        tp_distance_pct=round((reward_per_unit / entry) * 100, 3) if entry > 0 else 0.0,
+        style=style_key,
+        timeframe=style["timeframe"],
+    )
+
+
+def _get_style_thresholds(style_key: str) -> tuple[float, float]:
+    style = TRADING_PROFILES["styles"].get(
+        style_key,
+        TRADING_PROFILES["styles"][DEFAULT_STYLE],
+    )
+    return float(style["buy_threshold"]), float(style["sell_threshold"])
+
+
+def _probability_zone(probability: float, style_key: str = DEFAULT_STYLE) -> str:
+    buy_threshold, sell_threshold = _get_style_thresholds(style_key)
+    if probability >= buy_threshold:
+        return "BUY"
+    if probability <= sell_threshold:
+        return "SELL"
+    return "NEUTRAL"
+
+
+def _crossed_execution_threshold(
+    previous_probability_zone: str,
+    probability: float,
+    style_key: str = DEFAULT_STYLE,
+) -> tuple[str, bool]:
+    current_zone = _probability_zone(probability, style_key)
+    crossed = current_zone in {"BUY", "SELL"} and current_zone != previous_probability_zone
+    return current_zone, crossed
+
+
+def _clamp(value: float, lower: float = 0.0, upper: float = 1.0) -> float:
+    return max(lower, min(value, upper))
+
+
+def _build_structural_edge(features: dict) -> tuple[str, float, list[str], bool]:
+    structure_signals = []
+    structural_score = 0.0
+
+    fvg_signal = float(features.get("fvg_signal", 0.0))
+    sweep_signal = float(features.get("liquidity_sweep_signal", 0.0))
+    structure_break_signal = float(features.get("structure_break_signal", 0.0))
+    reclaim_strength = float(features.get("liquidity_reclaim_strength", 0.0))
+    break_strength = float(features.get("structure_break_strength", 0.0))
+    structural_confluence = bool(features.get("structural_confluence", 0.0))
+
+    if fvg_signal > 0:
+        structure_signals.append("Bullish FVG")
+        structural_score += 0.2 + min(float(features.get("fvg_gap_pct", 0.0)) * 10, 0.15)
+    elif fvg_signal < 0:
+        structure_signals.append("Bearish FVG")
+        structural_score += 0.2 + min(float(features.get("fvg_gap_pct", 0.0)) * 10, 0.15)
+
+    if sweep_signal > 0:
+        structure_signals.append("Bullish Liquidity Sweep")
+        structural_score += 0.25 + min(reclaim_strength * 0.08, 0.15)
+    elif sweep_signal < 0:
+        structure_signals.append("Bearish Liquidity Sweep")
+        structural_score += 0.25 + min(reclaim_strength * 0.08, 0.15)
+
+    if structure_break_signal == 2:
+        structure_signals.append("Bullish BOS")
+        structural_score += 0.25 + min(break_strength * 0.08, 0.15)
+    elif structure_break_signal == 1:
+        structure_signals.append("Bullish CHoCH")
+        structural_score += 0.22 + min(break_strength * 0.08, 0.12)
+    elif structure_break_signal == -2:
+        structure_signals.append("Bearish BOS")
+        structural_score += 0.25 + min(break_strength * 0.08, 0.15)
+    elif structure_break_signal == -1:
+        structure_signals.append("Bearish CHoCH")
+        structural_score += 0.22 + min(break_strength * 0.08, 0.12)
+
+    if structural_confluence:
+        structure_signals.append("High-Confidence Confluence")
+        structural_score += 0.15
+
+    if not structure_signals:
+        return "No major institutional structure edge detected.", 0.0, [], False
+
+    return " + ".join(structure_signals) + " detected", round(_clamp(structural_score), 4), structure_signals, structural_confluence
+
+
+def _build_signal_analysis(features: dict, bullish_probability: float, sentiment: float) -> SignalAnalysis:
+    close_price = float(features.get("close", 0.0))
+    vwap = float(features.get("VWAP", close_price))
+    rsi = float(features.get("RSI", 50.0))
+    macd_hist = float(features.get("MACD_hist", 0.0))
+
+    structural_edge, structural_score, _, _ = _build_structural_edge(features)
+    technical_score = _clamp(
+        0.5
+        + ((close_price - vwap) / max(abs(vwap), 1.0)) * 4
+        + ((rsi - 50.0) / 100.0)
+        + math.tanh(macd_hist) * 0.2
+        + structural_score * 0.25
+    )
+    sentiment_score = _clamp(sentiment)
+
+    if close_price >= vwap and rsi >= 50:
+        technical_summary = (
+            f"Price is holding above VWAP with RSI at {rsi:.1f}, keeping technical momentum constructive."
+        )
+    elif close_price < vwap and rsi < 50:
+        technical_summary = (
+            f"Price is trading below VWAP while RSI sits at {rsi:.1f}, signaling weaker trend participation."
+        )
+    else:
+        technical_summary = (
+            f"Technical posture is mixed: RSI is {rsi:.1f} and price is testing its VWAP equilibrium."
+        )
+
+    if structural_score > 0:
+        technical_summary = f"{technical_summary} {structural_edge}."
+
+    if sentiment_score >= 0.6:
+        sentiment_summary = "Sentiment flow is supportive and improves conviction for momentum continuation."
+    elif sentiment_score <= 0.4:
+        sentiment_summary = "Sentiment remains defensive, so any entry should respect tighter downside protection."
+    else:
+        sentiment_summary = "Sentiment is neutral, so execution should lean more heavily on price structure than headlines."
+
+    return SignalAnalysis(
+        technical_score=round(technical_score, 4),
+        sentiment_score=round(sentiment_score, 4),
+        technical_summary=technical_summary,
+        sentiment_summary=sentiment_summary,
+    )
+
+
+def _build_synthetic_features() -> dict:
+    runtime.synthetic_tick += 1
+    phase = runtime.synthetic_tick / 5
+    close_price = 68450 + math.sin(phase) * 210 + math.cos(phase / 2) * 90
+    atr = 92 + abs(math.sin(phase / 3)) * 16
+    vwap = close_price - math.sin(phase / 2) * 24
+    rsi = 50 + math.sin(phase) * 11
+    macd_hist = math.sin(phase / 1.8) * 0.35
+
+    return {
+        "open": round(close_price - 32, 4),
+        "high": round(close_price + 58, 4),
+        "low": round(close_price - 66, 4),
+        "close": round(close_price, 4),
+        "volume": round(1542 + abs(math.cos(phase)) * 325, 4),
+        "RSI": round(rsi, 4),
+        "EMA_14": round(close_price - 18, 4),
+        "EMA_50": round(close_price - 42, 4),
+        "MACD": round(macd_hist * 2, 6),
+        "MACD_signal": round(macd_hist, 6),
+        "MACD_hist": round(macd_hist, 6),
+        "VWAP": round(vwap, 4),
+        "ATR": round(atr, 4),
+        "spread": 0.6,
+        "CVD": round(math.sin(phase) * 240, 4),
+        "best_bid": round(close_price - 0.2, 4),
+        "best_bid_qty": 12.4,
+        "best_ask": round(close_price + 0.2, 4),
+        "best_ask_qty": 11.9,
+        "recent_long_liq_vol": round(abs(math.sin(phase)) * 25, 4),
+        "recent_short_liq_vol": round(abs(math.cos(phase)) * 21, 4),
+        "liq_imbalance": round(math.sin(phase) * 8, 4),
+        "fvg_signal": 1.0 if math.sin(phase) > 0.55 else -1.0 if math.sin(phase) < -0.55 else 0.0,
+        "fvg_gap_pct": round(abs(math.sin(phase)) * 0.002, 6),
+        "liquidity_sweep_signal": 1.0 if math.cos(phase) > 0.6 else -1.0 if math.cos(phase) < -0.6 else 0.0,
+        "liquidity_reclaim_strength": round(abs(math.cos(phase)) * 1.4, 6),
+        "structure_break_signal": 2.0 if math.sin(phase / 1.7) > 0.65 else -2.0 if math.sin(phase / 1.7) < -0.65 else 0.0,
+        "structure_break_strength": round(abs(math.sin(phase / 1.7)) * 1.2, 6),
+        "structural_confluence": 1.0 if abs(math.sin(phase)) > 0.7 and abs(math.cos(phase)) > 0.7 else 0.0,
+        "macro_sentiment_score": 0.5,
+    }
+
+
+async def _load_market_features(symbol: str) -> dict:
+    fetcher = DataFetcher(db_manager)
+    dataframe = await fetcher.build_dataset(symbol.lower())
+    if dataframe.empty:
+        warmup_status = await fetcher.fetch_warmup_status(symbol.lower())
+        if not warmup_status.get("ready"):
+            logger.info(
+                "QuantModel warm-up pending for {} | fresh_1m_candles={}/{}",
+                symbol.upper(),
+                warmup_status.get("candle_count", 0),
+                warmup_status.get("required_candles", 14),
+            )
+            return {}
+
+        logger.warning("No warm market features available for dashboard feed.")
+        return {}
+
+    row = dataframe.iloc[0]
+    return {
+        key: round(float(value), 6)
+        for key, value in row.items()
+        if key not in {"timestamp", "symbol"}
+    }
+
+
+def _build_trade_ticket(
+    order_id: str,
+    signal: str,
+    probability: float,
+    sentiment: float,
+    features: dict,
+    execution_plan: ExecutionPlan,
+    trigger_source: str,
+) -> TradeTicket:
+    now = datetime.now()
+    return TradeTicket(
+        order_id=order_id,
+        symbol=DEFAULT_SYMBOL,
+        signal=signal,
+        status="EXECUTED" if trigger_source == "manual_override" else "STAGED",
+        probability=round(probability, 4),
+        provider=PROVIDER_NAME,
+        trigger_source=trigger_source,
+        time=now.strftime("%I:%M %p"),
+        date=now.strftime("%b %d, %Y"),
+        sentiment=round(sentiment, 4),
+        features=features,
+        execution_plan=execution_plan,
+    )
+
+
+def _update_trade_ticket_status(order_id: str, status: str, trigger_source: Optional[str] = None):
+    for trade in runtime.trade_history:
+        if trade.order_id != order_id:
+            continue
+        trade.status = status
+        if trigger_source:
+            trade.trigger_source = trigger_source
+        return trade
+    return None
+
+
+def _build_active_trades(current_price: float) -> list[ActiveTrade]:
+    runtime.executor.sync_live_prices(DEFAULT_SYMBOL, current_price)
+    active_trades = []
+    for trade in runtime.executor.list_active_trades():
+        active_trades.append(
+            ActiveTrade(
+                order_id=trade["order_id"],
+                symbol=trade["symbol"],
+                side=trade["side"],
+                status=trade.get("status", "OPEN"),
+                quantity=float(trade.get("quantity", 0.0)),
+                entry_price=float(trade.get("entry_price", 0.0)),
+                current_price=float(trade.get("current_price", 0.0)),
+                pnl_pct=float(trade.get("pnl_pct", 0.0)),
+                trailing_stop_level=float(trade.get("trailing_stop_level", 0.0)),
+                callback_rate=float(trade.get("callback_rate", 0.0)),
+                broker_status=trade.get("broker_status", "DRY_RUN"),
+                exit_reason=trade.get("exit_reason"),
+                opened_at=trade.get("opened_at", ""),
+            )
+        )
+    return active_trades
+
+
+def _build_snapshot(
+    signal: str,
+    probability: float,
+    sentiment: float,
+    features: dict,
+    execution_plan: Optional[ExecutionPlan],
+    warmup_status: Optional[dict] = None,
+) -> DashboardSnapshot:
+    analysis = _build_signal_analysis(features, probability, sentiment)
+    structural_edge, structural_score, structure_signals, structural_confluence = _build_structural_edge(features)
+    requires_manual_approval = runtime.risk_manager.requires_manual_approval and signal != "HOLD"
+    squaring_off_active = any(
+        trade.get("status") == "SQUARING OFF"
+        for trade in runtime.executor.list_active_trades()
+    )
+    warmup_state = warmup_status or runtime.latest_warmup_status or _default_warmup_status()
+    warmup_count = int(warmup_state.get("candle_count", 0))
+    warmup_required = int(warmup_state.get("required_candles", WARMUP_CANDLES_REQUIRED))
+    warmup_ready = bool(warmup_state.get("ready", False))
+    warmup_message = None if warmup_ready else f"Warming Up: [{warmup_count}]/{warmup_required} Minutes"
+
+    if squaring_off_active:
+        status = "SQUARING OFF"
+    elif not warmup_ready:
+        status = "warming_up"
+    elif signal == "HOLD":
+        status = "monitoring"
+    elif requires_manual_approval:
+        status = "awaiting_manual_approval"
+    else:
+        status = "autonomous_routing"
+
+    smart_order_card = SmartOrderCard(
+        order_id=runtime.trade_history[0].order_id if runtime.trade_history else None,
+        symbol=DEFAULT_SYMBOL,
+        provider=PROVIDER_NAME,
+        signal=signal,
+        bullish_probability=round(probability, 4),
+        bearish_probability=round(1 - probability, 4),
+        confidence_percent=round(max(probability, 1 - probability) * 100, 2),
+        signal_analysis=analysis,
+        structural_edge=structural_edge,
+        structural_score=structural_score,
+        structure_signals=structure_signals,
+        structural_confluence=structural_confluence,
+        execution_plan=execution_plan,
+        requires_manual_approval=requires_manual_approval,
+        execution_mode=runtime.risk_manager.execution_mode,
+        status=status,
+        warmup_count=warmup_count,
+        warmup_required=warmup_required,
+        warmup_message=warmup_message,
+        execute_label=(
+            "Autonomous Exit Running"
+            if squaring_off_active
+            else "Warm-up In Progress"
+            if not warmup_ready
+            else "Execute Now"
+        ),
+    )
+
+    runtime.latest_signal_card = smart_order_card
+
+    snapshot = DashboardSnapshot(
+        generated_at=datetime.utcnow(),
+        session=DashboardSession(
+            cycle_count=runtime.cycle_count,
+            sim_pnl=round(runtime.sim_pnl, 2),
+            total_capital=runtime.risk_manager.total_capital,
+            trade_allocation=runtime.risk_manager.trade_allocation,
+            professional_trader_enabled=runtime.risk_manager.professional_trader_enabled,
+            autonomous_mode=runtime.risk_manager.autonomous_mode,
+            execution_mode=runtime.risk_manager.execution_mode,
+            db_status=runtime.db_status,
+        ),
+        market=DashboardMarket(
+            symbol=DEFAULT_SYMBOL,
+            provider=PROVIDER_NAME,
+            close_price=float(features.get("close", 0.0)),
+            rsi=float(features.get("RSI", 50.0)),
+            vwap=float(features.get("VWAP", 0.0)),
+            atr=float(features.get("ATR", 0.0)),
+            sentiment=round(sentiment, 4),
+            probability=round(probability, 4),
+            signal=signal,
+            structural_features={
+                "fvg_signal": float(features.get("fvg_signal", 0.0)),
+                "fvg_gap_pct": float(features.get("fvg_gap_pct", 0.0)),
+                "liquidity_sweep_signal": float(features.get("liquidity_sweep_signal", 0.0)),
+                "liquidity_reclaim_strength": float(features.get("liquidity_reclaim_strength", 0.0)),
+                "structure_break_signal": float(features.get("structure_break_signal", 0.0)),
+                "structure_break_strength": float(features.get("structure_break_strength", 0.0)),
+                "structural_confluence": float(features.get("structural_confluence", 0.0)),
+            },
+        ),
+        active_trades=_build_active_trades(float(features.get("close", 0.0))),
+        smart_order_card=smart_order_card,
+        trades=runtime.trade_history[:20],
+        news=runtime.latest_news[:12],
+    )
+    runtime.latest_snapshot = snapshot
+    return snapshot
+
+
+async def _refresh_snapshot(event_type: str, warmup_status: Optional[dict] = None):
+    features = _sanitize_features(runtime.latest_features)
+    execution_plan = None
+    if runtime.last_signal != "HOLD":
+        execution_plan = _build_order_details(
+            signal=runtime.last_signal,
+            features=features,
+            style_key=DEFAULT_STYLE,
+            capital=runtime.risk_manager.total_capital,
+            probability=runtime.latest_probability,
+        )
+
+    snapshot = _build_snapshot(
+        signal=runtime.last_signal,
+        probability=runtime.latest_probability,
+        sentiment=runtime.latest_sentiment,
+        features=features,
+        execution_plan=execution_plan,
+        warmup_status=warmup_status or runtime.latest_warmup_status,
+    )
+    await runtime.broadcaster.broadcast(event_type, snapshot)
+    return snapshot
+
+
+async def _publish_snapshot(
+    event_type: str,
+    signal: str,
+    probability: float,
+    sentiment: float,
+    features: dict,
+    execution_plan: Optional[ExecutionPlan],
+    warmup_status: Optional[dict] = None,
+):
+    snapshot = _build_snapshot(
+        signal,
+        probability,
+        sentiment,
+        features,
+        execution_plan,
+        warmup_status=warmup_status or runtime.latest_warmup_status,
+    )
+    await runtime.broadcaster.broadcast(event_type, snapshot)
+
+
+async def _execute_signal_order(
+    signal: str,
+    execution_plan: ExecutionPlan,
+    order_id: str,
+    trigger_source: str,
+):
+    if execution_plan.position_qty <= 0:
+        logger.warning("Skipping execution because computed position size is zero.")
+        return None
+
+    # Use the zero-latency Redis price bridge to ensure we capture the exact full price string
+    live_entry_price = await _get_redis_live_price()
+    if live_entry_price <= 0:
+        live_entry_price = execution_plan.entry_price
+
+    logger.info(
+        "Routing {} order to TradeExecutor | order_id={} | qty={} | live_entry={:.4f} | mode={}",
+        signal,
+        order_id,
+        execution_plan.position_qty,
+        live_entry_price,
+        runtime.risk_manager.execution_mode,
+    )
+    return await runtime.executor.execute_market_order(
+        symbol=DEFAULT_SYMBOL,
+        side=signal,
+        quantity=execution_plan.position_qty,
+        order_id=order_id,
+        entry_price=live_entry_price,
+        trailing_stop_level=execution_plan.stop_loss,
+        callback_rate=1.0,
+    )
+
+
+async def inference_loop():
+    await asyncio.sleep(2)
+
+    while True:
+        try:
+            runtime.cycle_count += 1
+            raw_features = await _load_market_features(DEFAULT_SYMBOL)
+            if not raw_features:
+                warmup_status = await db_manager.get_warmup_status(DEFAULT_SYMBOL)
+                runtime.latest_warmup_status = warmup_status
+                runtime.latest_features = {}
+                runtime.latest_probability = 0.5
+                runtime.latest_sentiment = 0.5
+                runtime.last_signal = "HOLD"
+                runtime.last_probability_zone = "NEUTRAL"
+                await _publish_snapshot(
+                    "signal.update",
+                    "HOLD",
+                    0.5,
+                    0.5,
+                    _build_synthetic_features(),
+                    None,
+                    warmup_status=warmup_status,
+                )
+                await asyncio.sleep(INFERENCE_LOOP_INTERVAL_SECONDS)
+                continue
+
+            features = _sanitize_features(raw_features)
+            probability = _safe_predict(features)
+            runtime.latest_warmup_status = await db_manager.get_warmup_status(DEFAULT_SYMBOL)
+            probability_zone, crossed_execution_threshold = _crossed_execution_threshold(
+                runtime.last_probability_zone,
+                probability,
+                DEFAULT_STYLE,
+            )
+            try:
+                sentiment = await db_manager.fetch_latest_sentiment()
+            except Exception as exc:
+                logger.warning(f"Sentiment fetch degraded. Using neutral sentiment: {exc}")
+                sentiment = 0.5
+            decision = runtime.risk_manager.evaluate_trade_signal(
+                DEFAULT_SYMBOL,
+                probability,
+                signal_price=float(features.get("signal_price", features.get("close", 0.0))),
+                market_price=float(features.get("market_price", features.get("close", 0.0))),
+                active_trades=runtime.executor.active_trades,  # One-signal guard
+            )
+            signal = decision["action"]
+            runtime.latest_features = features
+            runtime.latest_probability = probability
+            runtime.latest_sentiment = sentiment
+
+            exit_candidates = await runtime.executor.check_exit_conditions(
+                symbol=DEFAULT_SYMBOL,
+                current_probability=probability,
+                structure_break_signal=float(features.get("structure_break_signal", 0.0)),
+                current_price=float(features.get("close", 0.0)),
+            )
+            if exit_candidates:
+                for exit_candidate in exit_candidates:
+                    _update_trade_ticket_status(
+                        exit_candidate["order_id"],
+                        "SQUARING OFF",
+                        trigger_source="autonomous_exit",
+                    )
+
+                await _publish_snapshot(
+                    "trade.square_off_started",
+                    "HOLD",
+                    probability,
+                    sentiment,
+                    features,
+                    None,
+                )
+
+                for exit_candidate in exit_candidates:
+                    close_result = await runtime.executor.square_off_trade(
+                        exit_candidate["order_id"],
+                        current_price=float(features.get("close", 0.0)),
+                        exit_reason=exit_candidate["exit_reason"],
+                    )
+                    if close_result is not None:
+                        _update_trade_ticket_status(
+                            exit_candidate["order_id"],
+                            "SQUARED_OFF",
+                            trigger_source="autonomous_exit",
+                        )
+                        # Arm the 5-minute revenge-trading cooldown
+                        runtime.risk_manager.record_trade_closed(DEFAULT_SYMBOL)
+                    else:
+                        _update_trade_ticket_status(
+                            exit_candidate["order_id"],
+                            "EXIT_FAILED",
+                            trigger_source="autonomous_exit",
+                        )
+
+                await _publish_snapshot(
+                    "trade.closed",
+                    "HOLD",
+                    probability,
+                    sentiment,
+                    features,
+                    None,
+                )
+                runtime.last_signal = "HOLD"
+                continue
+
+            if signal == "BUY":
+                runtime.sim_pnl += (probability - 0.5) * 100
+            elif signal == "SELL":
+                runtime.sim_pnl += (0.5 - probability) * 100
+
+            execution_plan = None
+            if signal != "HOLD":
+                execution_plan = _build_order_details(
+                    signal=signal,
+                    features=features,
+                    style_key=DEFAULT_STYLE,
+                    capital=runtime.risk_manager.total_capital,
+                    probability=probability,
+                )
+
+            live_price = float(features.get("close", 0.0))
+            logger.info(
+                "⚡ INFERENCE | price=${:.2f} | prob={:.4f} | signal={} | mode={}",
+                live_price,
+                probability,
+                signal,
+                runtime.risk_manager.execution_mode,
+            )
+
+            # In autonomous mode: fire on every BUY/SELL cycle (not just on first change)
+            # In manual mode: fire only on signal transition to avoid flooding the trade log
+            is_autonomous = runtime.risk_manager.autonomous_mode
+            signal_changed = signal != runtime.last_signal
+            has_open_position = len(runtime.executor.list_active_trades()) > 0
+            should_route_signal = (
+                signal != "HOLD"
+                and execution_plan is not None
+                and (signal_changed or is_autonomous)
+                and not has_open_position  # one trade at a time — prevent position stacking
+            )
+
+            if should_route_signal:
+                order_id = str(uuid.uuid4())[:8]
+                executed = False
+                if not decision["requires_manual_approval"]:
+                    logger.info(
+                    "Autonomous execution | signal={} | probability={:.4f} | price=${:.2f} | zone={}",
+                        signal,
+                        probability,
+                        live_price,
+                        probability_zone,
+                    )
+                    execution_result = await _execute_signal_order(
+                        signal=signal,
+                        execution_plan=execution_plan,
+                        order_id=order_id,
+                        trigger_source="autonomous_engine",
+                    )
+                    executed = execution_result is not None
+
+                trade_ticket = _build_trade_ticket(
+                    order_id=order_id,
+                    signal=signal,
+                    probability=probability,
+                    sentiment=sentiment,
+                    features=features,
+                    execution_plan=execution_plan,
+                    trigger_source=(
+                        "autonomous_engine"
+                        if not decision["requires_manual_approval"]
+                        else "signal_engine"
+                    ),
+                )
+                trade_ticket.status = "EXECUTED" if executed else trade_ticket.status
+                runtime.trade_history.insert(0, trade_ticket)
+                runtime.trade_history = runtime.trade_history[:50]
+                await _publish_snapshot(
+                    "trade.executed" if executed else "trade.staged",
+                    signal,
+                    probability,
+                    sentiment,
+                    features,
+                    execution_plan,
+                )
+            else:
+                await _publish_snapshot(
+                    "signal.update",
+                    signal,
+                    probability,
+                    sentiment,
+                    features,
+                    execution_plan,
+                )
+
+            runtime.last_signal = signal
+            runtime.last_probability_zone = probability_zone
+        except Exception as exc:
+            logger.exception(f"Dashboard inference loop error: {exc}")
+            fallback_features = _sanitize_features(runtime.latest_features)
+            runtime.latest_features = fallback_features
+            runtime.latest_probability = 0.5
+            runtime.latest_sentiment = 0.5
+            runtime.last_signal = "HOLD"
+            runtime.last_probability_zone = "NEUTRAL"
+            await _publish_snapshot(
+                "signal.update",
+                "HOLD",
+                0.5,
+                0.5,
+                fallback_features,
+                None,
+            )
+
+        await asyncio.sleep(INFERENCE_LOOP_INTERVAL_SECONDS)
+
+
+async def database_heartbeat_loop():
+    await asyncio.sleep(5)
+    while True:
+        try:
+            is_healthy = await db_manager.ping()
+            new_status = "connected" if is_healthy else "disconnected"
+            if new_status != runtime.db_status:
+                logger.warning(f"Database status changed: {runtime.db_status} -> {new_status}")
+                runtime.db_status = new_status
+                if runtime.latest_snapshot:
+                    runtime.latest_snapshot.session.db_status = new_status
+                    await runtime.broadcaster.broadcast("session.db_status", runtime.latest_snapshot)
+        except Exception as exc:
+            logger.error(f"Heartbeat loop error: {exc}")
+        await asyncio.sleep(60)
+
+
+async def news_loop():
+    await asyncio.sleep(1)
+    while True:
+        try:
+            headlines = await runtime.news_fetcher.fetch_news("BTC,ETH,MACRO")
+            if headlines:
+                runtime.latest_news = headlines[:15]
+                if runtime.latest_snapshot is not None:
+                    runtime.latest_snapshot.news = runtime.latest_news[:12]
+                    await runtime.broadcaster.broadcast(
+                        "news.update",
+                        runtime.latest_snapshot,
+                    )
+        except Exception as exc:
+            logger.warning(f"Dashboard news loop degraded: {exc}")
+
+        await asyncio.sleep(300)
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
-    logger.info("Starting Apex WebSocket Broadcast Server on port 8080...")
-    await db_manager.connect()
-    asyncio.create_task(inference_loop())
-    asyncio.create_task(news_loop())
-    yield
-    logger.info("Shutting down WebSocket server...")
-    await db_manager.disconnect()
+async def lifespan(_: FastAPI):
+    logger.info("Starting Apex Command Center backend on port 8080...")
+    try:
+        await db_manager.connect()
+        runtime.latest_warmup_status = await db_manager.get_warmup_status(DEFAULT_SYMBOL)
+        purge_summary = await purge_stale_market_data(db_manager.pg_pool)
+        logger.warning("Startup nuclear reset completed before ws_server activation: {}", purge_summary)
+    except Exception as exc:
+        logger.warning(f"Database startup degraded. Dashboard will run in fallback mode: {exc}")
+
+    if runtime.executor.live_trading_enabled:
+        await runtime.executor.connect()
+
+    inference_task = asyncio.create_task(inference_loop())
+    news_task = asyncio.create_task(news_loop())
+    heartbeat_task = asyncio.create_task(database_heartbeat_loop())
+
+    try:
+        yield
+    finally:
+        inference_task.cancel()
+        news_task.cancel()
+        heartbeat_task.cancel()
+        await asyncio.gather(inference_task, news_task, heartbeat_task, return_exceptions=True)
+        await runtime.executor.disconnect()
+        await db_manager.disconnect()
+        logger.info("Apex Command Center backend stopped.")
 
 
 app = FastAPI(
     title="Apex Command Center API",
-    version="3.0",
-    lifespan=lifespan
+    version="4.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -64,237 +960,213 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ─── Connected WebSocket Clients ────────────────────────────────────
-connected_clients: List[WebSocket] = []
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "service": "apex-command-center"}
 
 
-async def broadcast(payload: dict):
-    """Send data to all connected WebSocket clients."""
-    dead = []
-    message = json.dumps(payload)
-    for ws in connected_clients:
-        try:
-            await ws.send_text(message)
-        except Exception:
-            dead.append(ws)
-    for ws in dead:
-        connected_clients.remove(ws)
-
-
-# ─── WebSocket: Live Data Stream ────────────────────────────────────
 @app.websocket("/ws/live")
 async def ws_live(websocket: WebSocket):
-    await websocket.accept()
-    connected_clients.append(websocket)
-    logger.info(f"Client connected. Total clients: {len(connected_clients)}")
+    await runtime.broadcaster.connect(websocket, runtime.latest_snapshot)
     try:
         while True:
-            try:
-                await asyncio.wait_for(websocket.receive_text(), timeout=0.1)
-            except asyncio.TimeoutError:
-                pass
-            await asyncio.sleep(0.05)
+            await websocket.receive_text()
     except WebSocketDisconnect:
-        connected_clients.remove(websocket)
+        await runtime.broadcaster.disconnect(websocket)
 
 
-        logger.info(f"Client disconnected. Total clients: {len(connected_clients)}")
-
-
-# ─── Order Detail Calculator ─────────────────────────────────────────
-def _build_order_details(signal: str, features: dict, style_key: str, capital: float) -> dict:
-    """
-    Compute full broker-style order details from live features and style profile.
-    Uses ATR-based stop loss and take profit for a realistic R:R.
-    """
-    style = TRADING_PROFILES["styles"].get(style_key, TRADING_PROFILES["styles"]["Intraday"])
-    entry = features.get("close", 0.0)
-    atr = features.get("ATR", entry * 0.005)
-
-    if signal == "BUY":
-        stop_loss = round(entry - (atr * 1.5), 2)
-        take_profit = round(entry + (atr * 3.0), 2)  # 1:2 R:R
-    else:  # SELL / SHORT
-        stop_loss = round(entry + (atr * 1.5), 2)
-        take_profit = round(entry - (atr * 3.0), 2)
-
-    risk_per_unit = abs(entry - stop_loss)
-    reward_per_unit = abs(entry - take_profit)
-    risk_reward = round(reward_per_unit / risk_per_unit, 2) if risk_per_unit > 0 else 0.0
-
-    # Size position to risk exactly 1% of capital
-    risk_capital = capital * 0.01
-    position_qty = round(risk_capital / risk_per_unit, 4) if risk_per_unit > 0 else 0.0
-    allocation = round(position_qty * entry, 2)
+@app.websocket("/ws/console")
+async def ws_console(websocket: WebSocket):
+    await websocket.accept()
+    # Send all recent logs immediately
+    for log in list(recent_logs):
+        await websocket.send_text(log)
     
-    # Calculate implied leverage
-    leverage = round(allocation / capital, 1) if capital > 0 else 1.0
-
-    est_pnl = round(position_qty * reward_per_unit, 2)
-    max_loss = round(position_qty * risk_per_unit, 2)
-
-    return {
-        "entry_price": round(entry, 2),
-        "stop_loss": stop_loss,
-        "take_profit": take_profit,
-        "risk_reward": risk_reward,
-        "position_qty": position_qty,
-        "allocation": allocation,
-        "leverage": leverage,
-        "est_pnl": est_pnl,
-        "max_loss": max_loss,
-        "sl_distance_pct": round((risk_per_unit / entry) * 100, 3) if entry > 0 else 0,
-        "tp_distance_pct": round((reward_per_unit / entry) * 100, 3) if entry > 0 else 0,
-        "style": style_key,
-        "timeframe": style["timeframe"],
-    }
+    q = asyncio.Queue()
+    console_queues.append(q)
+    try:
+        while True:
+            msg = await q.get()
+            await websocket.send_text(msg)
+    except WebSocketDisconnect:
+        if q in console_queues:
+            console_queues.remove(q)
 
 
-# ─── Background: Inference Broadcast Loop ───────────────────────────
-async def inference_loop():
-    """
-    Runs inference every 10 seconds.
-    Trade Cards are ONLY created when the signal CHANGES (e.g. HOLD→SELL),
-    eliminating duplicate card spam.
-    """
-    global sim_pnl
-    await asyncio.sleep(3)
-
-    last_signal = "HOLD"  # Tracks the previous cycle's signal
-
-    while True:
-        try:
-            fetcher = DataFetcher(db_manager)
-            df = await fetcher.build_dataset("btcusdt")
-
-            if df.empty:
-                await asyncio.sleep(10)
-                continue
-
-            prob = quant_model.predict(df)
-            sentiment = await db_manager.fetch_latest_sentiment()
-
-            style = TRADING_PROFILES["styles"]["Intraday"]
-            if prob > style["buy_threshold"]:
-                signal = "BUY"
-            elif prob < style["sell_threshold"]:
-                signal = "SELL"
-            else:
-                signal = "HOLD"
-
-            # Accumulate simulated PnL
-            if signal == "BUY":
-                sim_pnl += (prob - 0.5) * 100
-            elif signal == "SELL":
-                sim_pnl += (0.5 - prob) * 100
-
-            # Extract live feature weights
-            row = df.iloc[0]
-            features = {k: round(float(v), 6) for k, v in row.items()
-                        if k not in ['timestamp', 'symbol']}
-
-            # ── Only emit a trade card when the signal direction changes ──
-            order_id = None
-            if signal != "HOLD" and signal != last_signal:
-                order_id = str(uuid.uuid4())[:8]
-                order_details = _build_order_details(signal, features, "Intraday", total_capital)
-                trade_entry = {
-                    "order_id": order_id,
-                    "time": datetime.now().strftime("%I:%M %p"),
-                    "date": datetime.now().strftime("%b %d, %Y"),
-                    "signal": signal,
-                    "probability": round(prob, 4),
-                    "symbol": "BTCUSDT",
-                    "features": features,
-                    "sentiment": round(sentiment, 4) if sentiment else 0.5,
-                    **order_details,
-                }
-                trade_history.append(trade_entry)
-                if len(trade_history) > 50:
-                    trade_history.pop(0)
-                logger.info(f"New trade card: {signal} @ {features.get('close', 0):.2f} | P={prob:.4f} | TP={order_details['take_profit']} | SL={order_details['stop_loss']}")
-
-            last_signal = signal
-
-            payload = {
-                "type": "inference",
-                "timestamp": datetime.now().isoformat(),
-                "symbol": "BTCUSDT",
-                "probability": round(prob, 4),
-                "signal": signal,
-                "sentiment": round(sentiment, 4) if sentiment else 0.5,
-                "sim_pnl": round(sim_pnl, 2),
-                "total_capital": total_capital,
-                "features": features,
-                "order_id": order_id,
-                "close_price": features.get("close", 0),
-                "rsi": features.get("RSI", 50),
-                "vwap": features.get("VWAP", 0),
-                "atr": features.get("ATR", 0),
-            }
-
-            await broadcast(payload)
-
-        except Exception as e:
-            logger.error(f"Inference loop error: {e}")
-
-        await asyncio.sleep(10)
-
-
-async def news_loop():
-    """Fetches latest crypto headlines every 5 minutes."""
-    global latest_news
-    await asyncio.sleep(2)
-
-    while True:
-        try:
-            headlines = await news_fetcher.fetch_news("BTC,ETH,MACRO")
-            if headlines:
-                latest_news = headlines[:15]
-        except Exception as e:
-            logger.error(f"News loop error: {e}")
-
-        await asyncio.sleep(300)
-
-
-# ─── REST Endpoints ─────────────────────────────────────────────────
-
-@app.put("/api/capital")
-async def update_capital(update: CapitalUpdate):
-    """Sync total_capital from the frontend."""
-    global total_capital
-    total_capital = update.total_capital
-    logger.info(f"Capital updated to ${total_capital:.2f}")
-    return {"status": "ok", "total_capital": total_capital}
+@app.get("/api/dashboard/snapshot")
+async def get_dashboard_snapshot():
+    if runtime.latest_snapshot is None:
+        runtime.latest_warmup_status = await db_manager.get_warmup_status(DEFAULT_SYMBOL)
+        snapshot = _build_snapshot(
+            signal="HOLD",
+            probability=0.5,
+            sentiment=0.5,
+            features=_build_synthetic_features(),
+            execution_plan=None,
+            warmup_status=runtime.latest_warmup_status,
+        )
+        return snapshot
+    return runtime.latest_snapshot
 
 
 @app.get("/api/capital")
 async def get_capital():
-    return {"total_capital": total_capital}
+    return {"total_capital": runtime.risk_manager.total_capital}
 
 
-@app.get("/inference/details/{order_id}")
-async def get_trade_details(order_id: str):
-    """Returns the full trade details for a specific order."""
-    for trade in trade_history:
-        if trade["order_id"] == order_id:
-            return trade
-    raise HTTPException(status_code=404, detail="Trade not found")
+@app.put("/api/capital")
+async def update_capital(update: CapitalUpdate):
+    runtime.risk_manager.update_capital(update.total_capital)
+    if update.trade_allocation is not None:
+        runtime.risk_manager.trade_allocation = update.trade_allocation
+    if runtime.latest_snapshot is not None:
+        await _refresh_snapshot("session.capital")
+    return {"status": "ok", "total_capital": runtime.risk_manager.total_capital}
+
+
+@app.get("/api/risk/professional-trader")
+async def get_professional_trader_mode():
+    return {
+        "enabled": runtime.risk_manager.professional_trader_enabled,
+        "autonomous_mode": runtime.risk_manager.autonomous_mode,
+        "execution_mode": runtime.risk_manager.execution_mode,
+    }
+
+
+@app.put("/api/risk/professional-trader")
+async def update_professional_trader_mode(update: ProfessionalTraderUpdate):
+    execution_mode = runtime.risk_manager.set_professional_trader_mode(update.enabled)
+
+    if runtime.latest_snapshot is not None:
+        await _refresh_snapshot("risk.mode")
+
+    return {
+        "status": "ok",
+        "enabled": update.enabled,
+        "autonomous_mode": runtime.risk_manager.autonomous_mode,
+        "execution_mode": execution_mode,
+    }
+
+
+@app.post("/api/orders/execute")
+async def execute_now(request: ManualExecutionRequest):
+    card = runtime.latest_signal_card
+    if card is None or card.execution_plan is None or card.signal == "HOLD":
+        raise HTTPException(status_code=409, detail="No active signal available for manual execution.")
+
+    order_id = request.order_id or str(uuid.uuid4())[:8]
+    execution_result = await _execute_signal_order(
+        signal=card.signal,
+        execution_plan=card.execution_plan,
+        order_id=order_id,
+        trigger_source=request.reason,
+    )
+    if execution_result is None:
+        raise HTTPException(status_code=409, detail="Order execution was rejected because size is zero.")
+
+    trade_ticket = _build_trade_ticket(
+        order_id=order_id,
+        signal=card.signal,
+        probability=card.bullish_probability,
+        sentiment=runtime.latest_snapshot.market.sentiment if runtime.latest_snapshot else 0.5,
+        features=runtime.latest_features or _build_synthetic_features(),
+        execution_plan=card.execution_plan,
+        trigger_source=request.reason,
+    )
+    trade_ticket.status = "EXECUTED"
+    runtime.trade_history.insert(0, trade_ticket)
+    runtime.trade_history = runtime.trade_history[:50]
+
+    snapshot = _build_snapshot(
+        signal=card.signal,
+        probability=card.bullish_probability,
+        sentiment=runtime.latest_snapshot.market.sentiment if runtime.latest_snapshot else 0.5,
+        features=trade_ticket.features,
+        execution_plan=card.execution_plan,
+    )
+    await runtime.broadcaster.broadcast("trade.executed", snapshot)
+    return {"status": "ok", "order_id": order_id}
+
+
+@app.get("/api/orders/active")
+async def get_active_trades():
+    current_price = 0.0
+    if runtime.latest_snapshot is not None:
+        current_price = runtime.latest_snapshot.market.close_price
+    elif runtime.latest_features:
+        current_price = float(runtime.latest_features.get("close", 0.0))
+
+    runtime.executor.sync_live_prices(DEFAULT_SYMBOL, current_price)
+    return {"active_trades": runtime.executor.list_active_trades()}
+
+
+@app.post("/api/orders/close/{order_id}")
+async def close_trade(order_id: str):
+    current_price = 0.0
+    if runtime.latest_snapshot is not None:
+        current_price = runtime.latest_snapshot.market.close_price
+    elif runtime.latest_features:
+        current_price = float(runtime.latest_features.get("close", 0.0))
+
+    _update_trade_ticket_status(order_id, "SQUARING OFF", trigger_source="manual_close")
+    if runtime.latest_snapshot is not None:
+        await _refresh_snapshot("trade.square_off_started")
+
+    close_result = await runtime.executor.close_trade(order_id, current_price=current_price)
+    if close_result is None:
+        raise HTTPException(status_code=404, detail="Active trade not found.")
+
+    _update_trade_ticket_status(order_id, "SQUARED_OFF", trigger_source="manual_close")
+    # Arm the 5-minute revenge-trading cooldown
+    runtime.risk_manager.record_trade_closed(DEFAULT_SYMBOL)
+    if runtime.latest_snapshot is not None:
+        await _refresh_snapshot("trade.closed")
+
+    return {"status": "ok", "order_id": order_id, "closed_trade": close_result["closed_trade"]}
+
+
+@app.post("/api/orders/clear-stale")
+async def clear_stale_trades():
+    await runtime.executor.clear_all_stale_trades()
+    if runtime.latest_snapshot is not None:
+        await _refresh_snapshot("trades.cleared")
+    return {"status": "ok"}
 
 
 @app.get("/api/trades")
 async def get_trades():
-    """Returns the last 50 trades."""
-    return {"trades": trade_history[-50:]}
+    return {"trades": runtime.trade_history[:50]}
+
+
+@app.get("/inference/details/{order_id}")
+async def get_trade_details(order_id: str):
+    for trade in runtime.trade_history:
+        if trade.order_id == order_id:
+            return trade
+    raise HTTPException(status_code=404, detail="Trade not found")
 
 
 @app.get("/api/profiles")
 async def get_profiles():
-    """Returns available trading profiles."""
     return TRADING_PROFILES
 
 
 @app.get("/api/news")
 async def get_news():
-    """Returns the latest fetched crypto headlines."""
-    return {"news": latest_news}
+    return {"news": runtime.latest_news[:15]}
+
+
+@app.get("/api/market/tick")
+async def get_market_tick():
+    """Zero-latency price endpoint: reads directly from Redis candle key.
+    Frontend polls this every 100 ms for tick-for-tick price parity with TradingView."""
+    redis_price = await _get_redis_live_price()
+    # Fall back gracefully to latest snapshot price when Redis is cold / warming up
+    if redis_price <= 0.0 and runtime.latest_snapshot is not None:
+        redis_price = runtime.latest_snapshot.market.close_price
+    return {
+        "price": redis_price,
+        "symbol": DEFAULT_SYMBOL,
+        "ts": datetime.utcnow().isoformat(),
+    }

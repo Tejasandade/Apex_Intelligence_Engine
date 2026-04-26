@@ -31,3 +31,10 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Runtime Data
+data/runtime/
+
+# Temporary Scripts
+patch_*.py
+test_*.py

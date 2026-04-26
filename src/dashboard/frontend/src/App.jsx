@@ -1,502 +1,497 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import ActiveTrades from './components/ActiveTrades.jsx'
+import SmartOrderCard from './components/SmartOrderCard.jsx'
+import TerminalConsole from './components/TerminalConsole.jsx'
 
-const WS_URL = 'ws://127.0.0.1:8080/ws/live'
 const API_URL = 'http://127.0.0.1:8080'
+const WS_URL = 'ws://127.0.0.1:8080/ws/live'
 
-const ASSETS = [
-  { key: 'BTCUSDT', name: 'Bitcoin (BTC/USDT)', class: 'Crypto' },
-  { key: 'NIFTY50', name: 'Nifty 50 Index', class: 'Index' },
-  { key: 'EURUSD', name: 'EUR/USD', class: 'Forex' },
-]
+// ---------------------------------------------------------------------------
+// TradingView Advanced Real-Time Chart — clean embed URL
+// ---------------------------------------------------------------------------
+function TradingViewChart({ symbol = 'BINANCE:BTCUSDTPERP' }) {
+  const src =
+    `https://s.tradingview.com/widgetembed/?symbol=${encodeURIComponent(symbol)}` +
+    `&interval=1&theme=dark&style=1&locale=en` +
+    `&toolbar_bg=%23141418&enable_publishing=0` +
+    `&allow_symbol_change=0&save_image=0&hide_top_toolbar=0` +
+    `&withdateranges=1&hide_side_toolbar=0` +
+    `&container_id=tradingview_apex`
 
-const STYLES = [
-  { key: 'Scalping', desc: 'Ultra-short 1m entries', trail: '0.3%', tp: '0.5%' },
-  { key: 'Intraday', desc: 'Same-day, 15m timeframe', trail: '1.0%', tp: '2.0%' },
-  { key: 'Swing', desc: 'Multi-day trend following', trail: '3.0%', tp: '8.0%' },
-]
+  return (
+    <section className="panel tradingview-hero" aria-label="Live Price Chart">
+      <div className="panel-title-row">
+        <div className="panel-title">Live Chart — {symbol}</div>
+        <div className="chart-badge">BINANCE · REAL-TIME</div>
+      </div>
+      <div className="tradingview-wrapper">
+        <iframe
+          id="tradingview_apex"
+          title={`TradingView Advanced Chart — ${symbol}`}
+          src={src}
+          frameBorder="0"
+          allowTransparency="true"
+          scrolling="no"
+          allow="autoplay"
+          style={{ width: '100%', height: '100%', border: 'none', display: 'block' }}
+        />
+      </div>
+    </section>
+  )
+}
+
+function formatCurrency(value) {
+  if (value == null || Number.isNaN(Number(value))) return '--'
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    maximumFractionDigits: 2,
+  }).format(Number(value))
+}
 
 function App() {
-  const [data, setData] = useState(null)
-  const [probHistory, setProbHistory] = useState([])
-  const [trades, setTrades] = useState([])
-  const [selectedAsset, setSelectedAsset] = useState('BTCUSDT')
-  const [selectedStyle, setSelectedStyle] = useState('Intraday')
-  const [capital, setCapital] = useState(10000)
-  const [capitalInput, setCapitalInput] = useState('10000')
-  const [modalTrade, setModalTrade] = useState(null)
-  const [showFeatures, setShowFeatures] = useState(false)
-  const [wsConnected, setWsConnected] = useState(false)
-  const [cycleCount, setCycleCount] = useState(0)
-  const [newsList, setNewsList] = useState([])
   const wsRef = useRef(null)
-  const canvasRef = useRef(null)
+  const [snapshot, setSnapshot] = useState(null)
+  const [capitalInput, setCapitalInput] = useState('10000')
+  const [tradeAllocationInput, setTradeAllocationInput] = useState('0')
+  const [wsConnected, setWsConnected] = useState(false)
+  const [savingCapital, setSavingCapital] = useState(false)
+  const [togglingMode, setTogglingMode] = useState(false)
+  const [executing, setExecuting] = useState(false)
+  const [closingOrderId, setClosingOrderId] = useState(null)
+  const [livePrice, setLivePrice] = useState(null)
+  const [tickActive, setTickActive] = useState(false)
+  const [pollFailures, setPollFailures] = useState(0)
 
-  // WebSocket connection
+  // 100ms Zero-Latency Price Polling from Redis Bridge
   useEffect(() => {
-    const connect = () => {
-      const ws = new WebSocket(WS_URL)
-      wsRef.current = ws
+    let active = true
+    const pollPrice = async () => {
+      try {
+        const res = await fetch(`${API_URL}/api/market/tick`)
+        if (!res.ok) throw new Error('Bad response')
+        const data = await res.json()
+        if (active && data?.price > 0) {
+          setLivePrice(data.price)
+          setTickActive(true)
+          setPollFailures(0)
+          setTimeout(() => { if (active) setTickActive(false) }, 50)
+        }
+      } catch (err) {
+        if (active) setPollFailures(prev => prev + 1)
+      } finally {
+        if (active) setTimeout(pollPrice, 100)
+      }
+    }
+    pollPrice()
+    return () => { active = false }
+  }, [])
 
-      ws.onopen = () => {
+  useEffect(() => {
+    let active = true
+
+    const loadSnapshot = async () => {
+      try {
+        const response = await fetch(`${API_URL}/api/dashboard/snapshot`)
+        const data = await response.json()
+        if (!active) return
+        setSnapshot(data)
+        setCapitalInput(String(data?.session?.total_capital ?? 10000))
+        setTradeAllocationInput(String(data?.session?.trade_allocation ?? 0))
+      } catch (error) {
+        console.error('Failed to load dashboard snapshot', error)
+      }
+    }
+
+    loadSnapshot()
+
+    const connect = () => {
+      const websocket = new WebSocket(WS_URL)
+      wsRef.current = websocket
+
+      websocket.onopen = () => {
         setWsConnected(true)
-        console.log('[WS] Connected to Apex backend')
+        websocket.send(JSON.stringify({ type: 'dashboard.subscribe' }))
       }
 
-      ws.onmessage = (event) => {
+      websocket.onmessage = (event) => {
         try {
-          const payload = JSON.parse(event.data)
-          if (payload.type === 'inference') {
-            setData(payload)
-            setCycleCount(c => c + 1)
-            setProbHistory(prev => {
-              const next = [...prev, { time: new Date(), prob: payload.probability }]
-              return next.slice(-80)
-            })
-            if (payload.order_id) {
-              setTrades(prev => {
-                // Strict deduplication by order_id
-                if (prev.some(t => t.order_id === payload.order_id)) return prev;
-                const next = [{
-                  order_id: payload.order_id,
-                  time: payload.time || new Date().toLocaleTimeString(),
-                  date: payload.date || new Date().toLocaleDateString(),
-                  signal: payload.signal,
-                  probability: payload.probability,
-                  symbol: payload.symbol,
-                  entry_price: payload.entry_price,
-                  take_profit: payload.take_profit,
-                  stop_loss: payload.stop_loss,
-                  est_pnl: payload.est_pnl,
-                  max_loss: payload.max_loss,
-                  position_qty: payload.position_qty,
-                  leverage: payload.leverage,
-                }, ...prev]
-                return next.slice(0, 50)
-              })
-            }
+          const message = JSON.parse(event.data)
+          if (message?.payload) {
+            setSnapshot(message.payload)
           }
-        } catch (e) {
-          console.error('[WS] Parse error:', e)
+        } catch (error) {
+          console.error('Failed to parse WebSocket payload', error)
         }
       }
 
-      ws.onclose = () => {
+      websocket.onclose = () => {
         setWsConnected(false)
-        console.log('[WS] Disconnected, reconnecting in 3s...')
-        setTimeout(connect, 3000)
+        if (active) window.setTimeout(connect, 3000)
       }
 
-      ws.onerror = () => ws.close()
+      websocket.onerror = () => websocket.close()
     }
 
     connect()
-    return () => wsRef.current?.close()
+
+    return () => {
+      active = false
+      wsRef.current?.close()
+    }
   }, [])
 
-  // Fetch News periodically
-  useEffect(() => {
-    const fetchNews = async () => {
-      try {
-        const res = await fetch(`${API_URL}/api/news`)
-        const data = await res.json()
-        if (data.news) setNewsList(data.news)
-      } catch (e) {
-        console.error('Failed to fetch news', e)
-      }
-    }
-    fetchNews()
-    const interval = setInterval(fetchNews, 60000) // update every minute
-    return () => clearInterval(interval)
-  }, [])
-
-  // Draw probability chart on canvas
-  useEffect(() => {
-    const canvas = canvasRef.current
-    if (!canvas || probHistory.length < 2) return
-    const ctx = canvas.getContext('2d')
-    const W = canvas.width = canvas.offsetWidth * 2
-    const H = canvas.height = canvas.offsetHeight * 2
-    ctx.scale(2, 2)
-    const w = W / 2, h = H / 2
-
-    ctx.clearRect(0, 0, w, h)
-
-    // Background
-    ctx.fillStyle = 'rgba(10, 10, 15, 0.3)'
-    ctx.fillRect(0, 0, w, h)
-
-    // Buy zone
-    const buyY = h * (1 - 0.55)
-    ctx.fillStyle = 'rgba(63, 185, 80, 0.04)'
-    ctx.fillRect(0, 0, w, buyY)
-
-    // Sell zone
-    const sellY = h * (1 - 0.45)
-    ctx.fillStyle = 'rgba(248, 81, 73, 0.04)'
-    ctx.fillRect(0, sellY, w, h - sellY)
-
-    // Grid lines
-    ctx.strokeStyle = 'rgba(48, 54, 61, 0.3)'
-    ctx.lineWidth = 0.5
-    for (let i = 0; i <= 10; i++) {
-      const y = (h / 10) * i
-      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke()
-    }
-
-    // Threshold lines
-    ctx.setLineDash([4, 4])
-    ctx.strokeStyle = 'rgba(63, 185, 80, 0.4)'
-    ctx.beginPath(); ctx.moveTo(0, buyY); ctx.lineTo(w, buyY); ctx.stroke()
-    ctx.strokeStyle = 'rgba(248, 81, 73, 0.4)'
-    ctx.beginPath(); ctx.moveTo(0, sellY); ctx.lineTo(w, sellY); ctx.stroke()
-    ctx.strokeStyle = 'rgba(139, 148, 158, 0.2)'
-    ctx.beginPath(); ctx.moveTo(0, h * 0.5); ctx.lineTo(w, h * 0.5); ctx.stroke()
-    ctx.setLineDash([])
-
-    // Probability line
-    const points = probHistory.map((p, i) => ({
-      x: (i / (probHistory.length - 1)) * w,
-      y: h * (1 - p.prob),
-    }))
-
-    // Fill
-    ctx.beginPath()
-    ctx.moveTo(points[0].x, h)
-    points.forEach(p => ctx.lineTo(p.x, p.y))
-    ctx.lineTo(points[points.length - 1].x, h)
-    ctx.closePath()
-    const grad = ctx.createLinearGradient(0, 0, 0, h)
-    grad.addColorStop(0, 'rgba(88, 166, 255, 0.15)')
-    grad.addColorStop(1, 'rgba(88, 166, 255, 0)')
-    ctx.fillStyle = grad
-    ctx.fill()
-
-    // Line
-    ctx.beginPath()
-    ctx.moveTo(points[0].x, points[0].y)
-    points.forEach(p => ctx.lineTo(p.x, p.y))
-    ctx.strokeStyle = '#58a6ff'
-    ctx.lineWidth = 2
-    ctx.stroke()
-
-    // Last point glow
-    const last = points[points.length - 1]
-    ctx.beginPath()
-    ctx.arc(last.x, last.y, 4, 0, Math.PI * 2)
-    ctx.fillStyle = '#58a6ff'
-    ctx.fill()
-    ctx.beginPath()
-    ctx.arc(last.x, last.y, 8, 0, Math.PI * 2)
-    ctx.strokeStyle = 'rgba(88, 166, 255, 0.4)'
-    ctx.lineWidth = 1
-    ctx.stroke()
-
-    // Labels
-    ctx.fillStyle = 'rgba(63, 185, 80, 0.6)'
-    ctx.font = '10px JetBrains Mono'
-    ctx.fillText('BUY', w - 30, buyY - 4)
-    ctx.fillStyle = 'rgba(248, 81, 73, 0.6)'
-    ctx.fillText('SELL', w - 30, sellY + 12)
-
-  }, [probHistory])
-
-  // Capital sync
-  const syncCapital = useCallback(async () => {
+  const syncCapital = async () => {
+    setSavingCapital(true)
     try {
-      const res = await fetch(`${API_URL}/api/capital`, {
+      const response = await fetch(`${API_URL}/api/capital`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ total_capital: parseFloat(capitalInput) }),
+        body: JSON.stringify({
+          total_capital: Number(capitalInput),
+          trade_allocation: Number(tradeAllocationInput)
+        }),
       })
-      const result = await res.json()
-      setCapital(result.total_capital)
-    } catch (e) {
-      console.error('Capital sync failed:', e)
+      const data = await response.json()
+      setCapitalInput(String(data.total_capital))
+      setTradeAllocationInput(String(data.trade_allocation ?? 0))
+    } catch (error) {
+      console.error('Failed to sync capital', error)
+    } finally {
+      setSavingCapital(false)
     }
-  }, [capitalInput])
+  }
 
-  // Fetch trade details
-  const openTradeDetail = useCallback(async (orderId) => {
+  const clearStaleTrades = async () => {
     try {
-      const res = await fetch(`${API_URL}/inference/details/${orderId}`)
-      const detail = await res.json()
-      setModalTrade(detail)
-      setShowFeatures(false) // Reset toggle on new open
-    } catch (e) {
-      console.error('Failed to fetch trade details:', e)
+      await fetch(`${API_URL}/api/orders/clear-stale`, { method: 'POST' })
+    } catch (error) {
+      console.error('Clear stale failed:', error)
     }
-  }, [])
+  }
 
-  const prob = data?.probability ?? 0.5
-  const signal = data?.signal ?? 'HOLD'
-  const pnl = data?.sim_pnl ?? 0
-  const sentiment = data?.sentiment ?? 0.5
+  const toggleProfessionalTrader = async () => {
+    setTogglingMode(true)
+    try {
+      await fetch(`${API_URL}/api/risk/professional-trader`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          enabled: !snapshot?.session?.professional_trader_enabled,
+        }),
+      })
+    } catch (error) {
+      console.error('Failed to toggle Professional Trader mode', error)
+    } finally {
+      setTogglingMode(false)
+    }
+  }
 
-  const probClass = prob > 0.55 ? 'text-bullish' : prob < 0.45 ? 'text-bearish' : 'text-neutral'
-  const signalClass = signal === 'BUY' ? 'text-bullish' : signal === 'SELL' ? 'text-bearish' : 'text-neutral'
-  const pnlClass = pnl > 0 ? 'text-bullish' : pnl < 0 ? 'text-bearish' : 'text-neutral'
-  const sentClass = sentiment > 0.6 ? 'text-bullish' : sentiment < 0.4 ? 'text-bearish' : 'text-neutral'
+  const executeNow = async () => {
+    setExecuting(true)
+    try {
+      await fetch(`${API_URL}/api/orders/execute`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          order_id: snapshot?.smart_order_card?.order_id,
+          symbol: snapshot?.market?.symbol,
+          reason: 'manual_override',
+        }),
+      })
+    } catch (error) {
+      console.error('Manual execution request failed', error)
+    } finally {
+      setExecuting(false)
+    }
+  }
 
-  const styleInfo = STYLES.find(s => s.key === selectedStyle)
+  const closeTrade = async (orderId) => {
+    setClosingOrderId(orderId)
+    try {
+      await fetch(`${API_URL}/api/orders/close/${orderId}`, { method: 'POST' })
+    } catch (error) {
+      console.error('Close trade request failed', error)
+    } finally {
+      setClosingOrderId(null)
+    }
+  }
+
+  const session = snapshot?.session
+  const market = snapshot?.market
+  const trades = snapshot?.trades ?? []
+  const activeTrades = snapshot?.active_trades ?? []
+  const news = snapshot?.news ?? []
+  const hasActiveTrade = activeTrades.length > 0
+  const activeTiers = activeTrades.map(t => t.confidence_tier || 1)
 
   return (
-    <>
-      {/* ── Top Bar ── */}
-      <div className="topbar">
-        <div className="topbar-logo">⚡ APEX COMMAND CENTER</div>
-        <div className="topbar-controls">
-          <select className="topbar-select" value={selectedAsset} onChange={e => setSelectedAsset(e.target.value)}>
-            {ASSETS.map(a => <option key={a.key} value={a.key}>{a.name}</option>)}
-          </select>
-          <select className="topbar-select" value={selectedStyle} onChange={e => setSelectedStyle(e.target.value)}>
-            {STYLES.map(s => <option key={s.key} value={s.key}>{s.key} — {s.desc}</option>)}
-          </select>
-          <div className="topbar-status">
-            <span className={`status-dot ${wsConnected ? 'live' : ''}`}></span>
-            <span>{wsConnected ? 'LIVE' : 'CONNECTING...'}</span>
-            <span style={{ marginLeft: 8, color: '#6e7681' }}>Cycle #{cycleCount}</span>
+    <div className="app-shell">
+      {/* ── Reconnecting Banner ──────────────────────────────────────────────── */}
+      {!wsConnected && (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, right: 0, zIndex: 9999,
+          background: 'linear-gradient(90deg, #b45309, #d97706)',
+          color: '#fff', textAlign: 'center',
+          padding: '8px 16px', fontSize: '0.8rem', fontWeight: 600,
+          letterSpacing: '0.05em', display: 'flex', alignItems: 'center',
+          justifyContent: 'center', gap: '8px',
+          animation: 'pulse 1.5s ease-in-out infinite',
+        }}>
+          <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: '#fff', animation: 'pulse 1s ease-in-out infinite' }} />
+          RECONNECTING TO APEX ENGINE...
+        </div>
+      )}
+      {/* ── Topbar ─────────────────────────────────────────────────────────── */}
+      <header className="topbar">
+        <div className="topbar-brand">
+          <div className="eyebrow">Phase 4</div>
+          <div className="brand">Apex Command Center</div>
+        </div>
+        <div className="topbar-metrics">
+          <div className={`status-chip ${wsConnected ? 'status-chip--live' : ''}`}>
+            {wsConnected ? (
+              <span className={`tick-dot ${pollFailures > 3 ? 'tick-dot--error' : (tickActive ? 'tick-dot--active' : '')}`} />
+            ) : (
+              <span className="status-dot" />
+            )}
+            {wsConnected ? 'LIVE FEED' : 'RECONNECTING'}
+          </div>
+          {session?.db_status === 'disconnected' && (
+            <div className="status-chip" style={{ color: '#ff4d4d', borderColor: '#ff4d4d', backgroundColor: 'rgba(255, 77, 77, 0.1)' }}>
+              <span className="tick-dot" style={{ backgroundColor: '#ff4d4d', boxShadow: '0 0 8px #ff4d4d' }} />
+              <strong>DB OFFLINE</strong>
+            </div>
+          )}
+          <div className="topbar-stat">
+            <span>Cycle</span>
+            <strong>{session?.cycle_count ?? 0}</strong>
+          </div>
+          <div className="topbar-stat">
+            <span>Mode</span>
+            <strong>{session?.execution_mode ?? 'MANUAL'}</strong>
+          </div>
+          <div className="topbar-stat">
+            <span>Capital</span>
+            <strong>{formatCurrency(session?.total_capital)}</strong>
+          </div>
+          <div className={`topbar-stat pnl ${(session?.sim_pnl ?? 0) >= 0 ? 'pnl--pos' : 'pnl--neg'}`}>
+            <span>Session PnL</span>
+            <strong>{formatCurrency(session?.sim_pnl)}</strong>
           </div>
         </div>
-      </div>
+      </header>
 
-      <div className="broker-layout">
-        <aside className="broker-sidebar">
-          {/* ── Capital Control ── */}
-          <div className="capital-section glass-card">
-            <div className="capital-input-group">
-              <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Balance:</span>
+      {/* ── Dashboard Grid ─────────────────────────────────────────────────── */}
+      <main className="dashboard-grid">
+
+        {/* ── LEFT SIDEBAR ─────────────────────────────────────────────────── */}
+        <aside className="sidebar">
+
+          {/* Algo-Vault Toggle */}
+          <section className="panel panel--compact">
+            <div className="panel-title">Algo-Vault</div>
+            <div className="mode-toggle">
+              <div>
+                <div className="mode-label">Pro Trader</div>
+                <div className="mode-copy" style={{ fontSize: '0.72rem' }}>
+                  {session?.professional_trader_enabled
+                    ? '⚡ Autonomous — engine armed.'
+                    : 'Manual approval required.'}
+                </div>
+              </div>
+              <button
+                type="button"
+                id="toggle-professional-trader"
+                className={`toggle-button ${session?.professional_trader_enabled ? 'toggle-button--active' : ''}`}
+                onClick={toggleProfessionalTrader}
+                disabled={togglingMode}
+              >
+                {togglingMode ? '...' : session?.professional_trader_enabled ? 'ON' : 'OFF'}
+              </button>
+            </div>
+          </section>
+
+          {/* Capital Control */}
+          <section className="panel panel--compact">
+            <div className="panel-title">Capital Control</div>
+            <div className="capital-row">
+              <span className="input-label">Total Capital (USD)</span>
               <input
+                id="capital-input"
                 className="capital-input"
                 type="number"
                 value={capitalInput}
-                onChange={e => setCapitalInput(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && syncCapital()}
+                onChange={(e) => setCapitalInput(e.target.value)}
               />
-              <button className="capital-btn" onClick={syncCapital}>Sync</button>
             </div>
-            <div className="capital-metrics">
-              <span>Trail: {styleInfo?.trail}</span>
-              <span>TP: {styleInfo?.tp}</span>
-              <span>VWAP: <strong style={{ color: 'var(--purple)' }}>{data?.vwap?.toFixed(1) ?? '—'}</strong></span>
-              <span>ATR: <strong style={{ color: 'var(--pink)' }}>{data?.atr?.toFixed(2) ?? '—'}</strong></span>
+            <div className="capital-row">
+              <span className="input-label">Trade Amt (USD · 0 = Auto)</span>
+              <input
+                id="trade-allocation-input"
+                className="capital-input"
+                type="number"
+                placeholder="0"
+                value={tradeAllocationInput}
+                onChange={(e) => setTradeAllocationInput(e.target.value)}
+              />
             </div>
-          </div>
-
-          {/* ── HUD Widgets ── */}
-          <div className="sidebar-huds">
-            <div className="glass-card hud-card">
-              <div className="hud-label">Bullish Probability</div>
-              <div className={`hud-value ${probClass}`}>{prob.toFixed(4)}</div>
-              <div className="signal-bar">
-                <div className="signal-marker" style={{ left: `${prob * 100}%` }}></div>
+            <button
+              id="sync-capital-button"
+              type="button"
+              className="action-button"
+              style={{ width: '100%', marginBottom: '10px' }}
+              onClick={syncCapital}
+              disabled={savingCapital}
+            >
+              {savingCapital ? 'Saving...' : '⟳  Sync Settings'}
+            </button>
+            <div className="metric-list">
+              <div className="metric-item">
+                <span>Symbol</span>
+                <strong>{market?.symbol ?? 'BTCUSDT'}</strong>
               </div>
             </div>
+          </section>
 
-            <div className="glass-card hud-card">
-              <div className="hud-label">Active Signal</div>
-              <div className={`hud-value ${signalClass}`}>{signal}</div>
-              <div className="hud-sub">BUY &gt;0.55 · SELL &lt;0.45</div>
+          {/* Live Market Pulse */}
+          <section className="panel panel--compact">
+            <div className="panel-title">Market Pulse</div>
+            <div className="metric-list">
+              {/* Hero Price Row */}
+              <div className="metric-item metric-item--price">
+                <span>Live Price</span>
+                <span className="price-value">{formatCurrency(livePrice ?? market?.close_price)}</span>
+              </div>
+              <div className="metric-item">
+                <span>RSI (14)</span>
+                <strong style={{
+                  color: market?.rsi > 70 ? 'var(--bearish)' : market?.rsi < 30 ? 'var(--bullish)' : 'var(--text)'
+                }}>
+                  {market?.rsi?.toFixed(1) ?? '--'}
+                  {market?.rsi > 70 ? ' ↑OB' : market?.rsi < 30 ? ' ↓OS' : ''}
+                </strong>
+              </div>
+              <div className="metric-item">
+                <span>VWAP</span>
+                <strong style={{
+                  color: (livePrice ?? 0) > (market?.vwap ?? 0) ? 'var(--bullish)' : 'var(--bearish)'
+                }}>{formatCurrency(market?.vwap)}</strong>
+              </div>
+              <div className="metric-item">
+                <span>ATR</span>
+                <strong>{market?.atr?.toFixed(2) ?? '--'}</strong>
+              </div>
+              <div className="metric-item">
+                <span>Signal</span>
+                <strong className={`signal-text signal-text--${(market?.signal ?? 'hold').toLowerCase()}`}>
+                  {market?.signal === 'BUY' ? '▲ BUY' : market?.signal === 'SELL' ? '▼ SELL' : '— HOLD'}
+                </strong>
+              </div>
             </div>
+          </section>
 
-            <div className="glass-card hud-card">
-              <div className="hud-label">Session PnL</div>
-              <div className={`hud-value ${pnlClass}`}>${pnl >= 0 ? '+' : ''}{pnl.toFixed(2)}</div>
-            </div>
-
-            <div className="glass-card hud-card">
-              <div className="hud-label">Macro Sentiment</div>
-              <div className={`hud-value ${sentClass}`}>{sentiment.toFixed(2)}</div>
-            </div>
-          </div>
-
-          {/* ── Probability Chart ── */}
-          <div className="glass-card sidebar-chart">
-            <div className="chart-title">📈 Oscillator</div>
-            <div className="chart-canvas" style={{ height: '140px' }}>
-              <canvas ref={canvasRef} style={{ width: '100%', height: '100%' }}></canvas>
-            </div>
-          </div>
-
-          {/* ── News Widget ── */}
-          <div className="glass-card news-widget">
-            <div className="chart-title">📰 Global Market News</div>
+          {/* Sentiment Wire */}
+          <section className="panel panel--compact panel--news">
+            <div className="panel-title">Sentiment Wire</div>
             <div className="news-list">
-              {newsList.length === 0 ? (
-                <div style={{ color: 'var(--text-muted)', fontSize: '0.8rem', padding: '10px' }}>Loading headlines...</div>
+              {news.length === 0 ? (
+                <div className="news-item">Scanning macro headlines...</div>
               ) : (
-                newsList.map((n, i) => (
-                  <div key={i} className="news-item">• {n}</div>
+                news.slice(0, 8).map((headline, index) => (
+                  <div key={`${index}-${headline.slice(0, 20)}`} className="news-item">
+                    {headline}
+                  </div>
                 ))
               )}
             </div>
-          </div>
+          </section>
         </aside>
 
-        <main className="broker-main">
-          <div className="feed-header">
-            <h2>Active Operations</h2>
-            <div className="feed-status">{wsConnected ? 'LIVE FEED ACTIVE' : 'RECONNECTING...'}</div>
-          </div>
-          
-          <div className="active-trade-panel">
-            {trades.length === 0 ? (
-              <div className="empty-feed">
-                <div className="radar-spinner"></div>
-                Waiting for signal conviction...
-              </div>
-            ) : (
-              <div className="active-trade-card glass-card">
-                <div className="active-card-header">
-                  <span className={`active-badge ${trades[0].signal.toLowerCase()}`}>{trades[0].signal}</span>
-                  <h3>{trades[0].symbol}</h3>
-                  <span className="active-time">{trades[0].time}</span>
+
+        {/* ── MAIN CONTENT ─────────────────────────────────────────────────── */}
+        <section className="content">
+
+          {/* ── HERO: Full-Width Chart ──────────────────────────────────────── */}
+          <TradingViewChart symbol="BINANCE:BTCUSDTPERP" />
+
+          {/* ── MID ROW: SmartOrderCard + Active Trades ─────────────────────── */}
+          <div className="content-mid">
+            <SmartOrderCard
+              card={snapshot?.smart_order_card}
+              onExecute={executeNow}
+              executing={executing}
+              activeTiers={activeTiers}
+            />
+
+            <div className="mid-right">
+              {/* Signal Diagnostics */}
+              <section className="panel panel--compact">
+                <div className="panel-title">Signal Diagnostics</div>
+                <div className="diag-grid">
+                  <div className="diag-item">
+                    <span>Bullish</span>
+                    <strong className="text-bullish">
+                      {((market?.probability ?? 0.5) * 100).toFixed(1)}%
+                    </strong>
+                  </div>
+                  <div className="diag-item">
+                    <span>Bearish</span>
+                    <strong className="text-bearish">
+                      {((1 - (market?.probability ?? 0.5)) * 100).toFixed(1)}%
+                    </strong>
+                  </div>
+                  <div className="diag-item">
+                    <span>Sentiment</span>
+                    <strong>{((market?.sentiment ?? 0.5) * 100).toFixed(1)}%</strong>
+                  </div>
+                  <div className="diag-item">
+                    <span>Signal</span>
+                    <strong className={`signal-text signal-text--${(market?.signal ?? 'hold').toLowerCase()}`}>
+                      {market?.signal ?? 'HOLD'}
+                    </strong>
+                  </div>
                 </div>
-                
-                <div className="active-execution-details">
-                  <div className="exec-stat">
-                    <span className="stat-label">Entry</span>
-                    <span className="stat-value">${trades[0].entry_price?.toFixed(2)}</span>
-                  </div>
-                  <div className="exec-stat">
-                    <span className="stat-label">Target</span>
-                    <span className="stat-value text-bullish">${trades[0].take_profit?.toFixed(2)}</span>
-                  </div>
-                  <div className="exec-stat">
-                    <span className="stat-label">Stop</span>
-                    <span className="stat-value text-bearish">${trades[0].stop_loss?.toFixed(2)}</span>
-                  </div>
-                  <div className="exec-stat">
-                    <span className="stat-label">Size</span>
-                    <span className="stat-value">{trades[0].position_qty?.toFixed(4)} ({trades[0].leverage}x)</span>
-                  </div>
-                </div>
+              </section>
 
-                <div className="active-card-footer">
-                  <span style={{color: 'var(--text-muted)'}}>#{trades[0].order_id}</span>
-                  <button className="view-details-btn" onClick={() => openTradeDetail(trades[0].order_id)}>
-                    View Full Ticket ➔
-                  </button>
-                </div>
-              </div>
-            )}
+              {/* Active Trades */}
+              <ActiveTrades
+                trades={activeTrades}
+                closingOrderId={closingOrderId}
+                onCloseTrade={closeTrade}
+                onClearStale={clearStaleTrades}
+              />
+            </div>
           </div>
 
-          <div className="feed-header" style={{borderTop: '1px solid var(--border)', marginTop: 'auto', background: 'transparent'}}>
-            <h2 style={{fontSize: '0.9rem'}}>Execution History</h2>
-          </div>
-          
-          <div className="history-feed">
-            {trades.slice(1).map((t, i) => (
-              <div
-                key={i}
-                className={`history-item ${t.signal.toLowerCase()}`}
-                onClick={() => openTradeDetail(t.order_id)}
-              >
-                <span className={`history-badge ${t.signal.toLowerCase()}`}>{t.signal}</span>
-                <span className="history-symbol">{t.symbol}</span>
-                <span className="history-price">Entry: ${t.entry_price?.toFixed(2)}</span>
-                <span className="history-time">{t.time}</span>
-              </div>
-            ))}
-            {trades.length <= 1 && (
-              <div className="empty-history">No past executions in this session.</div>
-            )}
-          </div>
-        </main>
-      </div>
-
-      {/* ── Trade Detail Modal ── */}
-      {modalTrade && (
-        <div className="modal-overlay" onClick={() => setModalTrade(null)}>
-          <div className="modal-card broker-ticket-modal" onClick={e => e.stopPropagation()}>
-            <div className="modal-title">
-              <div className="ticket-header-info">
-                <span className={`ticket-badge ${modalTrade.signal.toLowerCase()}`}>
-                  {modalTrade.signal}
-                </span>
-                <span style={{ marginLeft: 12 }}>{modalTrade.symbol}</span>
-                <span className="ticket-order-id">#{modalTrade.order_id}</span>
-              </div>
-              <span className="modal-close" onClick={() => setModalTrade(null)}>✕</span>
-            </div>
-            
-            <div className="ticket-meta">
-              <span>{modalTrade.date} · {modalTrade.time}</span>
-              <span>Style: <strong style={{color: 'var(--accent)'}}>{modalTrade.style}</strong></span>
-              <span>Timeframe: <strong>{modalTrade.timeframe}</strong></span>
-            </div>
-
-            <div className="ticket-execution-grid">
-              <div className="exec-item">
-                <div className="exec-label">Entry Price</div>
-                <div className="exec-value">${modalTrade.entry_price?.toFixed(2) ?? '—'}</div>
-              </div>
-              <div className="exec-item">
-                <div className="exec-label">Take Profit (+{modalTrade.tp_pct}%)</div>
-                <div className="exec-value text-bullish">${modalTrade.take_profit?.toFixed(2) ?? '—'}</div>
-              </div>
-              <div className="exec-item">
-                <div className="exec-label">Stop Loss (-{modalTrade.sl_pct}%)</div>
-                <div className="exec-value text-bearish">${modalTrade.stop_loss?.toFixed(2) ?? '—'}</div>
-              </div>
-              
-              <div className="exec-item">
-                <div className="exec-label">Position Qty</div>
-                <div className="exec-value">{modalTrade.position_qty?.toFixed(4) ?? '—'}</div>
-              </div>
-              <div className="exec-item">
-                <div className="exec-label">Est. PnL</div>
-                <div className="exec-value text-bullish">+${modalTrade.est_pnl?.toFixed(2) ?? '—'}</div>
-              </div>
-              <div className="exec-item">
-                <div className="exec-label">Max Risk</div>
-                <div className="exec-value text-bearish">-${modalTrade.max_loss?.toFixed(2) ?? '—'}</div>
-              </div>
-            </div>
-
-            <div className="ticket-metrics-row">
-              <div className="metric-pill">
-                <span className="pill-label">Risk/Reward:</span>
-                <span className="pill-val">1:{modalTrade.risk_reward?.toFixed(2) ?? '—'}</span>
-              </div>
-              <div className="metric-pill">
-                <span className="pill-label">Allocation:</span>
-                <span className="pill-val">${modalTrade.allocation?.toFixed(2) ?? '—'}</span>
-              </div>
-              <div className="metric-pill">
-                <span className="pill-label">AI Confidence:</span>
-                <span className={`pill-val ${modalTrade.probability > 0.55 ? 'text-bullish' : 'text-bearish'}`}>
-                  {(modalTrade.probability * 100)?.toFixed(1)}%
-                </span>
-              </div>
-            </div>
-
-            {/* AI Diagnostics Toggle */}
-            <div 
-              className="ai-toggle-btn"
-              onClick={() => setShowFeatures(!showFeatures)}
-            >
-              {showFeatures ? '▼ Hide AI Feature Diagnostics' : '▶ View AI Feature Diagnostics'}
-            </div>
-
-            {showFeatures && (
-              <div className="feature-grid ticket-features">
-                {modalTrade.features && Object.entries(modalTrade.features).map(([k, v]) => (
-                  <div className="feature-item" key={k}>
-                    <span className="feature-name">{k}</span>
-                    <span className="feature-val">{typeof v === 'number' ? v.toFixed(4) : v}</span>
+          {/* ── BOTTOM: Execution Queue ─────────────────────────────────────── */}
+          <section className="panel panel--compact">
+            <div className="panel-title">Execution Queue</div>
+            <div className="trade-list">
+              {trades.length === 0 ? (
+                <div className="trade-item trade-item--empty">No staged or executed trades yet.</div>
+              ) : (
+                trades.map((trade) => (
+                  <div key={trade.order_id} className="trade-item">
+                    <div>
+                      <div className="trade-signal">{trade.signal}</div>
+                      <div className="trade-meta">{trade.symbol} / {trade.status}</div>
+                    </div>
+                    <div className="trade-side">
+                      <div>{trade.time}</div>
+                      <div>{trade.trigger_source}</div>
+                    </div>
                   </div>
-                ))}
-              </div>
-            )}
-            
-            <button className="confirm-trade-btn" onClick={() => setModalTrade(null)}>
-              Acknowledge execution ticket
-            </button>
-          </div>
-        </div>
-      )}
-    </>
+                ))
+              )}
+            </div>
+          </section>
+
+          {/* ── TERMINAL CONSOLE ──────────────────────────────────────────── */}
+          <TerminalConsole />
+        </section>
+      </main>
+    </div>
   )
 }
 
