@@ -89,6 +89,7 @@ class ActiveTrade(BaseModel):
     entry_price: float
     current_price: float
     pnl_pct: float
+    pnl_value: float = 0.0
     trailing_stop_level: float
     callback_rate: float
     broker_status: str

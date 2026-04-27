@@ -270,7 +270,7 @@ function App() {
   const [pollFailures, setPollFailures] = useState(0)
 
   const getTradingViewSymbol = (tab) => {
-    if (tab === 'INDIA') return 'BSE:SENSEX';
+    if (tab === 'INDIA') return 'NSE:NIFTYBANK';
     if (tab === 'FOREX') return 'FX:EURUSD';
     return 'BINANCE:BTCUSDTPERP';
   };
@@ -380,7 +380,12 @@ function App() {
       await fetch(`${API_URL}/api/capital/pools`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ CRYPTO: Number(cryptoPool), INDIA: Number(indiaPool), FOREX: Number(forexPool) }),
+        body: JSON.stringify({ 
+          CRYPTO: Number(cryptoPool), 
+          INDIA: Number(indiaPool), 
+          FOREX: Number(forexPool),
+          trade_allocation: Number(tradeAllocationInput)
+        }),
       })
       setShowCapitalModal(false)
     } catch (error) {
@@ -553,6 +558,16 @@ function App() {
               <input type="number" value={forexPool} onChange={e => setForexPool(e.target.value)}
                 style={{ width: '100%', padding: '8px', background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: '4px' }}
               />
+            </div>
+
+            <div style={{ marginBottom: '16px', padding: '12px', background: 'rgba(255,165,0,0.1)', borderRadius: '6px', border: '1px solid rgba(255,165,0,0.2)' }}>
+              <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--accent)', fontWeight: 'bold', marginBottom: '4px' }}>Trade Allocation (Override)</label>
+              <input type="number" value={tradeAllocationInput} onChange={e => setTradeAllocationInput(e.target.value)}
+                style={{ width: '100%', padding: '8px', background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: '4px' }}
+              />
+              <div style={{ fontSize: '0.65rem', color: 'var(--text-dim)', marginTop: '4px' }}>
+                Set to <strong>0</strong> for dynamic statistical sizing (Kelly Criterion).
+              </div>
             </div>
 
             <div style={{ display: 'flex', gap: '8px' }}>
@@ -782,8 +797,7 @@ function App() {
                     </div>
                     <div className="trade-side">
                       <div style={{ fontSize: '0.85rem', fontWeight: '600' }}>
-                        {session?.active_tab === 'INDIA' ? '₹' : '$'}
-                        {trade.execution_plan?.est_pnl?.toFixed(2) ?? '0.00'}
+                        {formatMarketCurrency(trade.execution_plan?.est_pnl, session?.active_tab)}
                       </div>
                       <div style={{ fontSize: '0.7rem', color: 'var(--text-dim)' }}>{trade.time}</div>
                       <div style={{ fontSize: '0.7rem', color: 'var(--text-dimmer)' }}>{trade.trigger_source}</div>

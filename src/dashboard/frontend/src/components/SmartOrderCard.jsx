@@ -122,20 +122,37 @@ function SmartOrderCard({ card, onExecute, executing, activeTiers = [], activeTa
 
       <div className="analysis-grid">
         <article className="analysis-card">
-          <div className="eyebrow">Technical Analysis</div>
-          <div className="analysis-score">
-            {(card?.signal_analysis?.technical_score * 100 || 0).toFixed(0)} / 100
+          <div className="eyebrow">Technical Confluence</div>
+          <div className="analysis-score" style={{ color: quantGreen ? 'var(--bullish)' : 'var(--text-dim)' }}>
+            {(card?.signal_analysis?.technical_score * 100 || 0).toFixed(0)}% CONFIDENCE
           </div>
-          <p>{card?.signal_analysis?.technical_summary ?? 'Technical context is loading.'}</p>
+          <p style={{ fontSize: '0.75rem', lineHeight: '1.4', color: 'var(--text-dim)' }}>
+            {card?.signal_analysis?.technical_summary ?? 'Model is analyzing technical clusters and price action divergence.'}
+          </p>
         </article>
         <article className="analysis-card">
-          <div className="eyebrow">Sentiment Analysis</div>
-          <div className="analysis-score">
-            {(card?.signal_analysis?.sentiment_score * 100 || 0).toFixed(0)} / 100
+          <div className="eyebrow">Macro & Sentiment</div>
+          <div className="analysis-score" style={{ color: sentimentGreen ? 'var(--bullish)' : 'var(--text-dim)' }}>
+            {(card?.signal_analysis?.sentiment_score * 100 || 0).toFixed(0)}% SENTIMENT
           </div>
-          <p>{card?.signal_analysis?.sentiment_summary ?? 'Sentiment context is loading.'}</p>
+          <p style={{ fontSize: '0.75rem', lineHeight: '1.4', color: 'var(--text-dim)' }}>
+            {card?.signal_analysis?.sentiment_summary ?? 'Sentiment wire scanning headlines for institutional positioning.'}
+          </p>
         </article>
       </div>
+
+      <article className="analysis-card" style={{ marginTop: '12px', background: 'rgba(0,188,212,0.05)', border: '1px solid rgba(0,188,212,0.1)' }}>
+        <div className="eyebrow" style={{ color: 'var(--accent)' }}>Institutional Flow Analysis</div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '8px' }}>
+          <div style={{ fontSize: '0.8rem', color: 'var(--text)' }}>
+            {card?.structural_edge || 'Scanning for Liquidity Sweeps & FVG Gaps...'}
+          </div>
+          <div className={`dot ${structureGreen ? 'dot-green' : 'dot-gray'}`} style={{ width: '8px', height: '8px' }}></div>
+        </div>
+        <div style={{ fontSize: '0.65rem', color: 'var(--text-dim)', marginTop: '4px', letterSpacing: '0.5px' }}>
+          CVD: {features.cvd_cumulative?.toFixed(2) ?? '0.00'} | FVG: {features.fvg_signal > 0 ? 'BULLISH GAP' : features.fvg_signal < 0 ? 'BEARISH GAP' : 'NEUTRAL'}
+        </div>
+      </article>
 
       <article className={`structure-card ${card?.structural_confluence ? 'structure-card--confluence' : ''}`}>
         <div className="eyebrow">Structural Edge</div>
@@ -166,8 +183,14 @@ function SmartOrderCard({ card, onExecute, executing, activeTiers = [], activeTa
           <strong>{formatCurrency(plan?.stop_loss, activeTab)}</strong>
         </div>
         <div className="execution-stat">
-          <span>R/R</span>
-          <strong>{plan?.risk_reward?.toFixed(2) ?? '--'}</strong>
+          <span>R/R Ratio</span>
+          <strong style={{ color: plan?.risk_reward > 2 ? 'var(--bullish)' : 'var(--text)' }}>{plan?.risk_reward?.toFixed(2) ?? '0.00'}</strong>
+        </div>
+        <div className="execution-stat">
+          <span>Position PnL</span>
+          <strong className={plan?.est_pnl >= 0 ? 'text-positive' : 'text-negative'}>
+            {formatCurrency(plan?.est_pnl, activeTab)}
+          </strong>
         </div>
       </div>
 

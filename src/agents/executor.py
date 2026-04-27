@@ -112,8 +112,10 @@ class TradeExecutor:
 
             trade["current_price"] = round(current_price, 4)
             if entry_price > 0:
+                quantity = float(trade.get("quantity", 0.0))
                 if side == "BUY":
                     pnl_pct = ((current_price - entry_price) / entry_price) * 100
+                    pnl_value = (current_price - entry_price) * quantity
                     trade["peak_price"] = round(
                         max(float(trade.get("peak_price", entry_price)), current_price),
                         4,
@@ -121,6 +123,7 @@ class TradeExecutor:
                     trailing_stop = float(trade.get("peak_price", current_price)) * (1 - callback_rate / 100)
                 else:
                     pnl_pct = ((entry_price - current_price) / entry_price) * 100
+                    pnl_value = (entry_price - current_price) * quantity
                     trade["trough_price"] = round(
                         min(float(trade.get("trough_price", entry_price)), current_price),
                         4,
@@ -130,8 +133,10 @@ class TradeExecutor:
                 if entry_price < (current_price * 0.5):
                     trade["broker_status"] = "CORRUPTED"
                     pnl_pct = 0.0
+                    pnl_value = 0.0
 
                 trade["pnl_pct"] = round(pnl_pct, 4)
+                trade["pnl_value"] = round(pnl_value, 2)
                 trade["trailing_stop_level"] = round(trailing_stop, 4)
 
     async def execute_market_order(

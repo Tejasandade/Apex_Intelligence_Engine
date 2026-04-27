@@ -287,7 +287,9 @@ def _get_style_thresholds(style_key: str) -> tuple[float, float]:
     return float(style["buy_threshold"]), float(style["sell_threshold"])
 
 
-def _probability_zone(probability: float, style_key: str = DEFAULT_STYLE) -> str:
+def _probability_zone(probability: float, style_key: str = None) -> str:
+    if style_key is None:
+        style_key = runtime.trading_style
     buy_threshold, sell_threshold = _get_style_thresholds(style_key)
     if probability >= buy_threshold:
         return "BUY"
@@ -505,18 +507,20 @@ async def _load_market_features(symbol: str) -> dict:
     return features
 
 
-def _build_trade_ticket(
-    order_id: str,
+async def _build_trade_ticket(
     signal: str,
     probability: float,
     sentiment: float,
     features: dict,
     execution_plan: ExecutionPlan,
     trigger_source: str,
+    style_key: str = None,
 ) -> TradeTicket:
+    if style_key is None:
+        style_key = runtime.trading_style
     now = datetime.now()
     return TradeTicket(
-        order_id=order_id,
+        order_id=str(uuid.uuid4())[:8],
         symbol=DEFAULT_SYMBOL,
         signal=signal,
         status="EXECUTED" if trigger_source == "manual_override" else "STAGED",
@@ -556,6 +560,7 @@ def _build_active_trades(current_price: float) -> list[ActiveTrade]:
                 entry_price=float(trade.get("entry_price", 0.0)),
                 current_price=float(trade.get("current_price", 0.0)),
                 pnl_pct=float(trade.get("pnl_pct", 0.0)),
+                pnl_value=float(trade.get("pnl_value", 0.0)),
                 trailing_stop_level=float(trade.get("trailing_stop_level", 0.0)),
                 callback_rate=float(trade.get("callback_rate", 0.0)),
                 broker_status=trade.get("broker_status", "DRY_RUN"),
@@ -682,7 +687,7 @@ async def _refresh_snapshot(event_type: str, warmup_status: Optional[dict] = Non
         execution_plan = await _build_order_details(
             signal=runtime.last_signal,
             features=features,
-            style_key=DEFAULT_STYLE,
+            style_key=runtime.trading_style,
             broker_adapter=runtime.executor.broker,
             probability=runtime.latest_probability,
         )
@@ -786,7 +791,7 @@ async def inference_loop():
             probability_zone, crossed_execution_threshold = _crossed_execution_threshold(
                 runtime.last_probability_zone,
                 probability,
-                DEFAULT_STYLE,
+                runtime.trading_style,
             )
             try:
                 sentiment = await db_manager.fetch_latest_sentiment()
@@ -865,7 +870,7 @@ async def inference_loop():
                 execution_plan = await _build_order_details(
                     signal=signal,
                     features=features,
-                    style_key=DEFAULT_STYLE,
+                    style_key=runtime.trading_style,
                     broker_adapter=runtime.executor.broker,
                     probability=probability,
                 )
@@ -907,19 +912,18 @@ async def inference_loop():
                         ep = await _build_order_details(
                             signal=signal_dir,
                             features=features,
-                            style_key=DEFAULT_STYLE,
+                            style_key=runtime.trading_style,
                             broker_adapter=runtime.executor.broker,
                             probability=probability,
                         )
-                    ticket_id = str(uuid.uuid4())[:8]
-                    ticket = _build_trade_ticket(
-                        order_id=ticket_id,
+                    ticket = await _build_trade_ticket(
                         signal=signal_dir,
                         probability=probability,
                         sentiment=sentiment,
                         features=features,
                         execution_plan=ep,
-                        trigger_source="signal_engine"
+                        trigger_source="signal_engine",
+                        style_key=runtime.trading_style
                     )
                     runtime.live_signals.insert(0, ticket)
                     runtime.live_signals = runtime.live_signals[:20]
@@ -1253,13 +1257,17 @@ async def update_professional_trader_mode(update: ProfessionalTraderUpdate):
 
 @app.post("/api/capital/pools")
 async def update_capital_pools(pools: dict):
+    if "trade_allocation" in pools:
+        runtime.risk_manager.trade_allocation = float(pools["trade_allocation"])
+        logger.info(f"Trade allocation updated to: {runtime.risk_manager.trade_allocation}")
+        
     for pool, val in pools.items():
         if pool in runtime.risk_manager.capital_pools:
             runtime.risk_manager.capital_pools[pool] = float(val)
     
     runtime.risk_manager.total_capital = runtime.risk_manager.capital_pools.get(runtime.active_tab, runtime.risk_manager.total_capital)
     await _refresh_snapshot("capital.updated")
-    return {"status": "success", "capital_pools": runtime.risk_manager.capital_pools}
+    return {"status": "success", "capital_pools": runtime.risk_manager.capital_pools, "trade_allocation": runtime.risk_manager.trade_allocation}
 
 @app.post("/api/session/style/{style_name}")
 async def set_trading_style(style_name: str):

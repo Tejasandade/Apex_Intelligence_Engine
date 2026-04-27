@@ -1,12 +1,16 @@
-function formatCurrency(value) {
+function formatCurrency(value, activeTab = 'CRYPTO') {
   if (value == null || Number.isNaN(Number(value))) {
     return '--'
   }
 
+  if (activeTab === 'INDIA') {
+    return new Intl.NumberFormat('en-IN', {
+      style: 'currency', currency: 'INR', maximumFractionDigits: 2,
+    }).format(Number(value))
+  }
+
   return new Intl.NumberFormat('en-US', {
-    style: 'currency',
-    currency: 'USD',
-    maximumFractionDigits: 2,
+    style: 'currency', currency: 'USD', maximumFractionDigits: 2,
   }).format(Number(value))
 }
 
@@ -58,9 +62,14 @@ function ActiveTrades({ trades, closingOrderId, onCloseTrade, onClearStale }) {
                 </div>
                 <div className="metric-item">
                   <span>Live PnL</span>
-                  <strong className={trade.pnl_pct >= 0 ? 'text-positive' : 'text-negative'}>
-                    {trade.pnl_pct >= 0 ? '+' : ''}{Number(trade.pnl_pct ?? 0).toFixed(2)}%
-                  </strong>
+                  <div style={{ display: 'flex', flexDirection: 'column' }}>
+                    <strong className={trade.pnl_pct >= 0 ? 'text-positive' : 'text-negative'}>
+                      {trade.pnl_pct >= 0 ? '+' : ''}{Number(trade.pnl_pct ?? 0).toFixed(2)}%
+                    </strong>
+                    <span style={{ fontSize: '0.7rem', color: trade.pnl_pct >= 0 ? 'var(--bullish)' : 'var(--bearish)' }}>
+                      {formatCurrency(trade.pnl_value, trade.symbol.includes('INR') || trade.symbol.includes('NIFTY') ? 'INDIA' : 'CRYPTO')}
+                    </span>
+                  </div>
                 </div>
                 <div className="metric-item">
                   <span>Trailing Stop</span>
