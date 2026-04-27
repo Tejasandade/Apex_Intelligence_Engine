@@ -7,11 +7,200 @@ const API_URL = 'http://127.0.0.1:8080'
 const WS_URL = 'ws://127.0.0.1:8080/ws/live'
 
 // ---------------------------------------------------------------------------
-// TradingView Advanced Real-Time Chart — clean embed URL
+// GlobalMasterView — Alpha Ranker Cross-Market Conviction Terminal
 // ---------------------------------------------------------------------------
-function TradingViewChart({ symbol = 'BINANCE:BTCUSDTPERP' }) {
+function GlobalMasterView({ snapshot }) {
+  const signal = snapshot?.global_best_signal
+  const isBull = signal?.direction === 'BULLISH'
+  const dirColor  = isBull ? '#00e5a0' : '#ff4d6d'
+  const dirBg     = isBull ? 'rgba(0,229,160,0.07)' : 'rgba(255,77,109,0.07)'
+  const conviction = signal?.conviction ?? 0
+  const pct        = signal ? (signal.probability * 100).toFixed(2) : null
+
+  // Build a conviction bar width (conviction is 0–100)
+  const barWidth = `${Math.min(conviction, 100)}%`
+
+  const markets = [
+    { key: 'CRYPTO', label: 'Crypto', icon: '₿' },
+    { key: 'INDIA',  label: 'India NSE', icon: '₹' },
+    { key: 'FOREX',  label: 'Forex', icon: '€' },
+  ]
+
+  return (
+    <div style={{
+      padding: '32px 40px',
+      minHeight: '60vh',
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      gap: '28px',
+    }}>
+
+      {/* ── Header ──────────────────────────────────────────────── */}
+      <div style={{ textAlign: 'center' }}>
+        <div style={{
+          fontSize: '0.72rem', letterSpacing: '4px', color: 'var(--text-dim)',
+          textTransform: 'uppercase', marginBottom: '6px',
+        }}>Apex Intelligence Engine</div>
+        <h2 style={{
+          margin: 0, fontSize: '1.9rem', fontWeight: 700,
+          background: 'linear-gradient(135deg, #a78bfa, #60a5fa)',
+          WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent',
+          letterSpacing: '1px',
+        }}>Global Alpha Ranker</h2>
+        <div style={{ fontSize: '0.78rem', color: 'var(--text-dim)', marginTop: '6px' }}>
+          Cross-market statistical edge — highest conviction signal wins execution
+        </div>
+      </div>
+
+      {/* ── Main conviction card ──────────────────────────────────────── */}
+      <div style={{
+        background: 'var(--panel-bg)',
+        border: `1px solid ${signal ? dirColor + '55' : 'var(--border)'}`,
+        borderRadius: '16px',
+        padding: '32px 40px',
+        width: '100%',
+        maxWidth: '620px',
+        boxShadow: signal ? `0 0 32px ${dirColor}22` : 'none',
+        transition: 'box-shadow 0.4s ease, border-color 0.4s ease',
+        position: 'relative',
+        overflow: 'hidden',
+      }}>
+
+        {/* subtle corner badge */}
+        <div style={{
+          position: 'absolute', top: 12, right: 16,
+          fontSize: '0.65rem', letterSpacing: '3px', color: 'var(--text-dim)',
+          textTransform: 'uppercase',
+        }}>Live</div>
+
+        <div style={{ fontSize: '0.72rem', letterSpacing: '3px', color: 'var(--text-dim)', textTransform: 'uppercase', marginBottom: '12px' }}>
+          Highest Conviction Market
+        </div>
+
+        {signal ? (
+          <>
+            {/* Market name */}
+            <div style={{
+              fontSize: '2.8rem', fontWeight: 800,
+              letterSpacing: '3px', color: 'var(--text)',
+              marginBottom: '6px', fontFamily: 'monospace',
+            }}>
+              {signal.market ?? '—'}
+            </div>
+
+            {/* Direction + probability chip */}
+            <div style={{
+              display: 'inline-flex', alignItems: 'center', gap: '10px',
+              background: dirBg, border: `1px solid ${dirColor}66`,
+              borderRadius: '8px', padding: '8px 18px', marginBottom: '20px',
+            }}>
+              <span style={{ fontSize: '1.1rem' }}>{isBull ? '▲' : '▼'}</span>
+              <span style={{ fontSize: '1.3rem', fontWeight: 700, color: dirColor, letterSpacing: '1px' }}>
+                {signal.direction}
+              </span>
+              <span style={{ fontSize: '1.1rem', color: 'var(--text-dim)' }}>
+                {pct}%
+              </span>
+            </div>
+
+            {/* Conviction meter */}
+            <div style={{ marginBottom: '8px', display: 'flex', justifyContent: 'space-between', fontSize: '0.75rem', color: 'var(--text-dim)' }}>
+              <span>Conviction Score</span>
+              <span style={{ color: 'var(--text)', fontWeight: 700 }}>{conviction} / 100</span>
+            </div>
+            <div style={{
+              height: '8px', borderRadius: '4px',
+              background: 'rgba(255,255,255,0.07)',
+              overflow: 'hidden',
+            }}>
+              <div style={{
+                height: '100%', width: barWidth,
+                background: `linear-gradient(90deg, ${dirColor}88, ${dirColor})`,
+                borderRadius: '4px',
+                transition: 'width 0.6s cubic-bezier(0.4,0,0.2,1)',
+                boxShadow: `0 0 10px ${dirColor}66`,
+              }} />
+            </div>
+          </>
+        ) : (
+          /* ── Loading skeleton ── */
+          <div style={{ padding: '20px 0' }}>
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: '12px',
+              color: 'var(--text-dim)', fontSize: '1rem',
+            }}>
+              <span style={{
+                display: 'inline-block', width: '10px', height: '10px',
+                borderRadius: '50%', background: 'var(--accent)',
+                animation: 'pulse 1.4s ease-in-out infinite',
+              }} />
+              Calculating Cross-Market Conviction…
+            </div>
+            {[70, 45, 55].map((w, i) => (
+              <div key={i} style={{
+                height: '10px', borderRadius: '5px',
+                background: 'rgba(255,255,255,0.06)',
+                marginTop: '14px', width: `${w}%`,
+                animation: 'pulse 1.6s ease-in-out infinite',
+                animationDelay: `${i * 0.2}s`,
+              }} />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* ── Market pod status grid ──────────────────────────────────────── */}
+      <div style={{
+        display: 'grid', gridTemplateColumns: 'repeat(3,1fr)',
+        gap: '16px', width: '100%', maxWidth: '620px',
+      }}>
+        {markets.map(({ key, label, icon }) => {
+          const isActive = signal?.market === key
+          return (
+            <div key={key} style={{
+              background: 'var(--panel-bg)',
+              border: `1px solid ${isActive ? dirColor + '88' : 'var(--border)'}`,
+              borderRadius: '12px', padding: '18px 16px',
+              textAlign: 'center',
+              boxShadow: isActive ? `0 0 18px ${dirColor}22` : 'none',
+              transition: 'all 0.3s ease',
+            }}>
+              <div style={{ fontSize: '1.4rem', marginBottom: '6px' }}>{icon}</div>
+              <div style={{ fontSize: '0.8rem', fontWeight: 600, color: isActive ? dirColor : 'var(--text)' }}>
+                {label}
+              </div>
+              <div style={{
+                fontSize: '0.65rem', letterSpacing: '2px',
+                color: isActive ? dirColor : 'var(--text-dim)',
+                marginTop: '4px', textTransform: 'uppercase',
+              }}>
+                {isActive ? 'ACTIVE POD' : 'MONITORING'}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+
+      {/* ── Disclaimer ──────────────────────────────────────────────────── */}
+      <div style={{ fontSize: '0.68rem', color: 'var(--text-dim)', textAlign: 'center', maxWidth: '480px' }}>
+        Alpha Ranker compares live model probability across all active pods and routes
+        execution to the highest statistical edge. All NSE orders are DRY_RUN only.
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+function TradingViewChart({ symbol = 'BTCUSDT' }) {
+  let tvSymbol = symbol;
+  // NSE indices are blocked from iframe embeds by TradingView, so we must use the continuous future.
+  if (symbol === 'BANKNIFTY') tvSymbol = 'BSE:SENSEX';
+  else if (symbol === 'BTCUSDT') tvSymbol = 'BINANCE:BTCUSDTPERP';
+  else if (symbol === 'EURUSD') tvSymbol = 'FX:EURUSD';
+
   const src =
-    `https://s.tradingview.com/widgetembed/?symbol=${encodeURIComponent(symbol)}` +
+    `https://s.tradingview.com/widgetembed/?symbol=${encodeURIComponent(tvSymbol)}` +
     `&interval=1&theme=dark&style=1&locale=en` +
     `&toolbar_bg=%23141418&enable_publishing=0` +
     `&allow_symbol_change=0&save_image=0&hide_top_toolbar=0` +
@@ -21,8 +210,8 @@ function TradingViewChart({ symbol = 'BINANCE:BTCUSDTPERP' }) {
   return (
     <section className="panel tradingview-hero" aria-label="Live Price Chart">
       <div className="panel-title-row">
-        <div className="panel-title">Live Chart — {symbol}</div>
-        <div className="chart-badge">BINANCE · REAL-TIME</div>
+        <div className="panel-title">Live Chart — {tvSymbol}</div>
+        <div className="chart-badge">REAL-TIME</div>
       </div>
       <div className="tradingview-wrapper">
         <iframe
@@ -62,6 +251,12 @@ function App() {
   const [livePrice, setLivePrice] = useState(null)
   const [tickActive, setTickActive] = useState(false)
   const [pollFailures, setPollFailures] = useState(0)
+
+  const getTradingViewSymbol = (tab) => {
+    if (tab === 'INDIA') return 'BSE:SENSEX';
+    if (tab === 'FOREX') return 'FX:EURUSD';
+    return 'BINANCE:BTCUSDTPERP';
+  };
 
   // 100ms Zero-Latency Price Polling from Redis Bridge
   useEffect(() => {
@@ -282,7 +477,36 @@ function App() {
         </div>
       </header>
 
-      {/* ── Dashboard Grid ─────────────────────────────────────────────────── */}
+      {/* ── Tab Navigation ─────────────────────────────────────────────────── */}
+      <nav className="tab-navigation" style={{ display: 'flex', gap: '20px', padding: '10px 20px', background: 'var(--panel-bg)', borderBottom: '1px solid var(--border)' }}>
+        {['GLOBAL MASTER', 'CRYPTO', 'INDIA', 'FOREX'].map(tab => (
+          <button
+            key={tab}
+            className={`tab-button ${session?.active_tab === tab ? 'active' : ''}`}
+            style={{
+              background: 'transparent',
+              color: session?.active_tab === tab ? 'var(--accent)' : 'var(--text-dim)',
+              border: 'none',
+              borderBottom: session?.active_tab === tab ? '2px solid var(--accent)' : '2px solid transparent',
+              padding: '10px',
+              cursor: 'pointer',
+              fontWeight: session?.active_tab === tab ? 'bold' : 'normal',
+              textTransform: 'uppercase',
+            }}
+            onClick={async () => {
+              try {
+                await fetch(`${API_URL}/api/market/tab/${tab}`, { method: 'POST' });
+              } catch (e) { console.error('Failed to switch tab', e); }
+            }}
+          >
+            {tab}
+          </button>
+        ))}
+      </nav>
+
+      {session?.active_tab === 'GLOBAL MASTER' ? (
+        <GlobalMasterView snapshot={snapshot} />
+      ) : (
       <main className="dashboard-grid">
 
         {/* ── LEFT SIDEBAR ─────────────────────────────────────────────────── */}
@@ -413,7 +637,7 @@ function App() {
         <section className="content">
 
           {/* ── HERO: Full-Width Chart ──────────────────────────────────────── */}
-          <TradingViewChart symbol="BINANCE:BTCUSDTPERP" />
+          <TradingViewChart symbol={getTradingViewSymbol(session?.active_tab)} />
 
           {/* ── MID ROW: SmartOrderCard + Active Trades ─────────────────────── */}
           <div className="content-mid">
@@ -491,6 +715,7 @@ function App() {
           <TerminalConsole />
         </section>
       </main>
+      )}
     </div>
   )
 }

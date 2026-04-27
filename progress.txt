@@ -79,3 +79,57 @@
 - [ ] Task 13.2: Implement SMC (Smart Money Concepts) — BOS/CHoCH.
 - [ ] Task 13.3: Add Volume Profile features.
 - [ ] Task 13.4: Train Transformer-based sequence model.
+
+## Phase 5: Multi-Strategy Pod Architecture
+
+### Epic 14: Broker Abstraction & Multi-Market Support
+- [x] Task 14.1: Abstract Binance logic into `BaseBrokerAdapter` and `BinanceAdapter` interfaces.
+- [x] Task 14.2: Add account balance querying with Paper Trading (DRY_RUN) support.
+- [x] Task 14.3: Refactor `TradeExecutor` to use abstract broker layer.
+- [x] Task 14.4: Add `MarketSessionManager` with native `zoneinfo` for IST routing.
+- [x] Task 14.5: Implement Session Guard inside `evaluate_trade_signal`.
+- [x] Task 14.7: Implement 1:1 Risk/Reward Scale-Out and Breakeven trailing logic.
+
+### Epic 15: Indian Market Data Pipeline (NSE)
+- [x] Task 15.1: Create `IndianMacroOracle` to fetch localized NewsAPI data and mock FII/DII data.
+- [x] Task 15.2: Create standalone `ingestion_nse.py` for Angel One SmartAPI connection.
+- [x] Task 15.3: Parse BANKNIFTY ticks and publish to Redis in Binance-compatible format.
+
+### Epic 16: Specialized AI Models & Dynamic Routing
+- [x] Task 16.1: Update `QuantModel` to dynamically load market-specific weights (`crypto_model.json`, `banknifty_model.json`).
+- [x] Task 16.2: Implement `model_registry` inside `ws_server.py` to hold multiple concurrent inference engines.
+- [x] Task 16.3: Update `DatasetBuilder` to bypass crypto-specific 24/7 indicator logic for NSE 6-hour sessions.
+
+### Epic 17: Global Command Center UI Overhaul (Phase 5 Step 6)
+- [x] Task 17.1: Add `active_tab` and `global_best_signal` to FastAPI schemas and snapshot payloads.
+- [x] Task 17.2: Create background `alpha_ranker_loop()` for low-latency cross-market conviction comparison.
+- [x] Task 17.3: Implement `/api/market/tab/{tab_name}` endpoint for instantaneous workspace switching.
+- [x] Task 17.4: Upgrade React `App.jsx` with responsive Tab Navigation and inline `GlobalMasterView`.
+
+## Phase 6: The Quant Refactor
+### Epic 18: Session-Aware Indicators & VWAP Overhaul
+- [x] Task 18.1: Remove mock indicator hack for NSE markets in `dataset_builder.py`.
+- [x] Task 18.2: Implement `compute_session_vwap()` with tz-aware daily cumulative reset logic.
+- [x] Task 18.3: Add forward-fill logic to RSI, MACD, EMA, and ATR to gracefully handle market closures.
+
+### Epic 19: Smart Money Concepts (SMC) Engine
+- [x] Task 19.1: Implement `compute_fvg()` — canonical 3-candle FVG detection with directional signal and gap %.
+- [x] Task 19.2: Implement `compute_bos()` — pivot-anchored Break of Structure using rolling 20-bar swing highs/lows.
+- [x] Task 19.3: Rewrite `build_structure_features()` to use FVG + BOS confluence and produce uniform feature keys.
+
+### Epic 20: Advanced Order Flow — Liquidity Sweeps
+- [x] Task 20.1: Implement `compute_liquidity_sweep()` — pivot-anchored sweep detection with intra-candle reclaim ratio.
+- [x] Task 20.2: Wire `compute_liquidity_sweep` into `build_structure_features()`, replacing old ATR-based `detect_liquidity_sweep`.
+
+### Epic 21: V3 Production Training Pipeline
+- [x] Task 21.1: Create `src/pipeline/train_v3.py` with async Binance Futures candle harvesting (20k bars via ccxt).
+- [x] Task 21.2: Implement `build_historical_features()` with fully vectorised Pandas/NumPy indicator ops.
+- [x] Task 21.3: Implement asymmetric R/R target labelling (+0.15% gain, -0.10% stop, 15-bar lookahead).
+- [x] Task 21.4: Wire into `ApexXGBoostModel.train()` and log accuracy, precision, and log-loss post-training.
+- [x] Task 21.5: Fix `quant_model.train()` to always select features in `MODEL_FEATURE_COLUMNS` order (prevents inference mismatch).
+
+### Epic 22: NSE BankNifty Training Pipeline
+- [x] Task 22.1: Create `src/pipeline/train_nse_v3.py` — Angel One SmartConnect 15-day chunked fetch for 60 days of 1m BANKNIFTY data.
+- [x] Task 22.2: Implement `_vec_session_vwap_nse()` — IST-grouped session VWAP that resets each trading day.
+- [x] Task 22.3: Add `_filter_session_hours()` and `_drop_session_open_bars()` to strip overnight gaps and gap-up noise.
+- [x] Task 22.4: Reuse asymmetric target definition and train `banknifty_model` with full SMC feature set.

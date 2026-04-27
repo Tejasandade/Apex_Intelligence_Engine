@@ -105,6 +105,7 @@ class DashboardSession(BaseModel):
     autonomous_mode: bool
     execution_mode: str
     db_status: str = "connected"
+    active_tab: str = "CRYPTO"
 
 
 class DashboardMarket(BaseModel):
@@ -128,6 +129,7 @@ class DashboardSnapshot(BaseModel):
     active_trades: List[ActiveTrade]
     trades: List[TradeTicket]
     news: List[str]
+    global_best_signal: Optional[dict] = None
 
 
 class BroadcastEnvelope(BaseModel):

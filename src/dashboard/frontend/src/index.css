@@ -122,6 +122,11 @@ button, input { font: inherit; }
   50%      { box-shadow: 0 0 22px rgba(77,255,160,0.18); }
 }
 
+@keyframes pulse {
+  0%,100% { opacity: 1; }
+  50%      { opacity: 0.35; }
+}
+
 /* Redis tick pulse dot — lights up on every price tick */
 .tick-dot {
   display: inline-block;

@@ -45,13 +45,13 @@ class ApexXGBoostModel:
     Excels at tabular limit order book and quantitative feature data.
     """
 
-    def __init__(self, weights_dir: str = None):
+    def __init__(self, weights_dir: str = None, model_name: str = "crypto_model"):
         if weights_dir:
-            self.model_path = os.path.join(weights_dir, "final_model.json")
+            self.model_path = os.path.join(weights_dir, f"{model_name}.json")
         else:
+            root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
             self.model_path = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)),
-                "final_model.json",
+                root_dir, "data", "models", f"{model_name}.json"
             )
 
         self.model = xgb.XGBClassifier(
@@ -80,13 +80,13 @@ class ApexXGBoostModel:
         if target_col not in df.columns:
             raise ValueError(f"Target column '{target_col}' not found in DataFrame.")
 
-        drop_cols = [target_col, "timestamp", "symbol"]
-        features = [column for column in df.columns if column not in drop_cols]
-
-        X = df[features]
+        # Always train in canonical MODEL_FEATURE_COLUMNS order so the booster's
+        # internal feature names exactly match what predict() sends at inference.
+        available = [c for c in MODEL_FEATURE_COLUMNS if c in df.columns]
+        X = df[available].fillna(0.0)
         y = df[target_col]
 
-        logger.info(f"Training XGBoost Model on {len(df)} samples...")
+        logger.info(f"Training XGBoost Model on {len(df)} samples with {len(available)} features...")
         self.model.fit(X, y)
         self.is_trained = True
         logger.info("Training complete.")

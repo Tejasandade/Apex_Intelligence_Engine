@@ -1,4 +1,5 @@
 import asyncio
+import os
 import math
 import uuid
 from contextlib import asynccontextmanager
@@ -35,7 +36,9 @@ logger.add(
 )
 
 from src.agents.executor import TradeExecutor
-from src.agents.risk_manager import RiskManager
+from src.agents.risk_manager import RiskManager, MarketSessionManager
+from src.brokers.angel_one_adapter import AngelOneAdapter
+from src.brokers.oanda_adapter import OandaAdapter
 from src.dashboard.backend.broadcaster import WebSocketBroadcaster
 from src.dashboard.backend.schemas import (
     ActiveTrade,
@@ -58,10 +61,19 @@ from src.models.dataset_builder import DataFetcher
 from src.models.quant_model import ApexXGBoostModel
 
 
-PROVIDER_NAME = "binance_futures"
 DEFAULT_SYMBOL = "BTCUSDT"
+DEFAULT_STYLE = "momentum_burst"
+
+def _get_provider_name(symbol: str) -> str:
+    symbol_upper = symbol.upper()
+    if "NIFTY" in symbol_upper:
+        return "angel_one"
+    elif "EURUSD" in symbol_upper:
+        return "oanda_v20"
+    return "binance_futures"
+
 DEFAULT_STYLE = "Intraday"
-INFERENCE_LOOP_INTERVAL_SECONDS = 1.0
+INFERENCE_LOOP_INTERVAL_SECONDS = 0.5
 
 
 def _default_warmup_status() -> dict:
@@ -117,10 +129,22 @@ async def _get_redis_live_price() -> float:
 
 @dataclass
 class DashboardRuntime:
-    risk_manager: RiskManager = field(default_factory=RiskManager)
+    risk_manager: RiskManager = field(
+        default_factory=lambda: RiskManager(
+            capital_pools={
+                "CRYPTO": float(os.getenv("APEX_CRYPTO_CAPITAL",  "10000")),
+                "INDIA":  float(os.getenv("APEX_INDIA_CAPITAL",  "100000")),
+                "FOREX":  float(os.getenv("APEX_FOREX_CAPITAL",  "10000")),
+            }
+        )
+    )
+    # Broker adapters keyed by market type — enables hot-swap without rebuilding executor
+    broker_adapters: dict = field(default_factory=lambda: {
+        "nse":   AngelOneAdapter(paper_balance=float(os.getenv("APEX_INDIA_CAPITAL", "100000"))),
+        "forex": OandaAdapter(paper_balance=float(os.getenv("APEX_FOREX_CAPITAL", "10000"))),
+    })
     executor: TradeExecutor = field(default_factory=lambda: TradeExecutor(live_trading_enabled=False))
     broadcaster: WebSocketBroadcaster = field(default_factory=WebSocketBroadcaster)
-    quant_model: ApexXGBoostModel = field(default_factory=ApexXGBoostModel)
     news_fetcher: CryptoNewsFetcher = field(default_factory=CryptoNewsFetcher)
     trade_history: List[TradeTicket] = field(default_factory=list)
     latest_news: List[str] = field(default_factory=list)
@@ -136,19 +160,43 @@ class DashboardRuntime:
     last_probability_zone: str = "NEUTRAL"
     latest_warmup_status: dict = field(default_factory=_default_warmup_status)
     db_status: str = "connected"
+    active_tab: str = "CRYPTO"
+    global_best_signal: Optional[dict] = None
+    crypto_probabilities: list = field(default_factory=list)
+    nse_probabilities: list = field(default_factory=list)
 
 
 runtime = DashboardRuntime()
 
+model_registry = {
+    "crypto": ApexXGBoostModel(model_name="crypto_model"),
+    "nse": ApexXGBoostModel(model_name="banknifty_model")
+}
+
 
 def _sanitize_features(features: Optional[dict]) -> dict:
+    """
+    Merge live features onto the synthetic baseline.
+    For NSE index instruments (zero volume), 'VWAP' holds the session TWAP
+    computed by train_nse_v3. If still zero/NaN, fall back gracefully to
+    the close price so the UI never renders NaN.
+    """
     merged = {**_build_synthetic_features(), **(features or {})}
+
+    # VWAP / TWAP guard: never let this be 0 or NaN — fall back to close price
+    vwap_val = merged.get("VWAP", 0.0)
+    if not vwap_val or not math.isfinite(float(vwap_val)) or float(vwap_val) == 0.0:
+        merged["VWAP"] = merged.get("close", 0.0)
+
     return merged
 
 
 def _safe_predict(features: dict) -> float:
     try:
-        probability = runtime.quant_model.predict(
+        model_key = "nse" if "NIFTY" in DEFAULT_SYMBOL.upper() else "crypto"
+        model = model_registry[model_key]
+        
+        probability = model.predict(
             pd.DataFrame(
                 [{"symbol": DEFAULT_SYMBOL.lower(), "timestamp": datetime.utcnow(), **features}]
             )
@@ -162,11 +210,11 @@ def _safe_predict(features: dict) -> float:
         return 0.5
 
 
-def _build_order_details(
+async def _build_order_details(
     signal: str,
     features: dict,
     style_key: str,
-    capital: float,
+    broker_adapter,
     probability: float,
 ) -> ExecutionPlan:
     style = TRADING_PROFILES["styles"].get(
@@ -187,26 +235,27 @@ def _build_order_details(
     reward_per_unit = abs(entry - take_profit)
     risk_reward = round(reward_per_unit / risk_per_unit, 2) if risk_per_unit > 0 else 0.0
 
-    original_capital = runtime.risk_manager.total_capital
-    runtime.risk_manager.total_capital = capital
     high_confidence_confluence = (
         (signal == "BUY" and features.get("fvg_signal", 0.0) > 0 and features.get("liquidity_sweep_signal", 0.0) > 0)
         or (signal == "SELL" and features.get("fvg_signal", 0.0) < 0 and features.get("liquidity_sweep_signal", 0.0) < 0)
     )
     try:
-        allocation = runtime.risk_manager.calculate_position_size(
+        allocation = await runtime.risk_manager.calculate_position_size(
             symbol=DEFAULT_SYMBOL,
             action=signal,
-            confidence=probability,
+            confidence=probability if signal == "BUY" else 1.0 - probability,
             reward_risk_ratio=max(risk_reward, 1.0),
             kelly_fraction=style["kelly_fraction"],
             high_confidence_confluence=high_confidence_confluence,
+            broker_adapter=broker_adapter,
         )
-    finally:
-        runtime.risk_manager.total_capital = original_capital
+    except Exception as exc:
+        logger.error(f"Error calculating position size: {exc}")
+        allocation = 0.0
 
+    current_capital = await broker_adapter.get_account_balance() if broker_adapter else runtime.risk_manager.total_capital
     position_qty = round(allocation / entry, 4) if entry > 0 and allocation > 0 else 0.0
-    leverage = round(allocation / capital, 1) if capital > 0 else 1.0
+    leverage = round(allocation / current_capital, 1) if current_capital > 0 else 1.0
 
     return ExecutionPlan(
         entry_price=round(entry, 2),
@@ -305,10 +354,10 @@ def _build_structural_edge(features: dict) -> tuple[str, float, list[str], bool]
 
 
 def _build_signal_analysis(features: dict, bullish_probability: float, sentiment: float) -> SignalAnalysis:
-    close_price = float(features.get("close", 0.0))
-    vwap = float(features.get("VWAP", close_price))
-    rsi = float(features.get("RSI", 50.0))
-    macd_hist = float(features.get("MACD_hist", 0.0))
+    close_price = float(features.get("close") or 0.0)
+    vwap = float(features.get("VWAP") or close_price)
+    rsi = float(features.get("RSI") or 50.0)
+    macd_hist = float(features.get("MACD_hist") or 0.0)
 
     structural_edge, structural_score, _, _ = _build_structural_edge(features)
     technical_score = _clamp(
@@ -351,52 +400,76 @@ def _build_signal_analysis(features: dict, bullish_probability: float, sentiment
     )
 
 
-def _build_synthetic_features() -> dict:
+def _build_synthetic_features(symbol: str = "BTCUSDT") -> dict:
+    """
+    Baseline synthetic feature vector used as fallback when live data is
+    unavailable. Keys match MODEL_FEATURE_COLUMNS exactly (30 features).
+    BOS signal values are clamped to {-1.0, 0.0, 1.0} matching training labels.
+    """
     runtime.synthetic_tick += 1
     phase = runtime.synthetic_tick / 5
-    close_price = 68450 + math.sin(phase) * 210 + math.cos(phase / 2) * 90
-    atr = 92 + abs(math.sin(phase / 3)) * 16
-    vwap = close_price - math.sin(phase / 2) * 24
+    
+    symbol_upper = symbol.upper()
+    if "NIFTY" in symbol_upper:
+        base_price = 48500
+        volatility = 120
+    elif "EURUSD" in symbol_upper:
+        base_price = 1.0850
+        volatility = 0.0020
+    else:
+        base_price = 68450
+        volatility = 210
+        
+    close_price = base_price + math.sin(phase) * volatility + math.cos(phase / 2) * (volatility * 0.4)
+    atr = (volatility * 0.45) + abs(math.sin(phase / 3)) * (volatility * 0.08)
+    vwap = close_price - math.sin(phase / 2) * (volatility * 0.1)
     rsi = 50 + math.sin(phase) * 11
     macd_hist = math.sin(phase / 1.8) * 0.35
 
     return {
-        "open": round(close_price - 32, 4),
-        "high": round(close_price + 58, 4),
-        "low": round(close_price - 66, 4),
-        "close": round(close_price, 4),
+        # ── OHLCV ──────────────────────────────────────────────────────────
+        "open":   round(close_price - 32, 4),
+        "high":   round(close_price + 58, 4),
+        "low":    round(close_price - 66, 4),
+        "close":  round(close_price, 4),
         "volume": round(1542 + abs(math.cos(phase)) * 325, 4),
-        "RSI": round(rsi, 4),
-        "EMA_14": round(close_price - 18, 4),
-        "EMA_50": round(close_price - 42, 4),
-        "MACD": round(macd_hist * 2, 6),
+        # ── Core indicators ────────────────────────────────────────────────
+        "RSI":         round(rsi, 4),
+        "EMA_14":      round(close_price - 18, 4),
+        "EMA_50":      round(close_price - 42, 4),
+        "MACD":        round(macd_hist * 2, 6),
         "MACD_signal": round(macd_hist, 6),
-        "MACD_hist": round(macd_hist, 6),
-        "VWAP": round(vwap, 4),
-        "ATR": round(atr, 4),
-        "spread": 0.6,
-        "CVD": round(math.sin(phase) * 240, 4),
-        "best_bid": round(close_price - 0.2, 4),
-        "best_bid_qty": 12.4,
-        "best_ask": round(close_price + 0.2, 4),
-        "best_ask_qty": 11.9,
+        "MACD_hist":   round(macd_hist, 6),
+        "VWAP":        round(vwap, 4),   # live feed provides real VWAP/TWAP
+        "ATR":         round(atr, 4),
+        "CVD":         round(math.sin(phase) * 240, 4),
+        # ── LOB / execution ────────────────────────────────────────────────
+        "spread":              0.6,
+        "best_bid":            round(close_price - 0.2, 4),
+        "best_bid_qty":        12.4,
+        "best_ask":            round(close_price + 0.2, 4),
+        "best_ask_qty":        11.9,
         "recent_long_liq_vol": round(abs(math.sin(phase)) * 25, 4),
-        "recent_short_liq_vol": round(abs(math.cos(phase)) * 21, 4),
-        "liq_imbalance": round(math.sin(phase) * 8, 4),
-        "fvg_signal": 1.0 if math.sin(phase) > 0.55 else -1.0 if math.sin(phase) < -0.55 else 0.0,
-        "fvg_gap_pct": round(abs(math.sin(phase)) * 0.002, 6),
-        "liquidity_sweep_signal": 1.0 if math.cos(phase) > 0.6 else -1.0 if math.cos(phase) < -0.6 else 0.0,
-        "liquidity_reclaim_strength": round(abs(math.cos(phase)) * 1.4, 6),
-        "structure_break_signal": 2.0 if math.sin(phase / 1.7) > 0.65 else -2.0 if math.sin(phase / 1.7) < -0.65 else 0.0,
-        "structure_break_strength": round(abs(math.sin(phase / 1.7)) * 1.2, 6),
-        "structural_confluence": 1.0 if abs(math.sin(phase)) > 0.7 and abs(math.cos(phase)) > 0.7 else 0.0,
+        "recent_short_liq_vol":round(abs(math.cos(phase)) * 21, 4),
+        "liq_imbalance":       round(math.sin(phase) * 8, 4),
+        # ── SMC / structure ────────────────────────────────────────────────
+        "fvg_signal":                1.0 if math.sin(phase) > 0.55 else -1.0 if math.sin(phase) < -0.55 else 0.0,
+        "fvg_gap_pct":               round(abs(math.sin(phase)) * 0.002, 6),
+        "liquidity_sweep_signal":    1.0 if math.cos(phase) > 0.6  else -1.0 if math.cos(phase) < -0.6  else 0.0,
+        "liquidity_reclaim_strength":round(abs(math.cos(phase)) * 1.0, 6),   # clamped to [0, 1]
+        "structure_break_signal":    1.0 if math.sin(phase / 1.7) > 0.65 else -1.0 if math.sin(phase / 1.7) < -0.65 else 0.0,  # was ±2.0 — fixed
+        "structure_break_strength":  round(abs(math.sin(phase / 1.7)) * 1.0, 6),
+        "structural_confluence":     1.0 if abs(math.sin(phase)) > 0.7 and abs(math.cos(phase)) > 0.7 else 0.0,
+        # ── Macro ──────────────────────────────────────────────────────────
         "macro_sentiment_score": 0.5,
     }
 
 
 async def _load_market_features(symbol: str) -> dict:
     fetcher = DataFetcher(db_manager)
-    dataframe = await fetcher.build_dataset(symbol.lower())
+    # Route to NSE session-aware pipeline for any NIFTY variant (BANKNIFTY, NIFTY, etc.)
+    market_type = "nse" if "NIFTY" in symbol.upper() else "crypto"
+    dataframe = await fetcher.build_dataset(symbol.lower(), market_type=market_type)
     if dataframe.empty:
         warmup_status = await fetcher.fetch_warmup_status(symbol.lower())
         if not warmup_status.get("ready"):
@@ -412,11 +485,19 @@ async def _load_market_features(symbol: str) -> dict:
         return {}
 
     row = dataframe.iloc[0]
-    return {
+    features = {
         key: round(float(value), 6)
         for key, value in row.items()
         if key not in {"timestamp", "symbol"}
     }
+
+    # NSE index instruments report zero volume — VWAP is stored as session TWAP.
+    # Guard against zero/NaN so the frontend always has a valid reference price.
+    vwap_val = features.get("VWAP", 0.0)
+    if not vwap_val or not math.isfinite(float(vwap_val)) or float(vwap_val) == 0.0:
+        features["VWAP"] = features.get("close", 0.0)
+
+    return features
 
 
 def _build_trade_ticket(
@@ -435,7 +516,7 @@ def _build_trade_ticket(
         signal=signal,
         status="EXECUTED" if trigger_source == "manual_override" else "STAGED",
         probability=round(probability, 4),
-        provider=PROVIDER_NAME,
+        provider=_get_provider_name(DEFAULT_SYMBOL),
         trigger_source=trigger_source,
         time=now.strftime("%I:%M %p"),
         date=now.strftime("%b %d, %Y"),
@@ -515,7 +596,7 @@ def _build_snapshot(
     smart_order_card = SmartOrderCard(
         order_id=runtime.trade_history[0].order_id if runtime.trade_history else None,
         symbol=DEFAULT_SYMBOL,
-        provider=PROVIDER_NAME,
+        provider=_get_provider_name(DEFAULT_SYMBOL),
         signal=signal,
         bullish_probability=round(probability, 4),
         bearish_probability=round(1 - probability, 4),
@@ -554,31 +635,33 @@ def _build_snapshot(
             autonomous_mode=runtime.risk_manager.autonomous_mode,
             execution_mode=runtime.risk_manager.execution_mode,
             db_status=runtime.db_status,
+            active_tab=runtime.active_tab,
         ),
         market=DashboardMarket(
             symbol=DEFAULT_SYMBOL,
-            provider=PROVIDER_NAME,
-            close_price=float(features.get("close", 0.0)),
-            rsi=float(features.get("RSI", 50.0)),
-            vwap=float(features.get("VWAP", 0.0)),
-            atr=float(features.get("ATR", 0.0)),
+            provider=_get_provider_name(DEFAULT_SYMBOL),
+            close_price=float(features.get("close") or 0.0),
+            rsi=float(features.get("RSI") or 50.0),
+            vwap=float(features.get("VWAP") or features.get("close") or 0.0),
+            atr=float(features.get("ATR") or 0.0),
             sentiment=round(sentiment, 4),
             probability=round(probability, 4),
             signal=signal,
             structural_features={
-                "fvg_signal": float(features.get("fvg_signal", 0.0)),
-                "fvg_gap_pct": float(features.get("fvg_gap_pct", 0.0)),
-                "liquidity_sweep_signal": float(features.get("liquidity_sweep_signal", 0.0)),
-                "liquidity_reclaim_strength": float(features.get("liquidity_reclaim_strength", 0.0)),
-                "structure_break_signal": float(features.get("structure_break_signal", 0.0)),
-                "structure_break_strength": float(features.get("structure_break_strength", 0.0)),
-                "structural_confluence": float(features.get("structural_confluence", 0.0)),
+                "fvg_signal": float(features.get("fvg_signal") or 0.0),
+                "fvg_gap_pct": float(features.get("fvg_gap_pct") or 0.0),
+                "liquidity_sweep_signal": float(features.get("liquidity_sweep_signal") or 0.0),
+                "liquidity_reclaim_strength": float(features.get("liquidity_reclaim_strength") or 0.0),
+                "structure_break_signal": float(features.get("structure_break_signal") or 0.0),
+                "structure_break_strength": float(features.get("structure_break_strength") or 0.0),
+                "structural_confluence": float(features.get("structural_confluence") or 0.0),
             },
         ),
-        active_trades=_build_active_trades(float(features.get("close", 0.0))),
+        active_trades=_build_active_trades(float(features.get("close") or 0.0)),
         smart_order_card=smart_order_card,
         trades=runtime.trade_history[:20],
         news=runtime.latest_news[:12],
+        global_best_signal=runtime.global_best_signal,
     )
     runtime.latest_snapshot = snapshot
     return snapshot
@@ -588,11 +671,11 @@ async def _refresh_snapshot(event_type: str, warmup_status: Optional[dict] = Non
     features = _sanitize_features(runtime.latest_features)
     execution_plan = None
     if runtime.last_signal != "HOLD":
-        execution_plan = _build_order_details(
+        execution_plan = await _build_order_details(
             signal=runtime.last_signal,
             features=features,
             style_key=DEFAULT_STYLE,
-            capital=runtime.risk_manager.total_capital,
+            broker_adapter=runtime.executor.broker,
             probability=runtime.latest_probability,
         )
 
@@ -682,7 +765,7 @@ async def inference_loop():
                     "HOLD",
                     0.5,
                     0.5,
-                    _build_synthetic_features(),
+                    _build_synthetic_features(DEFAULT_SYMBOL),
                     None,
                     warmup_status=warmup_status,
                 )
@@ -776,11 +859,11 @@ async def inference_loop():
 
             execution_plan = None
             if signal != "HOLD":
-                execution_plan = _build_order_details(
+                execution_plan = await _build_order_details(
                     signal=signal,
                     features=features,
                     style_key=DEFAULT_STYLE,
-                    capital=runtime.risk_manager.total_capital,
+                    broker_adapter=runtime.executor.broker,
                     probability=probability,
                 )
 
@@ -897,6 +980,64 @@ async def database_heartbeat_loop():
         await asyncio.sleep(60)
 
 
+async def alpha_ranker_loop():
+    await asyncio.sleep(5)
+    while True:
+        try:
+            fetcher = DataFetcher(db_manager)
+            
+            # Crypto
+            crypto_df = await fetcher.build_dataset("btcusdt", market_type="crypto")
+            if not crypto_df.empty:
+                crypto_features = {k: float(v) for k, v in crypto_df.iloc[0].items() if k not in {"timestamp", "symbol"}}
+                prob_crypto = model_registry["crypto"].predict(pd.DataFrame([{"symbol": "btcusdt", "timestamp": datetime.utcnow(), **crypto_features}]))
+                if isinstance(prob_crypto, (float, int)) and math.isfinite(float(prob_crypto)):
+                    runtime.crypto_probabilities.append(float(prob_crypto))
+                    if len(runtime.crypto_probabilities) > 10:
+                        runtime.crypto_probabilities.pop(0)
+
+            # NSE
+            nse_df = await fetcher.build_dataset("banknifty", market_type="nse")
+            if not nse_df.empty:
+                nse_features = {k: float(v) for k, v in nse_df.iloc[0].items() if k not in {"timestamp", "symbol"}}
+                prob_nse = model_registry["nse"].predict(pd.DataFrame([{"symbol": "banknifty", "timestamp": datetime.utcnow(), **nse_features}]))
+                if isinstance(prob_nse, (float, int)) and math.isfinite(float(prob_nse)):
+                    runtime.nse_probabilities.append(float(prob_nse))
+                    if len(runtime.nse_probabilities) > 10:
+                        runtime.nse_probabilities.pop(0)
+
+            # Compare
+            crypto_avg = sum(runtime.crypto_probabilities) / len(runtime.crypto_probabilities) if runtime.crypto_probabilities else 0.5
+            nse_avg = sum(runtime.nse_probabilities) / len(runtime.nse_probabilities) if runtime.nse_probabilities else 0.5
+
+            crypto_conviction = abs(crypto_avg - 0.5)
+            nse_conviction = abs(nse_avg - 0.5)
+
+            if crypto_conviction >= nse_conviction:
+                best_market = "CRYPTO"
+                best_prob = crypto_avg
+            else:
+                best_market = "INDIA (NSE)"
+                best_prob = nse_avg
+                
+            direction = "BULLISH" if best_prob >= 0.5 else "BEARISH"
+
+            runtime.global_best_signal = {
+                "market": best_market,
+                "probability": round(best_prob, 4),
+                "direction": direction,
+                "conviction": round(max(crypto_conviction, nse_conviction) * 200, 2)
+            }
+            
+            if runtime.latest_snapshot:
+                runtime.latest_snapshot.global_best_signal = runtime.global_best_signal
+
+        except Exception as exc:
+            logger.error(f"Alpha Ranker loop error: {exc}")
+            
+        await asyncio.sleep(5)
+
+
 async def news_loop():
     await asyncio.sleep(1)
     while True:
@@ -933,6 +1074,7 @@ async def lifespan(_: FastAPI):
     inference_task = asyncio.create_task(inference_loop())
     news_task = asyncio.create_task(news_loop())
     heartbeat_task = asyncio.create_task(database_heartbeat_loop())
+    alpha_ranker_task = asyncio.create_task(alpha_ranker_loop())
 
     try:
         yield
@@ -940,7 +1082,8 @@ async def lifespan(_: FastAPI):
         inference_task.cancel()
         news_task.cancel()
         heartbeat_task.cancel()
-        await asyncio.gather(inference_task, news_task, heartbeat_task, return_exceptions=True)
+        alpha_ranker_task.cancel()
+        await asyncio.gather(inference_task, news_task, heartbeat_task, alpha_ranker_task, return_exceptions=True)
         await runtime.executor.disconnect()
         await db_manager.disconnect()
         logger.info("Apex Command Center backend stopped.")
@@ -1155,6 +1298,22 @@ async def get_profiles():
 @app.get("/api/news")
 async def get_news():
     return {"news": runtime.latest_news[:15]}
+
+
+@app.post("/api/market/tab/{tab_name}")
+async def switch_market_tab(tab_name: str):
+    global DEFAULT_SYMBOL
+    runtime.active_tab = tab_name.upper()
+    if runtime.active_tab == "INDIA":
+        DEFAULT_SYMBOL = "BANKNIFTY"
+    elif runtime.active_tab == "FOREX":
+        DEFAULT_SYMBOL = "EURUSD"
+    else:
+        DEFAULT_SYMBOL = "BTCUSDT"
+        
+    if runtime.latest_snapshot is not None:
+        await _refresh_snapshot("tab.switched")
+    return {"status": "ok", "active_tab": runtime.active_tab, "symbol": DEFAULT_SYMBOL}
 
 
 @app.get("/api/market/tick")

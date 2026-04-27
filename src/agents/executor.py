@@ -5,9 +5,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from binance import AsyncClient
-from binance import BinanceSocketManager
-from binance.enums import ORDER_TYPE_MARKET
+from src.brokers.base_adapter import BaseBrokerAdapter
+from src.brokers.binance_adapter import BinanceAdapter
 from dotenv import load_dotenv
 from loguru import logger
 
@@ -21,16 +20,12 @@ class TradeExecutor:
     translating signals into orders, and persisting the active trade blotter.
     """
 
-    def __init__(self, live_trading_enabled: bool = False):
+    def __init__(self, live_trading_enabled: bool = False, broker_adapter: Optional[BaseBrokerAdapter] = None):
         self.live_trading_enabled = live_trading_enabled
-        self.client = None
-        self.bm = None
         self._state_lock = asyncio.Lock()
 
-        self.api_key = os.getenv("BINANCE_API_KEY")
-        self.api_secret = os.getenv("BINANCE_API_SECRET")
-        testnet_flag = os.getenv("BINANCE_USE_TESTNET", "True").lower()
-        self.use_testnet = testnet_flag in ["true", "1", "yes"]
+        mode = "LIVE" if live_trading_enabled else "DRY_RUN"
+        self.broker = broker_adapter or BinanceAdapter(mode=mode)
 
         root_dir = Path(__file__).resolve().parents[2]
         self.state_file = Path(
@@ -54,31 +49,17 @@ class TradeExecutor:
         normalized["is_active"] = bool(normalized.get("is_active", status != "CLOSED"))
         normalized["broker_status"] = normalized.get("broker_status", "DRY_RUN")
         normalized["exit_reason"] = normalized.get("exit_reason")
+        normalized["scaled_out"] = bool(normalized.get("scaled_out", False))
+        normalized["breakeven_triggered"] = bool(normalized.get("breakeven_triggered", False))
         return normalized
 
     async def connect(self):
-        """Initializes the asynchronous Binance client and Socket Manager."""
-        if not self.live_trading_enabled:
-            return
-
-        if not self.api_key or not self.api_secret:
-            logger.error("Binance API keys not found in .env. Execution will fail.")
-            return
-
-        logger.info(f"Connecting to Binance API... (Testnet: {self.use_testnet})")
-        self.client = await AsyncClient.create(
-            api_key=self.api_key,
-            api_secret=self.api_secret,
-            testnet=self.use_testnet,
-        )
-        self.bm = BinanceSocketManager(self.client)
-        logger.info("Binance AsyncClient and SocketManager connected successfully.")
+        """Initializes the connection to the broker API."""
+        await self.broker.connect()
 
     async def disconnect(self):
         """Gracefully closes the connection."""
-        if self.client:
-            await self.client.close_connection()
-            logger.info("Binance AsyncClient disconnected.")
+        await self.broker.disconnect()
 
     def _load_active_trades(self) -> dict[str, dict]:
         try:
@@ -196,18 +177,14 @@ class TradeExecutor:
                 "orderId": order_id,
             }
 
-        if not self.client:
-            logger.error("Binance client not connected. Call connect() first.")
-            return None
-
-        try:
-            logger.info(f"Executing live {side} MARKET order for {quantity} {symbol}...")
-            response = await self.client.futures_create_order(
-                symbol=symbol,
-                side=side,
-                type=ORDER_TYPE_MARKET,
-                quantity=quantity,
-            )
+        response = await self.broker.execute_order(
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            order_type="MARKET",
+            entry_price=entry_price
+        )
+        if response:
             logger.success(f"Order executed successfully: {response.get('orderId')}")
             await self._register_active_trade(
                 order_id=str(response.get("orderId", order_id)),
@@ -220,11 +197,7 @@ class TradeExecutor:
                 broker_status="LIVE",
                 confidence_tier=confidence_tier,
             )
-            return response
-        except Exception as exc:
-            logger.error(f"Failed to execute market order: {exc}")
-            return None
-
+        return response
     async def _register_active_trade(
         self,
         order_id: str,
@@ -282,17 +255,70 @@ class TradeExecutor:
     ) -> list[dict]:
         """
         Marks active LONG positions for autonomous square-off when the model
-        loses conviction or structure flips bearish.
+        loses conviction or structure flips bearish. Also manages dynamic scaling and trailing.
         """
         await self.purge_stale_dry_run_trades()
         
+        normalized_price = round(float(current_price or 0.0), 4)
+
+        async with self._state_lock:
+            for order_id, trade in self.active_trades.items():
+                if not trade.get("is_active", True) or trade.get("symbol") != symbol:
+                    continue
+
+                entry_price = float(trade.get("entry_price", 0.0))
+                original_stop_loss = float(trade.get("trailing_stop_level", 0.0))
+                side = trade.get("side", "").upper()
+                
+                if normalized_price > 0:
+                    trade["current_price"] = normalized_price
+
+                # Scale-Out & Breakeven Logic (The 1:1 Trigger)
+                if not trade.get("scaled_out", False) and normalized_price > 0 and entry_price > 0:
+                    rr_multiple = 0.0
+                    profit = 0.0
+                    risk = 0.0
+                    
+                    if side == "BUY":
+                        profit = normalized_price - entry_price
+                        risk = entry_price - original_stop_loss
+                    elif side == "SELL":
+                        profit = entry_price - normalized_price
+                        risk = original_stop_loss - entry_price
+                        
+                    if risk > 0:
+                        rr_multiple = profit / risk
+                        
+                    if rr_multiple >= 1.0:
+                        half_qty = round(float(trade.get("quantity", 0.0)) * 0.5, 3)
+                        if half_qty > 0:
+                            close_side = "SELL" if side == "BUY" else "BUY"
+                            
+                            logger.info(f"1:1 Target Hit! Scaling out 50% ({half_qty}) and trailing SL to Breakeven.")
+                            
+                            if self.live_trading_enabled:
+                                await self.broker.execute_order(
+                                    symbol=trade["symbol"],
+                                    side=close_side,
+                                    quantity=half_qty,
+                                    order_type="MARKET"
+                                )
+                            else:
+                                logger.info(f"[DRY RUN] Scaled out 50% via {close_side} MARKET for {half_qty}")
+
+                            trade["quantity"] = float(trade.get("quantity", 0.0)) - half_qty
+                            trade["trailing_stop_level"] = entry_price
+                            trade["scaled_out"] = True
+                            trade["breakeven_triggered"] = True
+                            
+            await self._persist_active_trades()
+            
         exit_reason = self._resolve_exit_reason(current_probability, structure_break_signal)
         if exit_reason is None:
             return []
 
         exit_candidates = []
         marked_at = datetime.utcnow().isoformat()
-        normalized_price = round(float(current_price or 0.0), 4)
 
         async with self._state_lock:
             for order_id, trade in self.active_trades.items():
@@ -378,22 +404,17 @@ class TradeExecutor:
         if not self.live_trading_enabled:
             logger.info(f"[DRY RUN] Would close {symbol} order {order_id} via {close_side} MARKET for {quantity}")
             result = {"status": "DRY_RUN", "orderId": order_id}
-        elif self.client:
-            try:
-                result = await self.client.futures_create_order(
-                    symbol=symbol,
-                    side=close_side,
-                    type=ORDER_TYPE_MARKET,
-                    quantity=quantity,
-                )
-            except Exception as exc:
-                await self._mark_exit_failed(order_id)
-                logger.error(f"Failed to close trade {order_id}: {exc}")
-                return None
         else:
-            await self._mark_exit_failed(order_id)
-            logger.error("Binance client not connected. Call connect() first.")
-            return None
+            result = await self.broker.execute_order(
+                symbol=symbol,
+                side=close_side,
+                quantity=quantity,
+                order_type="MARKET"
+            )
+            if not result:
+                await self._mark_exit_failed(order_id)
+                logger.error(f"Failed to close trade {order_id} via broker.")
+                return None
 
         async with self._state_lock:
             trade = self.active_trades.get(order_id)
@@ -439,15 +460,7 @@ class TradeExecutor:
         if local_positions:
             return local_positions
 
-        if not self.client:
-            return []
-
-        try:
-            positions = await self.client.futures_position_information(symbol=symbol)
-            return [position for position in positions if float(position.get("positionAmt", 0)) != 0]
-        except Exception as exc:
-            logger.error(f"Failed to fetch open positions: {exc}")
-            return []
+        return await self.broker.get_open_positions(symbol=symbol)
 
     async def clear_all_stale_trades(self):
         """Force-truncates the active trades local state file."""
@@ -493,28 +506,12 @@ class TradeExecutor:
         Side should be the opposite of the open position.
         """
         side = side.upper()
-        if not self.live_trading_enabled:
-            logger.info(f"[DRY RUN] Would set TRAILING STOP ({callback_rate}%) on {symbol} to {side} {quantity}")
-            return {"status": "DRY_RUN", "type": "TRAILING_STOP"}
-
-        if not self.client:
-            logger.error("Binance client not connected. Call connect() first.")
-            return None
-
-        try:
-            logger.info(f"Setting {callback_rate}% TRAILING STOP for {side} {quantity} {symbol}...")
-            response = await self.client.futures_create_order(
-                symbol=symbol,
-                side=side,
-                type="TRAILING_STOP_MARKET",
-                quantity=quantity,
-                callbackRate=callback_rate,
-            )
-            logger.success(f"Trailing stop set successfully: {response.get('orderId')}")
-            return response
-        except Exception as exc:
-            logger.error(f"Failed to set trailing stop: {exc}")
-            return None
+        return await self.broker.set_trailing_stop(
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            callback_rate=callback_rate
+        )
 
 
 if __name__ == "__main__":

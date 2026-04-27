@@ -12,6 +12,7 @@ from src.data.db import (
 
 
 def compute_rsi(series: pd.Series, length: int = 14) -> float:
+    series = series.ffill()
     delta = series.diff()
     gain = delta.where(delta > 0, 0.0)
     loss = -delta.where(delta < 0, 0.0)
@@ -23,11 +24,13 @@ def compute_rsi(series: pd.Series, length: int = 14) -> float:
 
 
 def compute_ema(series: pd.Series, span: int) -> float:
+    series = series.ffill()
     ema = series.ewm(span=span, adjust=False).mean()
     return float(ema.iloc[-1]) if not ema.empty else float(series.iloc[-1])
 
 
 def compute_macd(series: pd.Series):
+    series = series.ffill()
     ema_fast = series.ewm(span=12, adjust=False).mean()
     ema_slow = series.ewm(span=26, adjust=False).mean()
     macd_line = ema_fast - ema_slow
@@ -40,13 +43,27 @@ def compute_macd(series: pd.Series):
     )
 
 
-def compute_vwap(df: pd.DataFrame) -> float:
-    typical_price = (df["high"] + df["low"] + df["close"]) / 3
-    vwap = (typical_price * df["volume"]).cumsum() / df["volume"].cumsum()
+def compute_session_vwap(df: pd.DataFrame, market_type: str = "crypto") -> float:
+    if df.empty:
+        return 0.0
+    
+    df_vwap = df.copy().ffill()
+    typical_price = (df_vwap["high"] + df_vwap["low"] + df_vwap["close"]) / 3
+    df_vwap["typical_vol"] = typical_price * df_vwap["volume"]
+
+    if market_type == "nse" and "open_time" in df_vwap.columns:
+        df_vwap["dt"] = pd.to_datetime(df_vwap["open_time"], unit="ms").dt.tz_localize("UTC").dt.tz_convert("Asia/Kolkata")
+        df_vwap["local_date"] = df_vwap["dt"].dt.date
+        grouped = df_vwap.groupby("local_date")
+        vwap = grouped["typical_vol"].cumsum() / grouped["volume"].cumsum()
+    else:
+        vwap = df_vwap["typical_vol"].cumsum() / df_vwap["volume"].cumsum()
+        
     return float(vwap.iloc[-1]) if not vwap.empty and not pd.isna(vwap.iloc[-1]) else 0.0
 
 
 def compute_atr(df: pd.DataFrame, length: int = 14) -> float:
+    df = df.ffill()
     high = df["high"]
     low = df["low"]
     close = df["close"]
@@ -64,103 +81,93 @@ def _normalize_gap(value: float, reference: float) -> float:
     return round(value / reference, 6)
 
 
-def detect_fvg(df: pd.DataFrame) -> dict:
+def compute_fvg(df: pd.DataFrame) -> tuple[float, float]:
     if len(df) < 3:
-        return {"fvg_signal": 0.0, "fvg_gap_pct": 0.0}
+        return 0.0, 0.0
 
-    candle_a = df.iloc[-3]
-    candle_c = df.iloc[-1]
-    reference = max(float(candle_c["close"]), 1.0)
-
-    bullish_gap = float(candle_c["low"]) - float(candle_a["high"])
-    bearish_gap = float(candle_a["low"]) - float(candle_c["high"])
+    c1 = df.iloc[-3]
+    c3 = df.iloc[-1]
+    
+    bullish_gap = float(c3["low"]) - float(c1["high"])
+    bearish_gap = float(c1["low"]) - float(c3["high"])
+    
+    close_price = max(float(c3["close"]), 1e-9)
 
     if bullish_gap > 0:
-        return {
-            "fvg_signal": 1.0,
-            "fvg_gap_pct": _normalize_gap(bullish_gap, reference),
-        }
+        return 1.0, float(bullish_gap / close_price)
+    
     if bearish_gap > 0:
-        return {
-            "fvg_signal": -1.0,
-            "fvg_gap_pct": _normalize_gap(bearish_gap, reference),
-        }
-    return {"fvg_signal": 0.0, "fvg_gap_pct": 0.0}
+        return -1.0, float(bearish_gap / close_price)
+
+    return 0.0, 0.0
 
 
-def detect_liquidity_sweep(df: pd.DataFrame, lookback: int = 20) -> dict:
-    if len(df) < max(lookback + 1, 6):
-        return {"liquidity_sweep_signal": 0.0, "liquidity_reclaim_strength": 0.0}
+def compute_liquidity_sweep(df: pd.DataFrame, window: int = 20) -> tuple[float, float]:
+    if len(df) < window + 1:
+        return 0.0, 0.0
 
-    current = df.iloc[-1]
-    window = df.iloc[-(lookback + 1):-1]
-    atr = compute_atr(df.tail(max(lookback, 20)))
-    atr = atr if atr > 0 else max(float(current["close"]) * 0.001, 1.0)
+    pivot_high = float(df['high'].shift(1).rolling(window).max().iloc[-1])
+    pivot_low  = float(df['low'].shift(1).rolling(window).min().iloc[-1])
 
-    prior_high = float(window["high"].max())
-    prior_low = float(window["low"].min())
-    close_price = float(current["close"])
-    high_price = float(current["high"])
-    low_price = float(current["low"])
+    current    = df.iloc[-1]
+    high_price = float(current['high'])
+    low_price  = float(current['low'])
+    close_price = float(current['close'])
 
-    if low_price < prior_low and close_price > prior_low:
-        reclaim_strength = max(close_price - prior_low, 0.0) / atr
-        return {
-            "liquidity_sweep_signal": 1.0,
-            "liquidity_reclaim_strength": round(reclaim_strength, 6),
-        }
-    if high_price > prior_high and close_price < prior_high:
-        reclaim_strength = max(prior_high - close_price, 0.0) / atr
-        return {
-            "liquidity_sweep_signal": -1.0,
-            "liquidity_reclaim_strength": round(reclaim_strength, 6),
-        }
-    return {"liquidity_sweep_signal": 0.0, "liquidity_reclaim_strength": 0.0}
+    candle_range = high_price - low_price
+
+    # Bullish sweep: wick below swing low, close back above it
+    if low_price < pivot_low and close_price > pivot_low:
+        reclaim = (close_price - low_price) / candle_range if candle_range > 0 else 0.0
+        return 1.0, round(reclaim, 6)
+
+    # Bearish sweep: wick above swing high, close back below it
+    if high_price > pivot_high and close_price < pivot_high:
+        reclaim = (high_price - close_price) / candle_range if candle_range > 0 else 0.0
+        return -1.0, round(reclaim, 6)
+
+    return 0.0, 0.0
 
 
-def detect_structure_break(df: pd.DataFrame, lookback: int = 12) -> dict:
-    if len(df) < max(lookback + 2, 8):
-        return {"structure_break_signal": 0.0, "structure_break_strength": 0.0}
-
-    current = df.iloc[-1]
-    previous = df.iloc[-2]
-    structure_window = df.iloc[-(lookback + 2):-2]
-
-    prior_high = float(structure_window["high"].max())
-    prior_low = float(structure_window["low"].min())
-    atr = compute_atr(df.tail(max(lookback, 20)))
-    atr = atr if atr > 0 else max(float(current["close"]) * 0.001, 1.0)
-    trend_bias = float(previous["close"]) - float(structure_window["close"].mean())
-
-    if float(current["close"]) > prior_high:
-        break_strength = (float(current["close"]) - prior_high) / atr
-        return {
-            "structure_break_signal": 2.0 if trend_bias >= 0 else 1.0,
-            "structure_break_strength": round(break_strength, 6),
-        }
-    if float(current["close"]) < prior_low:
-        break_strength = (prior_low - float(current["close"])) / atr
-        return {
-            "structure_break_signal": -2.0 if trend_bias <= 0 else -1.0,
-            "structure_break_strength": round(break_strength, 6),
-        }
-    return {"structure_break_signal": 0.0, "structure_break_strength": 0.0}
+def compute_bos(df: pd.DataFrame, window: int = 20) -> tuple[float, float]:
+    if len(df) < window + 1:
+        return 0.0, 0.0
+        
+    pivot_high = float(df['high'].shift(1).rolling(window).max().iloc[-1])
+    pivot_low = float(df['low'].shift(1).rolling(window).min().iloc[-1])
+    current_close = float(df.iloc[-1]['close'])
+    
+    if current_close > pivot_high:
+        strength = (current_close - pivot_high) / pivot_high if pivot_high > 0 else 0.0
+        return 1.0, float(strength)
+        
+    if current_close < pivot_low:
+        strength = (pivot_low - current_close) / pivot_low if pivot_low > 0 else 0.0
+        return -1.0, float(strength)
+        
+    return 0.0, 0.0
 
 
 def build_structure_features(df: pd.DataFrame) -> dict:
-    fvg = detect_fvg(df)
-    sweep = detect_liquidity_sweep(df)
-    structure = detect_structure_break(df)
-    structural_confluence = (
-        fvg["fvg_signal"] != 0.0
-        and fvg["fvg_signal"] == sweep["liquidity_sweep_signal"]
-    )
+    fvg_signal, fvg_gap_pct         = compute_fvg(df)
+    bos_signal, bos_strength         = compute_bos(df, window=20)
+    sweep_signal, sweep_reclaim      = compute_liquidity_sweep(df, window=20)
+
+    if fvg_signal == 1.0 and bos_signal == 1.0:
+        structural_confluence = 1.0
+    elif fvg_signal == -1.0 and bos_signal == -1.0:
+        structural_confluence = -1.0
+    else:
+        structural_confluence = 0.0
 
     return {
-        **fvg,
-        **sweep,
-        **structure,
-        "structural_confluence": 1.0 if structural_confluence else 0.0,
+        "fvg_signal":                fvg_signal,
+        "fvg_gap_pct":               fvg_gap_pct,
+        "liquidity_sweep_signal":    sweep_signal,
+        "liquidity_reclaim_strength": sweep_reclaim,
+        "structure_break_signal":    bos_signal,
+        "structure_break_strength":  bos_strength,
+        "structural_confluence":     structural_confluence,
     }
 
 
@@ -293,7 +300,7 @@ class DataFetcher:
             return round(float(asks[0][0]), 6)
         return None
 
-    async def build_dataset(self, symbol: str) -> pd.DataFrame:
+    async def build_dataset(self, symbol: str, market_type: str = "crypto") -> pd.DataFrame:
         warmup_status = await self.fetch_warmup_status(symbol)
         if not warmup_status.get("ready"):
             logger.info(
@@ -340,7 +347,7 @@ class DataFetcher:
             ema_14 = compute_ema(close, span=14)
             ema_50 = compute_ema(close, span=50)
             macd, macd_signal, macd_hist = compute_macd(close)
-            vwap = compute_vwap(klines_df)
+            vwap = compute_session_vwap(klines_df, market_type=market_type)
             atr = compute_atr(klines_df, length=14)
 
             latest = klines_df.iloc[-1]
