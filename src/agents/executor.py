@@ -149,10 +149,16 @@ class TradeExecutor:
         trailing_stop_level: Optional[float] = None,
         callback_rate: float = 1.0,
         confidence_tier: int = 1,
+        order_type: str = "MARKET",
+        best_bid: float = 0.0,
+        best_ask: float = 0.0,
     ):
         """
-        Executes a market order on Binance USD-M Futures.
+        Executes a market or limit order on the configured broker.
         If live_trading_enabled is False, this is safely mocked as a DRY RUN.
+
+        best_bid / best_ask are forwarded to the broker adapter for realistic
+        spread-crossing slippage simulation (Epic 26).
         """
         side = side.upper()
         if side not in ["BUY", "SELL"]:
@@ -162,13 +168,30 @@ class TradeExecutor:
         order_id = order_id or datetime.utcnow().strftime("%Y%m%d%H%M%S")
 
         if not self.live_trading_enabled:
-            logger.info(f"[DRY RUN] Would execute {side} MARKET order for {quantity} {symbol}")
+            logger.info(
+                "[DRY RUN] Would execute {} {} order for {} {} "
+                "| bid={:.4f} | ask={:.4f}",
+                side, order_type, quantity, symbol, best_bid, best_ask,
+            )
+            # Route through broker adapter so slippage simulation fires
+            broker_result = await self.broker.execute_order(
+                symbol=symbol,
+                side=side,
+                quantity=quantity,
+                order_type=order_type,
+                entry_price=entry_price,
+                best_bid=best_bid,
+                best_ask=best_ask,
+            )
+            fill_price = entry_price
+            if broker_result:
+                fill_price = broker_result.get("simulated_price") or broker_result.get("avgPrice") or entry_price
             await self._register_active_trade(
                 order_id=order_id,
                 symbol=symbol,
                 side=side,
                 quantity=quantity,
-                entry_price=entry_price,
+                entry_price=fill_price,
                 trailing_stop_level=trailing_stop_level,
                 callback_rate=callback_rate,
                 broker_status="DRY_RUN",
@@ -180,14 +203,18 @@ class TradeExecutor:
                 "side": side,
                 "quantity": quantity,
                 "orderId": order_id,
+                "order_type": order_type,
+                "simulated_price": fill_price,
             }
 
         response = await self.broker.execute_order(
             symbol=symbol,
             side=side,
             quantity=quantity,
-            order_type="MARKET",
-            entry_price=entry_price
+            order_type=order_type,
+            entry_price=entry_price,
+            best_bid=best_bid,
+            best_ask=best_ask,
         )
         if response:
             logger.success(f"Order executed successfully: {response.get('orderId')}")

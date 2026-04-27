@@ -58,7 +58,7 @@ from src.data.db import REDIS_CANDLE_KEY, WARMUP_CANDLES_REQUIRED, db_manager
 from src.data.db_sanitizer import purge_stale_market_data
 from src.data.news_fetcher import CryptoNewsFetcher
 from src.models.dataset_builder import DataFetcher
-from src.models.quant_model import ApexXGBoostModel
+from src.models.quant_model import ApexRegimeRouter
 
 
 DEFAULT_SYMBOL = "BTCUSDT"
@@ -152,7 +152,9 @@ class DashboardRuntime:
     latest_snapshot: Optional[DashboardSnapshot] = None
     latest_signal_card: Optional[SmartOrderCard] = None
     last_signal: str = "HOLD"
-    sim_pnl: float = 0.0
+    sim_pnl: float = 0.0       # legacy — kept for compat, no longer primary metric
+    realized_pnl: float = 0.0  # cumulative realised PnL across all closed trades
+    unrealized_pnl: float = 0.0  # sum of open trade mark-to-market PnL
     cycle_count: int = 0
     synthetic_tick: int = 0
     latest_features: dict = field(default_factory=dict)
@@ -171,8 +173,8 @@ class DashboardRuntime:
 runtime = DashboardRuntime()
 
 model_registry = {
-    "crypto": ApexXGBoostModel(model_name="crypto_model"),
-    "nse": ApexXGBoostModel(model_name="banknifty_model")
+    "crypto": ApexRegimeRouter(model_name="crypto_model"),
+    "nse": ApexRegimeRouter(model_name="banknifty_model")
 }
 
 
@@ -226,8 +228,25 @@ async def _build_order_details(
     entry = float(features.get("close", 0.0))
     atr = float(features.get("ATR", entry * 0.005 if entry else 1.0))
 
-    tp_pct = style.get("take_profit_pct", 1.5) / 100.0
-    sl_pct = style.get("trailing_stop_pct", 0.75) / 100.0
+    # Static style baselines (used as fallback and for R:R preservation)
+    style_sl_pct = style.get("trailing_stop_pct", 0.75) / 100.0
+    style_tp_pct = style.get("take_profit_pct", 1.5) / 100.0
+
+    # ATR-based dynamic SL: 1.5× ATR normalised to price
+    dynamic_sl_pct = (atr * 1.5) / entry if entry > 0 else style_sl_pct
+    dynamic_sl_pct = min(dynamic_sl_pct, 0.03)  # Hard cap at 3% — prevent absurd stops on extreme events
+
+    # Preserve the active style's Reward:Risk ratio for the TP
+    target_rr = style_tp_pct / style_sl_pct if style_sl_pct > 0 else 2.0
+    dynamic_tp_pct = dynamic_sl_pct * target_rr
+
+    sl_pct = dynamic_sl_pct
+    tp_pct = dynamic_tp_pct
+
+    logger.debug(
+        "ATR SL override | entry={:.4f} | ATR={:.4f} | sl_pct={:.4%} | tp_pct={:.4%} | R:R={:.2f}",
+        entry, atr, sl_pct, tp_pct, target_rr,
+    )
 
     if signal == "BUY":
         stop_loss = round(entry * (1.0 - sl_pct), 2)
@@ -365,6 +384,19 @@ def _build_signal_analysis(features: dict, bullish_probability: float, sentiment
     vwap = float(features.get("VWAP") or close_price)
     rsi = float(features.get("RSI") or 50.0)
     macd_hist = float(features.get("MACD_hist") or 0.0)
+    atr = float(features.get("ATR") or 0.0)
+
+    # ── Epic 27: Regime classification from ADX / Choppiness ──────────────
+    adx_value   = float(features.get("ADX", 0.0))
+    chop_value  = float(features.get("CHOP", 61.8))  # default → choppy if absent
+    atr_distance = round((atr / close_price) * 100, 3) if close_price > 0 else 0.0
+
+    # ADX > 25 → Trending; CHOP < 38.2 → Trending; otherwise Choppy
+    if adx_value > 25 or chop_value < 38.2:
+        regime_classification = "Trending"
+    else:
+        regime_classification = "Choppy"
+    # ───────────────────────────────────────────────────────────────────
 
     structural_edge, structural_score, _, _ = _build_structural_edge(features)
     technical_score = _clamp(
@@ -404,6 +436,10 @@ def _build_signal_analysis(features: dict, bullish_probability: float, sentiment
         sentiment_score=round(sentiment_score, 4),
         technical_summary=technical_summary,
         sentiment_summary=sentiment_summary,
+        regime_classification=regime_classification,
+        adx_value=round(adx_value, 2),
+        chop_value=round(chop_value, 2),
+        atr_distance=atr_distance,
     )
 
 
@@ -639,6 +675,8 @@ def _build_snapshot(
         session=DashboardSession(
             cycle_count=runtime.cycle_count,
             sim_pnl=round(runtime.sim_pnl, 2),
+            realized_pnl=round(runtime.realized_pnl, 2),
+            unrealized_pnl=round(runtime.unrealized_pnl, 2),
             total_capital=runtime.risk_manager.total_capital,
             trade_allocation=runtime.risk_manager.trade_allocation,
             professional_trader_enabled=runtime.risk_manager.professional_trader_enabled,
@@ -729,6 +767,7 @@ async def _execute_signal_order(
     execution_plan: ExecutionPlan,
     order_id: str,
     trigger_source: str,
+    probability: float = 0.5,
 ):
     if execution_plan.position_qty <= 0:
         logger.warning("Skipping execution because computed position size is zero.")
@@ -739,12 +778,36 @@ async def _execute_signal_order(
     if live_entry_price <= 0:
         live_entry_price = execution_plan.entry_price
 
+    # ── Epic 26: Limit vs. Market Routing ───────────────────────────────────
+    features = runtime.latest_features
+    best_bid = float(features.get("best_bid", 0.0))
+    best_ask = float(features.get("best_ask", 0.0))
+
+    # High conviction (>0.85 / <0.15): cross the spread aggressively with a MARKET order
+    # Medium conviction (0.80-0.85 / 0.15-0.20): passive LIMIT at the favourable side
+    if probability > 0.85 or probability < 0.15:
+        order_type = "MARKET"
+        limit_price = None
+        routing_reason = "HIGH_CONVICTION"
+    elif (0.80 <= probability <= 0.85) or (0.15 <= probability <= 0.20):
+        order_type = "LIMIT"
+        # BUY at bid to capture spread; SELL at ask to capture spread
+        limit_price = best_bid if signal == "BUY" else best_ask
+        if not limit_price or limit_price <= 0:
+            limit_price = live_entry_price   # fallback if LOB unavailable
+        routing_reason = "MEDIUM_CONVICTION"
+    else:
+        order_type = "MARKET"
+        limit_price = None
+        routing_reason = "DEFAULT"
+    # ───────────────────────────────────────────────────────────────────
+
     logger.info(
-        "Routing {} order to TradeExecutor | order_id={} | qty={} | live_entry={:.4f} | mode={}",
-        signal,
-        order_id,
-        execution_plan.position_qty,
-        live_entry_price,
+        "Routing {} {} order to TradeExecutor | order_id={} | qty={} | entry={:.4f} "
+        "| bid={:.4f} | ask={:.4f} | routing={} | mode={}",
+        signal, order_type, order_id,
+        execution_plan.position_qty, live_entry_price,
+        best_bid, best_ask, routing_reason,
         runtime.risk_manager.execution_mode,
     )
     return await runtime.executor.execute_market_order(
@@ -752,9 +815,12 @@ async def _execute_signal_order(
         side=signal,
         quantity=execution_plan.position_qty,
         order_id=order_id,
-        entry_price=live_entry_price,
+        entry_price=limit_price if limit_price else live_entry_price,
         trailing_stop_level=execution_plan.stop_loss,
         callback_rate=1.0,
+        order_type=order_type,
+        best_bid=best_bid,
+        best_ask=best_ask,
     )
 
 
@@ -847,6 +913,20 @@ async def inference_loop():
                         )
                         # Arm the 5-minute revenge-trading cooldown
                         runtime.risk_manager.record_trade_closed(DEFAULT_SYMBOL)
+                        # ── Feedback Loop: inform RiskManager of trade outcome ──
+                        closed_trade = close_result.get("closed_trade", {})
+                        realized_pnl = float(closed_trade.get("pnl_value", 0.0))
+                        pool_key = runtime.risk_manager._pool_for(DEFAULT_SYMBOL)
+                        runtime.risk_manager.record_trade_result(pool_key, realized_pnl)
+                        # ── Epic 27: accumulate into runtime.realized_pnl ──
+                        runtime.realized_pnl += realized_pnl
+                        logger.info(
+                            "Feedback loop | pool={} | pnl={:.2f} | realized_total={:.2f} | consecutive_losses={}",
+                            pool_key,
+                            realized_pnl,
+                            runtime.realized_pnl,
+                            runtime.risk_manager.consecutive_losses.get(pool_key, 0),
+                        )
                     else:
                         _update_trade_ticket_status(
                             exit_candidate["order_id"],
@@ -874,12 +954,21 @@ async def inference_loop():
                     broker_adapter=runtime.executor.broker,
                     probability=probability,
                 )
-                
-                # Dynamic ATR-based sim_pnl
-                edge = abs(probability - 0.5) * 2.0
-                atr_pct = (execution_plan.sl_distance_pct + execution_plan.tp_distance_pct) / 2.0
-                margin_return = edge * atr_pct * execution_plan.risk_reward * 2.0
-                runtime.sim_pnl += margin_return
+
+            # ── Epic 27: Live Unrealized PnL from active trades ───────────────
+            current_close = float(features.get("close", 0.0))
+            unrealized = 0.0
+            for t in runtime.executor.active_trades.values():
+                if not t.get("is_active", True):
+                    continue
+                entry  = float(t.get("entry_price", 0.0))
+                qty    = float(t.get("quantity", 0.0))
+                side   = t.get("side", "BUY").upper()
+                price  = float(t.get("current_price", 0.0)) or current_close
+                if entry > 0 and qty > 0 and price > 0:
+                    unrealized += (price - entry) * qty if side == "BUY" else (entry - price) * qty
+            runtime.unrealized_pnl = round(unrealized, 2)
+            # ───────────────────────────────────────────────────────────────────
 
             live_price = float(features.get("close", 0.0))
             logger.info(
@@ -944,6 +1033,7 @@ async def inference_loop():
                         execution_plan=execution_plan,
                         order_id=order_id,
                         trigger_source="autonomous_engine",
+                        probability=probability,
                     )
                     executed = execution_result is not None
 
@@ -1304,6 +1394,7 @@ async def execute_now(request: ManualExecutionRequest):
         execution_plan=card.execution_plan,
         order_id=order_id,
         trigger_source=request.reason,
+        probability=card.bullish_probability,
     )
     if execution_result is None:
         raise HTTPException(status_code=409, detail="Order execution was rejected because size is zero.")
@@ -1363,6 +1454,20 @@ async def close_trade(order_id: str):
     _update_trade_ticket_status(order_id, "SQUARED_OFF", trigger_source="manual_close")
     # Arm the 5-minute revenge-trading cooldown
     runtime.risk_manager.record_trade_closed(DEFAULT_SYMBOL)
+    # ── Feedback Loop: inform RiskManager of trade outcome ──
+    closed_trade = close_result.get("closed_trade", {})
+    realized_pnl = float(closed_trade.get("pnl_value", 0.0))
+    pool_key = runtime.risk_manager._pool_for(DEFAULT_SYMBOL)
+    runtime.risk_manager.record_trade_result(pool_key, realized_pnl)
+    # ── Epic 27: accumulate into runtime.realized_pnl ──
+    runtime.realized_pnl += realized_pnl
+    logger.info(
+        "Feedback loop (manual) | pool={} | pnl={:.2f} | realized_total={:.2f} | consecutive_losses={}",
+        pool_key,
+        realized_pnl,
+        runtime.realized_pnl,
+        runtime.risk_manager.consecutive_losses.get(pool_key, 0),
+    )
     if runtime.latest_snapshot is not None:
         await _refresh_snapshot("trade.closed")
 

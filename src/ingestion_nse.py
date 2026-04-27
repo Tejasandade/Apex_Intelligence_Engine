@@ -91,6 +91,13 @@ class NSEIngestionEngine:
                 ts_ms = int(time.time() * 1000)
                 
                 if ltp > 0:
+                    # L1 Firewall: Z-Score Anomaly Rejection
+                    if self.current_candle and self.current_candle.get("close", 0) > 0:
+                        last_price = self.current_candle["close"]
+                        if abs(ltp - last_price) / last_price > 0.015:
+                            logger.warning(f"[L1 FIREWALL] Dropped anomalous tick | Last Price: {last_price} | Anomalous Price: {ltp}")
+                            return
+
                     payload = {"p": ltp, "v": volume, "t": ts_ms}
                     
                     if self.loop and self.loop.is_running():

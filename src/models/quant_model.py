@@ -36,10 +36,18 @@ MODEL_FEATURE_COLUMNS = [
     "structure_break_strength",
     "structural_confluence",
     "macro_sentiment_score",
+    "ADX",
+    "CHOP",
 ]
 
 
-class ApexXGBoostModel:
+def classify_regime(adx: float, chop: float) -> str:
+    if chop > 61.8 or adx < 20.0:
+        return "CHOPPY"
+    return "TRENDING"
+
+
+class _BaseXGBoostModel:
     """
     XGBoost Classifier for predicting directional probability (bullish movement).
     Excels at tabular limit order book and quantitative feature data.
@@ -122,3 +130,23 @@ class ApexXGBoostModel:
         except Exception as exc:
             logger.error(f"Prediction error: {exc}")
             return 0.5
+
+
+class ApexRegimeRouter:
+    """
+    Routes inference to specific regime-aware models based on current market state.
+    """
+    def __init__(self, weights_dir: str = None, model_name: str = "crypto_model"):
+        self.models = {
+            "TRENDING": _BaseXGBoostModel(weights_dir=weights_dir, model_name=f"{model_name}_trend"),
+            "CHOPPY": _BaseXGBoostModel(weights_dir=weights_dir, model_name=f"{model_name}_chop")
+        }
+
+    def predict(self, df: pd.DataFrame) -> float:
+        adx = float(df["ADX"].iloc[0]) if "ADX" in df.columns else 0.0
+        chop = float(df["CHOP"].iloc[0]) if "CHOP" in df.columns else 0.0
+        
+        regime = classify_regime(adx, chop)
+        logger.info(f"[REGIME ROUTER] Market is {regime} (ADX: {adx:.1f}, CHOP: {chop:.1f}) -> Routing to {regime} Model")
+        
+        return self.models[regime].predict(df)

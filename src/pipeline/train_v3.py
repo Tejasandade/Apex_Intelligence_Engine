@@ -25,7 +25,9 @@ from sklearn.metrics import accuracy_score, log_loss, precision_score
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from src.models.quant_model import MODEL_FEATURE_COLUMNS, ApexXGBoostModel
+from src.models.quant_model import MODEL_FEATURE_COLUMNS, _BaseXGBoostModel, classify_regime
+from sklearn.model_selection import KFold
+import xgboost as xgb
 
 # ---------------------------------------------------------------------------
 # Config
@@ -140,6 +142,53 @@ def _vec_atr(df: pd.DataFrame, length: int = 14) -> pd.Series:
     return tr.rolling(length, min_periods=length).mean()
 
 
+def _vec_adx(df: pd.DataFrame, length: int = 14) -> pd.Series:
+    high = df['high']
+    low = df['low']
+    close = df['close']
+
+    tr1 = high - low
+    tr2 = (high - close.shift(1)).abs()
+    tr3 = (low - close.shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+    up_move = high - high.shift(1)
+    down_move = low.shift(1) - low
+
+    plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df.index)
+    minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df.index)
+
+    atr = tr.ewm(span=length, adjust=False).mean()
+    plus_di = 100 * (plus_dm.ewm(span=length, adjust=False).mean() / atr)
+    minus_di = 100 * (minus_dm.ewm(span=length, adjust=False).mean() / atr)
+
+    dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di)).fillna(0.0)
+    adx = dx.ewm(span=length, adjust=False).mean()
+    
+    return adx.fillna(0.0)
+
+
+def _vec_chop(df: pd.DataFrame, length: int = 14) -> pd.Series:
+    high = df['high']
+    low = df['low']
+    close = df['close']
+
+    tr1 = high - low
+    tr2 = (high - close.shift(1)).abs()
+    tr3 = (low - close.shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+    atr_sum = tr.rolling(window=length).sum()
+    highest_high = high.rolling(window=length).max()
+    lowest_low = low.rolling(window=length).min()
+
+    range_hl = highest_high - lowest_low
+    range_hl = range_hl.replace(0, np.nan)
+
+    chop = 100 * np.log10(atr_sum / range_hl) / np.log10(length)
+    return chop.fillna(0.0)
+
+
 def _vec_session_vwap(df: pd.DataFrame) -> pd.Series:
     """Crypto: single continuous VWAP over the whole dataset."""
     tp = (df["high"] + df["low"] + df["close"]) / 3
@@ -234,6 +283,8 @@ def build_historical_features(df: pd.DataFrame) -> pd.DataFrame:
     out["MACD_hist"]    = macd_hist
     out["VWAP"]         = _vec_session_vwap(out)
     out["ATR"]          = _vec_atr(out, ATR_LEN)
+    out["ADX"]          = _vec_adx(out, ATR_LEN)
+    out["CHOP"]         = _vec_chop(out, ATR_LEN)
     out["CVD"]          = _vec_cvd(out)
 
     # ── SMC features ────────────────────────────────────────────────────────
@@ -296,37 +347,70 @@ def build_target(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # 4. Training & Export
 # ---------------------------------------------------------------------------
-def train_and_save(df: pd.DataFrame) -> None:
+def train_with_cv(df: pd.DataFrame, model_name_suffix: str, base_name: str = "crypto_model") -> None:
     df = df.dropna(subset=MODEL_FEATURE_COLUMNS + ["target"])
     df = df[df["target"].notna()].copy()
 
+    if len(df) < 50:
+        logger.warning(f"Insufficient data for {model_name_suffix} regime. Skipping training.")
+        return
+
     pos_rate = df["target"].mean()
     logger.info(
-        f"Training set: {len(df):,} rows | "
+        f"Training set [{model_name_suffix}]: {len(df):,} rows | "
         f"positive rate: {pos_rate:.2%} | "
         f"features: {len(MODEL_FEATURE_COLUMNS)}"
     )
 
-    model = ApexXGBoostModel(model_name="crypto_model")
-    model.train(df, target_col="target")
-
-    # ── Evaluate on the same training set (in-sample sanity check) ──────────
     X = df[MODEL_FEATURE_COLUMNS].fillna(0.0)
-    y_true     = df["target"].values
-    y_prob_arr = model.model.predict_proba(X)
-    y_pred     = (y_prob_arr[:, 1] >= 0.5).astype(int)
-    y_prob     = y_prob_arr[:, 1]
+    y = df["target"].values
 
-    acc  = accuracy_score(y_true, y_pred)
-    prec = precision_score(y_true, y_pred, zero_division=0)
-    ll   = log_loss(y_true, y_prob)
+    kf = KFold(n_splits=5, shuffle=True, random_state=42)
+    
+    best_n_estimators = []
+    val_accs = []
+    val_lls = []
+
+    for fold, (train_idx, val_idx) in enumerate(kf.split(X, y)):
+        X_train, y_train = X.iloc[train_idx], y[train_idx]
+        X_val, y_val = X.iloc[val_idx], y[val_idx]
+        
+        model = xgb.XGBClassifier(
+            n_estimators=200,
+            learning_rate=0.05,
+            max_depth=6,
+            eval_metric="logloss",
+            early_stopping_rounds=10,
+        )
+        
+        model.fit(
+            X_train, y_train,
+            eval_set=[(X_val, y_val)],
+            verbose=False
+        )
+        
+        best_n_estimators.append(model.best_iteration)
+        
+        y_prob = model.predict_proba(X_val)[:, 1]
+        y_pred = (y_prob >= 0.5).astype(int)
+        
+        val_accs.append(accuracy_score(y_val, y_pred))
+        val_lls.append(log_loss(y_val, y_prob))
+
+    avg_acc = np.mean(val_accs)
+    avg_ll = np.mean(val_lls)
+    avg_trees = int(np.mean(best_n_estimators))
 
     logger.success("=" * 55)
-    logger.success(f"  Accuracy   : {acc:.4f}")
-    logger.success(f"  Precision  : {prec:.4f}")
-    logger.success(f"  Log-Loss   : {ll:.4f}")
+    logger.success(f"  Regime     : {model_name_suffix.upper()}")
+    logger.success(f"  Avg Acc    : {avg_acc:.4f}")
+    logger.success(f"  Avg LogLoss: {avg_ll:.4f}")
+    logger.success(f"  Avg Trees  : {avg_trees}")
     logger.success("=" * 55)
-    logger.success(f"Model saved → data/models/crypto_model.json")
+
+    final_model = _BaseXGBoostModel(model_name=f"{base_name}_{model_name_suffix}")
+    final_model.model.set_params(n_estimators=max(1, avg_trees))
+    final_model.train(df, target_col="target")
 
 
 # ---------------------------------------------------------------------------
@@ -336,7 +420,19 @@ async def main():
     raw_df      = await fetch_candles(SYMBOL, CANDLE_LIMIT, FETCH_BATCH)
     feature_df  = build_historical_features(raw_df)
     labelled_df = build_target(feature_df)
-    train_and_save(labelled_df)
+    
+    regimes = labelled_df.apply(
+        lambda row: classify_regime(row.get("ADX", 0.0), row.get("CHOP", 0.0)),
+        axis=1
+    )
+    
+    trend_df = labelled_df[regimes == "TRENDING"].copy()
+    chop_df = labelled_df[regimes == "CHOPPY"].copy()
+    
+    logger.info(f"Split into {len(trend_df)} TRENDING samples and {len(chop_df)} CHOPPY samples.")
+    
+    train_with_cv(trend_df, "trend", base_name="crypto_model")
+    train_with_cv(chop_df, "chop", base_name="crypto_model")
 
 
 if __name__ == "__main__":

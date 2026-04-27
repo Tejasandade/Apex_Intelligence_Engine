@@ -24,6 +24,11 @@ class SignalAnalysis(BaseModel):
     sentiment_score: float
     technical_summary: str
     sentiment_summary: str
+    # Epic 27 — Regime & volatility fields for UI cards
+    regime_classification: str = "Unknown"
+    adx_value: float = 0.0
+    chop_value: float = 0.0
+    atr_distance: float = 0.0
 
 
 class ExecutionPlan(BaseModel):
@@ -99,7 +104,9 @@ class ActiveTrade(BaseModel):
 
 class DashboardSession(BaseModel):
     cycle_count: int
-    sim_pnl: float
+    sim_pnl: float          # legacy — kept for backward compat
+    realized_pnl: float = 0.0
+    unrealized_pnl: float = 0.0
     total_capital: float
     trade_allocation: float = 0.0
     professional_trader_enabled: bool

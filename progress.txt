@@ -133,3 +133,29 @@
 - [x] Task 22.2: Implement `_vec_session_vwap_nse()` — IST-grouped session VWAP that resets each trading day.
 - [x] Task 22.3: Add `_filter_session_hours()` and `_drop_session_open_bars()` to strip overnight gaps and gap-up noise.
 - [x] Task 22.4: Reuse asymmetric target definition and train `banknifty_model` with full SMC feature set.
+
+
+
+## Phase 8: The V4 Institutional Architecture
+### Epic 23: Ironclad Data Engineering (L1 Firewall)
+- [x] Task 23.1: Implement Z-Score Anomaly tick rejection in NSE ingestion.
+- [x] Task 23.2: Fix Angel One paise-to-Rupee normalisation directly in `_on_message`.
+- [x] Task 23.3: Implement strict NaN/Infinity sanitization gate in `dataset_builder.py`.
+
+### Epic 24: Regime-Aware AI Architecture
+- [x] Task 24.1: Implement Choppiness Index (CHOP) and ADX calculation.
+- [x] Task 24.2: Build dynamic model routing logic based on active market regime.
+- [x] Task 24.3: Implement Purged K-Fold Cross Validation in training scripts.
+
+### Epic 25: Institutional Risk & Sizing
+- [ ] Task 25.1: Implement ATR-distance based position sizing.
+- [x] Task 25.2: Establish 5% minimum allocation floors and aggression multipliers.
+- [ ] Task 25.3: Implement 3-loss asymmetric drawdown halt logic.
+
+### Epic 26: Realistic Execution Simulator
+- [ ] Task 26.1: Build spread-crossing slippage penalty for DRY_RUN orders.
+- [ ] Task 26.2: Implement Limit vs. Market order decision routing.
+
+### Epic 27: Command Center Finalization
+- [ ] Task 27.1: Overhaul `sim_pnl` to track True Realized/Unrealized PnL.
+- [ ] Task 27.2: Expose SHAP values, Regime, and ATR in frontend Order Cards.

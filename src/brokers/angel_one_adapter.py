@@ -12,6 +12,7 @@ mock DRY_RUN response so the rest of the engine can operate normally.
 """
 
 import os
+import random
 from datetime import datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -120,6 +121,11 @@ class AngelOneAdapter(BaseBrokerAdapter):
         """
         SAFETY: live_trading_enabled is False — this NEVER places a real order.
         Logs the intended execution and returns a mock DRY_RUN fill response.
+
+        Slippage model (Epic 26):
+        - BUY  → fill at best_ask + random [0.01%, 0.05%] penalty  (cross the spread aggressively)
+        - SELL → fill at best_bid - random [0.01%, 0.05%] penalty  (accept the bid, minus impact)
+        Falls back to the provided limit_price / price kwarg when LOB data is unavailable.
         """
         if self.live_trading_enabled:
             # Defensive guard — should never be reachable
@@ -130,13 +136,26 @@ class AngelOneAdapter(BaseBrokerAdapter):
 
         self._fill_counter += 1
         fill_id = f"DRYRUN-AO-{self._fill_counter:06d}"
-        simulated_price = float(kwargs.get("limit_price", kwargs.get("price", 0.0)))
+
+        # ── Spread-Crossing Slippage Simulation ─────────────────────────────
+        best_bid   = float(kwargs.get("best_bid", 0.0))
+        best_ask   = float(kwargs.get("best_ask", 0.0))
+        slip_pct   = random.uniform(0.0001, 0.0005)   # 0.01% – 0.05%
+
+        side_upper = side.upper()
+        if side_upper == "BUY" and best_ask > 0:
+            simulated_price = round(best_ask * (1.0 + slip_pct), 4)
+        elif side_upper == "SELL" and best_bid > 0:
+            simulated_price = round(best_bid * (1.0 - slip_pct), 4)
+        else:
+            # Fallback: use limit_price / price kwarg, no slippage applied
+            simulated_price = float(kwargs.get("limit_price", kwargs.get("price", 0.0)))
+        # ────────────────────────────────────────────────────────────────────
 
         logger.info(
-            "[DRY_RUN] AngelOneAdapter | {} {} {} @ {} | order_type={} | fill_id={}",
-            side.upper(), quantity, symbol.upper(),
-            f"{simulated_price:,.2f}" if simulated_price else "MARKET",
-            order_type, fill_id,
+            "[DRY_RUN] AngelOneAdapter | {} {} {} @ {:.4f} | order_type={} | slip={:.4%} | fill_id={}",
+            side_upper, quantity, symbol.upper(),
+            simulated_price, order_type, slip_pct, fill_id,
         )
 
         return {
@@ -144,10 +163,11 @@ class AngelOneAdapter(BaseBrokerAdapter):
             "adapter":          "AngelOneAdapter",
             "fill_id":          fill_id,
             "symbol":           symbol.upper(),
-            "side":             side.upper(),
+            "side":             side_upper,
             "quantity":         quantity,
             "order_type":       order_type,
             "simulated_price":  simulated_price,
+            "slippage_pct":     round(slip_pct * 100, 4),
             "timestamp":        datetime.now(IST).isoformat(),
             "live_executed":    False,
         }

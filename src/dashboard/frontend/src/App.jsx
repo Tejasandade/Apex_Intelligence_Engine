@@ -192,7 +192,7 @@ function GlobalMasterView({ snapshot }) {
 }
 
 // ---------------------------------------------------------------------------
-function TradingViewChart({ symbol = 'BTCUSDT' }) {
+function TradingViewChart({ symbol = 'BTCUSDT', timezone = 'UTC' }) {
   let tvSymbol = symbol;
   // NSE indices are blocked from iframe embeds by TradingView, so we must use the continuous future.
   if (symbol === 'BANKNIFTY') tvSymbol = 'NSE:NIFTYBANK';
@@ -206,7 +206,7 @@ function TradingViewChart({ symbol = 'BTCUSDT' }) {
     `&allow_symbol_change=0&save_image=0&hide_top_toolbar=0` +
     `&withdateranges=1&hide_side_toolbar=0` +
     `&container_id=tradingview_apex` +
-    `&timezone=Asia/Kolkata`
+    `&timezone=${encodeURIComponent(timezone)}`
 
   return (
     <section className="panel tradingview-hero" aria-label="Live Price Chart">
@@ -521,10 +521,35 @@ function App() {
                 : formatCurrency(session?.capital_pools?.[session?.active_tab] ?? session?.total_capital)}
             </strong>
           </div>
-          <div className={`topbar-stat pnl ${(session?.sim_pnl ?? 0) >= 0 ? 'pnl--pos' : 'pnl--neg'}`}>
-            <span>Session PnL</span>
-            <strong>{formatMarketCurrency(session?.sim_pnl, session?.active_tab)}</strong>
+          {/* ── True PnL — Epic 27 ── */}
+          <div
+            className={`topbar-stat pnl ${(session?.realized_pnl ?? 0) >= 0 ? 'pnl--pos' : 'pnl--neg'}`}
+            title="Cumulative realised PnL from closed trades"
+            style={{
+              borderColor: (session?.realized_pnl ?? 0) >= 0
+                ? 'rgba(0,229,160,0.45)' : 'rgba(255,77,109,0.45)',
+              boxShadow: (session?.realized_pnl ?? 0) >= 0
+                ? '0 0 10px rgba(0,229,160,0.15)' : '0 0 10px rgba(255,77,109,0.15)',
+            }}
+          >
+            <span>Realized PnL</span>
+            <strong>{formatMarketCurrency(session?.realized_pnl ?? 0, session?.active_tab)}</strong>
           </div>
+          <div
+            className={`topbar-stat pnl ${(session?.unrealized_pnl ?? 0) >= 0 ? 'pnl--pos' : 'pnl--neg'}`}
+            style={{
+              opacity: 0.78,
+              borderColor: (session?.unrealized_pnl ?? 0) >= 0
+                ? 'rgba(0,229,160,0.28)' : 'rgba(255,77,109,0.28)',
+            }}
+            title="Live mark-to-market PnL on open positions"
+          >
+            <span style={{ fontSize: '0.68rem' }}>Unrealized</span>
+            <strong style={{ fontSize: '0.82rem' }}>
+              {formatMarketCurrency(session?.unrealized_pnl ?? 0, session?.active_tab)}
+            </strong>
+          </div>
+
         </div>
       </header>
 
@@ -732,7 +757,10 @@ function App() {
         <section className="content">
 
           {/* ── HERO: Full-Width Chart ──────────────────────────────────────── */}
-          <TradingViewChart symbol={getTradingViewSymbol(session?.active_tab)} />
+          <TradingViewChart
+            symbol={getTradingViewSymbol(session?.active_tab)}
+            timezone={session?.active_tab === 'INDIA' ? 'Asia/Kolkata' : 'UTC'}
+          />
 
           {/* ── MID ROW: SmartOrderCard + Active Trades ─────────────────────── */}
           <div className="content-mid">

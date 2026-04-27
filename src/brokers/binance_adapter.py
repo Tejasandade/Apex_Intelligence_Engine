@@ -1,4 +1,5 @@
 import os
+import random
 from typing import Optional
 from binance import AsyncClient
 from binance.enums import ORDER_TYPE_MARKET
@@ -84,14 +85,34 @@ class BinanceAdapter(BaseBrokerAdapter):
         Executes an order on Binance USD-M Futures.
         """
         if self.mode != "LIVE":
-            # Just return a mock success response so TradeExecutor knows it "succeeded"
+            # ── Spread-Crossing Slippage Simulation (Epic 26) ─────────────────
+            best_bid  = float(kwargs.get("best_bid", 0.0))
+            best_ask  = float(kwargs.get("best_ask", 0.0))
+            slip_pct  = random.uniform(0.0001, 0.0005)   # 0.01% – 0.05%
+
+            side_upper = side.upper()
+            if side_upper == "BUY" and best_ask > 0:
+                fill_price = round(best_ask * (1.0 + slip_pct), 4)
+            elif side_upper == "SELL" and best_bid > 0:
+                fill_price = round(best_bid * (1.0 - slip_pct), 4)
+            else:
+                # Fallback: entry_price kwarg, no slippage applied
+                fill_price = float(kwargs.get("entry_price", 0.0))
+            # ────────────────────────────────────────────────────────────────────
+            logger.info(
+                "[DRY_RUN] BinanceAdapter | {} {} {} @ {:.4f} | order_type={} | slip={:.4%}",
+                side_upper, quantity, symbol, fill_price, order_type, slip_pct,
+            )
             return {
-                "status": "DRY_RUN",
-                "symbol": symbol,
-                "side": side,
-                "quantity": quantity,
-                "orderId": f"mock_{symbol}_{side}",
-                "avgPrice": kwargs.get("entry_price", 0.0) # mock
+                "status":          "DRY_RUN",
+                "symbol":          symbol,
+                "side":            side_upper,
+                "quantity":        quantity,
+                "order_type":      order_type,
+                "orderId":         f"mock_{symbol}_{side_upper}",
+                "simulated_price": fill_price,
+                "slippage_pct":    round(slip_pct * 100, 4),
+                "avgPrice":        fill_price,
             }
 
         if not self.client:

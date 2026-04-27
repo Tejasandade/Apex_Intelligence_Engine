@@ -90,6 +90,7 @@ class RiskManager:
         self.trade_allocation = 0.0
         # Per-symbol cooldown registry: symbol -> datetime when cooldown expires
         self._cooldown_until: dict[str, datetime] = {}
+        self.consecutive_losses = {"CRYPTO": 0, "INDIA": 0, "FOREX": 0}
         logger.info(
             "RiskManager initialized | pools={} | max_risk={:.1f}% | mode={}",
             {k: f"{v:,.0f}" for k, v in self.capital_pools.items()},
@@ -140,6 +141,17 @@ class RiskManager:
         if probability > 0.55 or probability < 0.45:
             return 1
         return 0
+
+    def record_trade_result(self, pool_key: str, realized_pnl: float):
+        if pool_key not in self.consecutive_losses:
+            self.consecutive_losses[pool_key] = 0
+            
+        if realized_pnl > 0:
+            self.consecutive_losses[pool_key] = 0
+        elif realized_pnl < 0:
+            self.consecutive_losses[pool_key] += 1
+            
+        logger.debug("Trade result recorded for {}: PNL={:.2f}. Consecutive losses: {}", pool_key, realized_pnl, self.consecutive_losses[pool_key])
 
     def record_trade_closed(self, symbol: str) -> None:
         """Arms a post-trade cooldown for *symbol* to prevent revenge trading."""
@@ -400,18 +412,36 @@ class RiskManager:
             return 0.0
 
         confluence_multiplier = 1.35 if high_confidence_confluence else 1.0
-        adjusted_kelly_fraction = kelly_fraction * confluence_multiplier
+        aggression_multiplier = 3.0
+        adjusted_kelly_fraction = kelly_fraction * confluence_multiplier * aggression_multiplier
+        
         raw_allocation = current_capital * (kelly_pct * adjusted_kelly_fraction)
         max_allowed_risk = current_capital * self.max_risk_per_trade * confluence_multiplier
-        final_allocation = min(raw_allocation, max_allowed_risk)
+        
+        min_allocation_floor = current_capital * 0.05
+        
+        final_allocation = min(max(raw_allocation, min_allocation_floor), max_allowed_risk)
+
+        pool_key = self._pool_for(symbol)
+        losses = self.consecutive_losses.get(pool_key, 0)
+        if losses >= 5:
+            drawdown_penalty = 0.1
+        elif losses >= 3:
+            drawdown_penalty = 0.5
+        else:
+            drawdown_penalty = 1.0
+
+        final_allocation = final_allocation * drawdown_penalty
 
         logger.debug(
-            "Kelly %: {:.2f} | Kelly Fraction: {:.2f} | Confluence: {} | Raw: {:.2f} | Capped: {:.2f}",
+            "Kelly %: {:.2f} | Kelly Fraction: {:.2f} | Confluence: {} | Raw: {:.2f} | Capped: {:.2f} | Penalty: {:.2f} | Final: {:.2f}",
             kelly_pct,
             adjusted_kelly_fraction,
             high_confidence_confluence,
             raw_allocation,
-            final_allocation,
+            final_allocation / drawdown_penalty if drawdown_penalty > 0 else 0,
+            drawdown_penalty,
+            final_allocation
         )
 
         return round(final_allocation, 2)

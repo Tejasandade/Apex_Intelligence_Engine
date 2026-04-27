@@ -1,5 +1,6 @@
 import json
 
+import numpy as np
 import pandas as pd
 from loguru import logger
 
@@ -75,6 +76,61 @@ def compute_atr(df: pd.DataFrame, length: int = 14) -> float:
     return float(atr.iloc[-1]) if not atr.empty and not pd.isna(atr.iloc[-1]) else 0.0
 
 
+def compute_adx(df: pd.DataFrame, length: int = 14) -> float:
+    if len(df) < length + 1:
+        return 0.0
+
+    df = df.ffill()
+    high = df['high']
+    low = df['low']
+    close = df['close']
+
+    tr1 = high - low
+    tr2 = (high - close.shift(1)).abs()
+    tr3 = (low - close.shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+    up_move = high - high.shift(1)
+    down_move = low.shift(1) - low
+
+    plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df.index)
+    minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df.index)
+
+    atr = tr.ewm(span=length, adjust=False).mean()
+    plus_di = 100 * (plus_dm.ewm(span=length, adjust=False).mean() / atr)
+    minus_di = 100 * (minus_dm.ewm(span=length, adjust=False).mean() / atr)
+
+    dx = 100 * (abs(plus_di - minus_di) / (plus_di + minus_di)).fillna(0.0)
+    adx = dx.ewm(span=length, adjust=False).mean()
+    
+    return float(adx.iloc[-1]) if not adx.empty and not pd.isna(adx.iloc[-1]) else 0.0
+
+
+def compute_chop(df: pd.DataFrame, length: int = 14) -> float:
+    if len(df) < length + 1:
+        return 0.0
+
+    df = df.ffill()
+    high = df['high']
+    low = df['low']
+    close = df['close']
+
+    tr1 = high - low
+    tr2 = (high - close.shift(1)).abs()
+    tr3 = (low - close.shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+    atr_sum = tr.rolling(window=length).sum()
+    highest_high = high.rolling(window=length).max()
+    lowest_low = low.rolling(window=length).min()
+
+    range_hl = highest_high - lowest_low
+    range_hl = range_hl.replace(0, np.nan)
+
+    chop = 100 * np.log10(atr_sum / range_hl) / np.log10(length)
+    return float(chop.iloc[-1]) if not chop.empty and not pd.isna(chop.iloc[-1]) else 0.0
+
+
 def _normalize_gap(value: float, reference: float) -> float:
     if reference <= 0:
         return 0.0
@@ -146,6 +202,23 @@ def compute_bos(df: pd.DataFrame, window: int = 20) -> tuple[float, float]:
         return -1.0, float(strength)
         
     return 0.0, 0.0
+
+
+def _sanitize_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Sanitizes the feature matrix by replacing NaN/Infinity values with 0.0
+    and validating that the close price is strictly greater than 0.0.
+    """
+    if df.empty:
+        return df
+
+    df = df.replace([np.inf, -np.inf], np.nan)
+    df = df.fillna(0.0)
+
+    if "close" in df.columns and (df["close"] == 0.0).any():
+        raise ValueError("[L1 FIREWALL] Invalid feature matrix: close price is 0.0")
+
+    return df
 
 
 def build_structure_features(df: pd.DataFrame) -> dict:
@@ -349,6 +422,8 @@ class DataFetcher:
             macd, macd_signal, macd_hist = compute_macd(close)
             vwap = compute_session_vwap(klines_df, market_type=market_type)
             atr = compute_atr(klines_df, length=14)
+            adx = compute_adx(klines_df, length=14)
+            chop = compute_chop(klines_df, length=14)
 
             latest = klines_df.iloc[-1]
             open_price = float(latest["open"])
@@ -377,12 +452,14 @@ class DataFetcher:
                 vwap,
                 atr,
                 macd,
+                adx,
+                chop,
             )
         else:
             logger.warning("Insufficient fresh 1m candle data for {} after warm-up gate.", symbol.upper())
             rsi, ema_14, ema_50 = 50.0, 0.0, 0.0
             macd, macd_signal, macd_hist = 0.0, 0.0, 0.0
-            vwap, atr = 0.0, 0.0
+            vwap, atr, adx, chop = 0.0, 0.0, 0.0, 0.0
             close_price = float(current_close or 0.0)
             open_price = high_price = low_price = close_price
             volume, cvd = 0.0, 0.0
@@ -425,6 +502,8 @@ class DataFetcher:
             "MACD_hist": macd_hist,
             "VWAP": vwap,
             "ATR": atr,
+            "ADX": adx,
+            "CHOP": chop,
             "spread": spread,
             "CVD": cvd,
             "best_bid": best_bid,
@@ -441,4 +520,5 @@ class DataFetcher:
             "macro_sentiment_score": macro_sentiment,
         }
 
-        return pd.DataFrame([feature_vector])
+        df = pd.DataFrame([feature_vector])
+        return _sanitize_feature_matrix(df)
