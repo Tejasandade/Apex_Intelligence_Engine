@@ -1,6 +1,14 @@
-function formatCurrency(value) {
+function formatCurrency(value, activeTab) {
   if (value == null || Number.isNaN(Number(value))) {
     return '--'
+  }
+
+  if (activeTab === 'INDIA') {
+    return new Intl.NumberFormat('en-IN', {
+      style: 'currency',
+      currency: 'INR',
+      maximumFractionDigits: 2,
+    }).format(Number(value))
   }
 
   return new Intl.NumberFormat('en-US', {
@@ -17,7 +25,7 @@ function getConfidenceTier(probability) {
   return 0;
 }
 
-function SmartOrderCard({ card, onExecute, executing, activeTiers = [] }) {
+function SmartOrderCard({ card, onExecute, executing, activeTiers = [], activeTab = 'CRYPTO' }) {
   const plan = card?.execution_plan
   const bullish = card?.bullish_probability ?? 0.5
   const signalClass = card?.signal?.toLowerCase?.() ?? 'hold'
@@ -26,14 +34,32 @@ function SmartOrderCard({ card, onExecute, executing, activeTiers = [] }) {
   const sentiment = card?.sentiment ?? 0.5
 
   let quantGreen = false, structureGreen = false, sentimentGreen = false
-  if (bullish > 0.65) {
-    quantGreen = true
-    structureGreen = (features.fvg_signal === 1 || features.structure_break_signal > 0)
-    sentimentGreen = sentiment > 0.6
-  } else if (bullish < 0.35) {
-    quantGreen = true
-    structureGreen = (features.fvg_signal === -1 || features.structure_break_signal < 0)
-    sentimentGreen = sentiment < 0.4
+
+  // Quant: model has strong directional conviction
+  quantGreen = (bullish > 0.60 || bullish < 0.40)
+
+  if (bullish > 0.60) {
+    // Bullish scenario — check structural and sentiment alignment
+    structureGreen = (
+      features.fvg_signal > 0 ||
+      features.structure_break_signal > 0 ||
+      features.liquidity_sweep_signal > 0 ||
+      features.cvd_cumulative > 0
+    )
+    sentimentGreen = sentiment > 0.52
+  } else if (bullish < 0.40) {
+    // Bearish scenario — check structural and sentiment alignment
+    structureGreen = (
+      features.fvg_signal < 0 ||
+      features.structure_break_signal < 0 ||
+      features.liquidity_sweep_signal < 0 ||
+      features.cvd_cumulative < 0
+    )
+    sentimentGreen = sentiment < 0.48
+  } else {
+    // Neutral zone — use any structural signal or near-neutral sentiment
+    structureGreen = features.fvg_signal !== 0 || features.structure_break_signal !== 0
+    sentimentGreen = Math.abs(sentiment - 0.5) > 0.03
   }
 
   const consensusReached = quantGreen && structureGreen && sentimentGreen
@@ -58,8 +84,8 @@ function SmartOrderCard({ card, onExecute, executing, activeTiers = [] }) {
           <div className="meta-value">{card?.provider ?? 'binance_futures'}</div>
         </div>
         <div>
-          <div className="meta-label">Execution Mode</div>
-          <div className="meta-value">{card?.execution_mode ?? 'MANUAL_APPROVAL'}</div>
+          <div className="meta-label">Style ({plan?.timeframe ?? '15m'})</div>
+          <div className="meta-value" style={{ textTransform: 'uppercase' }}>{plan?.style ?? 'INTRADAY'}</div>
         </div>
         <div>
           <div className="meta-label">Status</div>
@@ -129,15 +155,15 @@ function SmartOrderCard({ card, onExecute, executing, activeTiers = [] }) {
       <div className="execution-grid">
         <div className="execution-stat">
           <span>Entry</span>
-          <strong>{formatCurrency(plan?.entry_price)}</strong>
+          <strong>{formatCurrency(plan?.entry_price, activeTab)}</strong>
         </div>
         <div className="execution-stat">
           <span>Target</span>
-          <strong>{formatCurrency(plan?.take_profit)}</strong>
+          <strong>{formatCurrency(plan?.take_profit, activeTab)}</strong>
         </div>
         <div className="execution-stat">
           <span>Stop</span>
-          <strong>{formatCurrency(plan?.stop_loss)}</strong>
+          <strong>{formatCurrency(plan?.stop_loss, activeTab)}</strong>
         </div>
         <div className="execution-stat">
           <span>R/R</span>

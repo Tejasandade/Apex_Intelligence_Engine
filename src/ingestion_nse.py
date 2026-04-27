@@ -26,52 +26,6 @@ db_manager = DatabaseManager()
 
 CANDLE_INTERVAL_MS = 60_000
 
-class CandleWarmupTracker:
-    def __init__(self):
-        from collections import deque
-        self.current_candles: dict[str, dict] = {}
-        self.completed_candles: dict[str, deque] = {}
-        self.last_logged_counts: dict[str, int] = {}
-
-    def apply_trade(self, symbol: str, price: float, volume: float, ts_ms: int) -> tuple[list[dict], dict | None]:
-        normalized_symbol = symbol.lower()
-        if normalized_symbol not in self.completed_candles:
-            from collections import deque
-            self.completed_candles[normalized_symbol] = deque(maxlen=20)
-
-        bucket_start = (ts_ms // CANDLE_INTERVAL_MS) * CANDLE_INTERVAL_MS
-
-        current_candle = self.current_candles.get(normalized_symbol)
-        finalized_candle = None
-
-        if current_candle is None or int(current_candle["open_time"]) != bucket_start:
-            if current_candle is not None:
-                finalized_candle = dict(current_candle)
-                self.completed_candles[normalized_symbol].append(finalized_candle)
-
-            current_candle = {
-                "symbol": normalized_symbol,
-                "open_time": bucket_start,
-                "close_time": bucket_start + CANDLE_INTERVAL_MS - 1,
-                "open": price,
-                "high": price,
-                "low": price,
-                "close": price,
-                "volume": volume,
-            }
-            self.current_candles[normalized_symbol] = current_candle
-        else:
-            current_candle["high"] = max(float(current_candle["high"]), price)
-            current_candle["low"] = min(float(current_candle["low"]), price)
-            current_candle["close"] = price
-            current_candle["volume"] = round(float(current_candle["volume"]) + volume, 8)
-
-        candles = list(self.completed_candles[normalized_symbol])
-        candles.append(dict(self.current_candles[normalized_symbol]))
-        return candles, finalized_candle
-
-candle_tracker = CandleWarmupTracker()
-
 class NSEIngestionEngine:
     """
     Ingestion engine for the Indian Market (NSE) using Angel One SmartAPI.
@@ -85,6 +39,17 @@ class NSEIngestionEngine:
         self.sws = None
         self.smart_connect = None
         self.loop = None
+        self.current_minute = -1
+        self.current_candle = None
+
+    async def _push_candle(self, candle: dict):
+        key = "market:candles:1m:BANKNIFTY"
+        try:
+            await db_manager.redis_pool.lpush(key, json.dumps(candle))
+            await db_manager.redis_pool.ltrim(key, 0, 99)
+            logger.info(f"Pushed 1m candle to {key}: {candle}")
+        except Exception as e:
+            logger.error(f"Failed to push candle: {e}")
 
     async def connect_db(self):
         await db_manager.connect()
@@ -120,34 +85,70 @@ class NSEIngestionEngine:
                 if not isinstance(tick, dict):
                     continue
 
-                ltp = float(tick.get("last_traded_price", 0)) / 100.0 if tick.get("last_traded_price") else 0.0
-                volume = float(tick.get("volume_trade_for_the_day", 0))
+                ltp = tick.get("last_traded_price", 0) / 100.0
+                volume = tick.get("volume_traded_today", 0)
                 
                 ts_ms = int(time.time() * 1000)
                 
                 if ltp > 0:
                     payload = {"p": ltp, "v": volume, "t": ts_ms}
-                    candles, _ = candle_tracker.apply_trade("BANKNIFTY", ltp, volume, ts_ms)
                     
                     if self.loop and self.loop.is_running():
                         asyncio.run_coroutine_threadsafe(
                             db_manager.redis.publish("market:ticks:BANKNIFTY", json.dumps(payload)),
                             self.loop
                         )
-                        asyncio.run_coroutine_threadsafe(
-                            db_manager.cache_market_candles("banknifty", candles),
-                            self.loop
-                        )
+                        
+                        now = datetime.now()
+                        minute = now.minute
+                        
+                        if self.current_minute == -1:
+                            self.current_minute = minute
+                            self.current_candle = {
+                                "symbol": "banknifty",
+                                "open_time": ts_ms,
+                                "close_time": ts_ms + 59999,
+                                "open": ltp,
+                                "high": ltp,
+                                "low": ltp,
+                                "close": ltp,
+                                "volume": volume
+                            }
+                            
+                        if minute != self.current_minute:
+                            # Minute changed, push candle
+                            asyncio.run_coroutine_threadsafe(
+                                self._push_candle(self.current_candle),
+                                self.loop
+                            )
+                            # Reset state
+                            self.current_minute = minute
+                            self.current_candle = {
+                                "symbol": "banknifty",
+                                "open_time": ts_ms,
+                                "close_time": ts_ms + 59999,
+                                "open": ltp,
+                                "high": ltp,
+                                "low": ltp,
+                                "close": ltp,
+                                "volume": volume
+                            }
+                        else:
+                            # Update current candle
+                            self.current_candle["high"] = max(self.current_candle["high"], ltp)
+                            self.current_candle["low"] = min(self.current_candle["low"], ltp)
+                            self.current_candle["close"] = ltp
+                            self.current_candle["volume"] += volume
                     
-                    logger.debug(f"Published NSE Tick & Updated Candles: {payload}")
+                    logger.debug(f"Published NSE Tick: {payload}")
                     
         except Exception as e:
             logger.error(f"Error parsing NSE tick: {e} | Raw message: {message}")
 
     def _on_open(self, ws):
         logger.info("Angel One SmartWebSocketV2 Opened. Subscribing to BANKNIFTY & HDFCBANK Spot...")
-        # 26009 = BankNifty, 1333 = HDFCBANK, 3045 = SBIN
-        token_list = [{"exchangeType": 1, "tokens": ["26009", "1333", "3045"]}]
+        # 99926009 = BankNifty, 1333 = HDFCBANK, 3045 = SBIN
+        token_list = [{"exchangeType": 1, "tokens": ["99926009", "1333", "3045"]}]
         self.sws.subscribe("corrid", 1, token_list)
 
     def _on_close(self, ws, close_status_code, close_msg):

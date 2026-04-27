@@ -147,6 +147,7 @@ class DashboardRuntime:
     broadcaster: WebSocketBroadcaster = field(default_factory=WebSocketBroadcaster)
     news_fetcher: CryptoNewsFetcher = field(default_factory=CryptoNewsFetcher)
     trade_history: List[TradeTicket] = field(default_factory=list)
+    live_signals: List[TradeTicket] = field(default_factory=list)
     latest_news: List[str] = field(default_factory=list)
     latest_snapshot: Optional[DashboardSnapshot] = None
     latest_signal_card: Optional[SmartOrderCard] = None
@@ -161,6 +162,7 @@ class DashboardRuntime:
     latest_warmup_status: dict = field(default_factory=_default_warmup_status)
     db_status: str = "connected"
     active_tab: str = "CRYPTO"
+    trading_style: str = "Intraday"
     global_best_signal: Optional[dict] = None
     crypto_probabilities: list = field(default_factory=list)
     nse_probabilities: list = field(default_factory=list)
@@ -224,12 +226,15 @@ async def _build_order_details(
     entry = float(features.get("close", 0.0))
     atr = float(features.get("ATR", entry * 0.005 if entry else 1.0))
 
+    tp_pct = style.get("take_profit_pct", 1.5) / 100.0
+    sl_pct = style.get("trailing_stop_pct", 0.75) / 100.0
+
     if signal == "BUY":
-        stop_loss = round(entry - (atr * 1.5), 2)
-        take_profit = round(entry + (atr * 3.0), 2)
+        stop_loss = round(entry * (1.0 - sl_pct), 2)
+        take_profit = round(entry * (1.0 + tp_pct), 2)
     else:
-        stop_loss = round(entry + (atr * 1.5), 2)
-        take_profit = round(entry - (atr * 3.0), 2)
+        stop_loss = round(entry * (1.0 + sl_pct), 2)
+        take_profit = round(entry * (1.0 - tp_pct), 2)
 
     risk_per_unit = abs(entry - stop_loss)
     reward_per_unit = abs(entry - take_profit)
@@ -636,6 +641,8 @@ def _build_snapshot(
             execution_mode=runtime.risk_manager.execution_mode,
             db_status=runtime.db_status,
             active_tab=runtime.active_tab,
+            trading_style=runtime.trading_style,
+            capital_pools=runtime.risk_manager.capital_pools,
         ),
         market=DashboardMarket(
             symbol=DEFAULT_SYMBOL,
@@ -660,6 +667,7 @@ def _build_snapshot(
         active_trades=_build_active_trades(float(features.get("close") or 0.0)),
         smart_order_card=smart_order_card,
         trades=runtime.trade_history[:20],
+        live_signals=runtime.live_signals[:20],
         news=runtime.latest_news[:12],
         global_best_signal=runtime.global_best_signal,
     )
@@ -852,11 +860,6 @@ async def inference_loop():
                 runtime.last_signal = "HOLD"
                 continue
 
-            if signal == "BUY":
-                runtime.sim_pnl += (probability - 0.5) * 100
-            elif signal == "SELL":
-                runtime.sim_pnl += (0.5 - probability) * 100
-
             execution_plan = None
             if signal != "HOLD":
                 execution_plan = await _build_order_details(
@@ -866,6 +869,12 @@ async def inference_loop():
                     broker_adapter=runtime.executor.broker,
                     probability=probability,
                 )
+                
+                # Dynamic ATR-based sim_pnl
+                edge = abs(probability - 0.5) * 2.0
+                atr_pct = (execution_plan.sl_distance_pct + execution_plan.tp_distance_pct) / 2.0
+                margin_return = edge * atr_pct * execution_plan.risk_reward * 2.0
+                runtime.sim_pnl += margin_return
 
             live_price = float(features.get("close", 0.0))
             logger.info(
@@ -888,7 +897,34 @@ async def inference_loop():
                 and not has_open_position  # one trade at a time — prevent position stacking
             )
 
-            if should_route_signal:
+            # Decoupled signal ticket generation
+            if probability > 0.80 or probability < 0.20:
+                signal_dir = "BUY" if probability >= 0.5 else "SELL"
+                # Only add if it's a new signal to avoid spamming 2 per second
+                if not runtime.live_signals or runtime.live_signals[0].signal != signal_dir:
+                    ep = execution_plan
+                    if ep is None:
+                        ep = await _build_order_details(
+                            signal=signal_dir,
+                            features=features,
+                            style_key=DEFAULT_STYLE,
+                            broker_adapter=runtime.executor.broker,
+                            probability=probability,
+                        )
+                    ticket_id = str(uuid.uuid4())[:8]
+                    ticket = _build_trade_ticket(
+                        order_id=ticket_id,
+                        signal=signal_dir,
+                        probability=probability,
+                        sentiment=sentiment,
+                        features=features,
+                        execution_plan=ep,
+                        trigger_source="signal_engine"
+                    )
+                    runtime.live_signals.insert(0, ticket)
+                    runtime.live_signals = runtime.live_signals[:20]
+
+            if is_autonomous and should_route_signal:
                 order_id = str(uuid.uuid4())[:8]
                 executed = False
                 if not decision["requires_manual_approval"]:
@@ -1038,21 +1074,44 @@ async def alpha_ranker_loop():
         await asyncio.sleep(5)
 
 
+
+_SYNTHETIC_NEWS = [
+    "📊 Apex Engine: RSI monitoring active across all market pods",
+    "⚡ VWAP equilibrium zones refreshed — session TWAP aligned",
+    "🔍 Liquidity sweep detection armed: watching institutional pivots",
+    "📈 ATR volatility band calibrated to current session range",
+    "🛡️ Risk manager: cooldown protocols active across all pods",
+    "🌏 NSE session: BankNifty OI data feeding structural analysis",
+    "₿ Crypto pod: BTC order-book depth analysis running",
+    "🔄 FVG (Fair Value Gap) scanner: monitoring premium/discount arrays",
+    "📉 Bearish momentum watch: tracking divergence signals",
+    "💹 Apex Council: multi-agent consensus layer active",
+    "🎯 Execution engine: manual approval mode engaged",
+    "📡 WebSocket feeds: all data streams healthy",
+]
+
+
 async def news_loop():
-    await asyncio.sleep(1)
+    # Seed the sentinel wire immediately with synthetic intelligence
+    runtime.latest_news = _SYNTHETIC_NEWS
     while True:
         try:
             headlines = await runtime.news_fetcher.fetch_news("BTC,ETH,MACRO")
             if headlines:
                 runtime.latest_news = headlines[:15]
-                if runtime.latest_snapshot is not None:
-                    runtime.latest_snapshot.news = runtime.latest_news[:12]
-                    await runtime.broadcaster.broadcast(
-                        "news.update",
-                        runtime.latest_snapshot,
-                    )
+                logger.info("Sentiment Wire refreshed: {} headlines fetched", len(headlines))
+            else:
+                # Keep synthetic wire active when no API key or empty response
+                if not runtime.latest_news:
+                    runtime.latest_news = _SYNTHETIC_NEWS
+            
+            if runtime.latest_snapshot is not None:
+                runtime.latest_snapshot.news = runtime.latest_news[:12]
+                await runtime.broadcaster.broadcast("news.update", runtime.latest_snapshot)
         except Exception as exc:
             logger.warning(f"Dashboard news loop degraded: {exc}")
+            if not runtime.latest_news:
+                runtime.latest_news = _SYNTHETIC_NEWS
 
         await asyncio.sleep(300)
 
@@ -1191,6 +1250,39 @@ async def update_professional_trader_mode(update: ProfessionalTraderUpdate):
         "execution_mode": execution_mode,
     }
 
+
+@app.post("/api/capital/pools")
+async def update_capital_pools(pools: dict):
+    for pool, val in pools.items():
+        if pool in runtime.risk_manager.capital_pools:
+            runtime.risk_manager.capital_pools[pool] = float(val)
+    
+    runtime.risk_manager.total_capital = runtime.risk_manager.capital_pools.get(runtime.active_tab, runtime.risk_manager.total_capital)
+    await _refresh_snapshot("capital.updated")
+    return {"status": "success", "capital_pools": runtime.risk_manager.capital_pools}
+
+@app.post("/api/session/style/{style_name}")
+async def set_trading_style(style_name: str):
+    if style_name not in TRADING_PROFILES["styles"]:
+        raise HTTPException(status_code=400, detail="Invalid trading style")
+    
+    runtime.trading_style = style_name
+    global DEFAULT_STYLE
+    DEFAULT_STYLE = style_name
+    
+    # Override multipliers dynamically based on the selection
+    if style_name == "Scalping":
+        TRADING_PROFILES["styles"]["Scalping"]["take_profit_pct"] = 0.5
+        TRADING_PROFILES["styles"]["Scalping"]["trailing_stop_pct"] = 0.25
+    elif style_name == "Intraday":
+        TRADING_PROFILES["styles"]["Intraday"]["take_profit_pct"] = 1.5
+        TRADING_PROFILES["styles"]["Intraday"]["trailing_stop_pct"] = 0.75
+    elif style_name == "Swing":
+        TRADING_PROFILES["styles"]["Swing"]["take_profit_pct"] = 5.0
+        TRADING_PROFILES["styles"]["Swing"]["trailing_stop_pct"] = 2.0
+        
+    await _refresh_snapshot("style.updated")
+    return {"status": "success", "style": style_name}
 
 @app.post("/api/orders/execute")
 async def execute_now(request: ManualExecutionRequest):

@@ -106,6 +106,8 @@ class DashboardSession(BaseModel):
     execution_mode: str
     db_status: str = "connected"
     active_tab: str = "CRYPTO"
+    trading_style: str = "Intraday"
+    capital_pools: dict = {}
 
 
 class DashboardMarket(BaseModel):
@@ -128,6 +130,7 @@ class DashboardSnapshot(BaseModel):
     smart_order_card: SmartOrderCard
     active_trades: List[ActiveTrade]
     trades: List[TradeTicket]
+    live_signals: List[TradeTicket] = []
     news: List[str]
     global_best_signal: Optional[dict] = None
 
