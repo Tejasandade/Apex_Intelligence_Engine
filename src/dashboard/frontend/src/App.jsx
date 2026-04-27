@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import ActiveTrades from './components/ActiveTrades.jsx'
+import HighConvictionSignals from './components/HighConvictionSignals.jsx'
 import SmartOrderCard from './components/SmartOrderCard.jsx'
 import TerminalConsole from './components/TerminalConsole.jsx'
 
@@ -195,7 +195,7 @@ function GlobalMasterView({ snapshot }) {
 function TradingViewChart({ symbol = 'BTCUSDT' }) {
   let tvSymbol = symbol;
   // NSE indices are blocked from iframe embeds by TradingView, so we must use the continuous future.
-  if (symbol === 'BANKNIFTY') tvSymbol = 'BSE:SENSEX';
+  if (symbol === 'BANKNIFTY') tvSymbol = 'NSE:NIFTYBANK';
   else if (symbol === 'BTCUSDT') tvSymbol = 'BINANCE:BTCUSDTPERP';
   else if (symbol === 'EURUSD') tvSymbol = 'FX:EURUSD';
 
@@ -205,7 +205,8 @@ function TradingViewChart({ symbol = 'BTCUSDT' }) {
     `&toolbar_bg=%23141418&enable_publishing=0` +
     `&allow_symbol_change=0&save_image=0&hide_top_toolbar=0` +
     `&withdateranges=1&hide_side_toolbar=0` +
-    `&container_id=tradingview_apex`
+    `&container_id=tradingview_apex` +
+    `&timezone=Asia/Kolkata`
 
   return (
     <section className="panel tradingview-hero" aria-label="Live Price Chart">
@@ -238,6 +239,18 @@ function formatCurrency(value) {
   }).format(Number(value))
 }
 
+function formatMarketCurrency(value, activeTab) {
+  if (value == null || Number.isNaN(Number(value))) return '--'
+  if (activeTab === 'INDIA') {
+    return new Intl.NumberFormat('en-IN', {
+      style: 'currency', currency: 'INR', maximumFractionDigits: 2,
+    }).format(Number(value))
+  }
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency', currency: 'USD', maximumFractionDigits: 2,
+  }).format(Number(value))
+}
+
 function App() {
   const wsRef = useRef(null)
   const [snapshot, setSnapshot] = useState(null)
@@ -248,12 +261,16 @@ function App() {
   const [togglingMode, setTogglingMode] = useState(false)
   const [executing, setExecuting] = useState(false)
   const [closingOrderId, setClosingOrderId] = useState(null)
+  const [showCapitalModal, setShowCapitalModal] = useState(false)
+  const [cryptoPool, setCryptoPool] = useState('10000')
+  const [indiaPool, setIndiaPool] = useState('100000')
+  const [forexPool, setForexPool] = useState('10000')
   const [livePrice, setLivePrice] = useState(null)
   const [tickActive, setTickActive] = useState(false)
   const [pollFailures, setPollFailures] = useState(0)
 
   const getTradingViewSymbol = (tab) => {
-    if (tab === 'INDIA') return 'BSE:SENSEX';
+    if (tab === 'INDIA') return 'NSE:NIFTYBANK';
     if (tab === 'FOREX') return 'FX:EURUSD';
     return 'BINANCE:BTCUSDTPERP';
   };
@@ -352,6 +369,27 @@ function App() {
       setTradeAllocationInput(String(data.trade_allocation ?? 0))
     } catch (error) {
       console.error('Failed to sync capital', error)
+    } finally {
+      setSavingCapital(false)
+    }
+  }
+
+  const syncCapitalPools = async () => {
+    setSavingCapital(true)
+    try {
+      await fetch(`${API_URL}/api/capital/pools`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          CRYPTO: Number(cryptoPool), 
+          INDIA: Number(indiaPool), 
+          FOREX: Number(forexPool),
+          trade_allocation: Number(tradeAllocationInput)
+        }),
+      })
+      setShowCapitalModal(false)
+    } catch (error) {
+      console.error('Failed to sync capital pools', error)
     } finally {
       setSavingCapital(false)
     }
@@ -466,16 +504,85 @@ function App() {
             <span>Mode</span>
             <strong>{session?.execution_mode ?? 'MANUAL'}</strong>
           </div>
-          <div className="topbar-stat">
-            <span>Capital</span>
-            <strong>{formatCurrency(session?.total_capital)}</strong>
+          <div 
+            className="topbar-stat" 
+            style={{ cursor: 'pointer' }}
+            onClick={() => {
+              setCryptoPool(String(session?.capital_pools?.['CRYPTO'] ?? 10000))
+              setIndiaPool(String(session?.capital_pools?.['INDIA'] ?? 100000))
+              setForexPool(String(session?.capital_pools?.['FOREX'] ?? 10000))
+              setShowCapitalModal(true)
+            }}
+          >
+            <span>Capital ({session?.active_tab}) ⚙️</span>
+            <strong>
+              {session?.active_tab === 'INDIA' 
+                ? new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumFractionDigits: 0 }).format(session?.capital_pools?.['INDIA'] ?? 0)
+                : formatCurrency(session?.capital_pools?.[session?.active_tab] ?? session?.total_capital)}
+            </strong>
           </div>
           <div className={`topbar-stat pnl ${(session?.sim_pnl ?? 0) >= 0 ? 'pnl--pos' : 'pnl--neg'}`}>
             <span>Session PnL</span>
-            <strong>{formatCurrency(session?.sim_pnl)}</strong>
+            <strong>{formatMarketCurrency(session?.sim_pnl, session?.active_tab)}</strong>
           </div>
         </div>
       </header>
+
+      {/* Capital Management Modal */}
+      {showCapitalModal && (
+        <div style={{
+          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 10000,
+          background: 'rgba(0,0,0,0.8)', display: 'flex', alignItems: 'center', justifyContent: 'center'
+        }}>
+          <div style={{
+            background: 'var(--panel-bg)', padding: '24px', borderRadius: '8px', border: '1px solid var(--border)', width: '320px'
+          }}>
+            <h3 style={{ margin: '0 0 16px 0', fontSize: '1.1rem' }}>Capital Management</h3>
+            
+            <div style={{ marginBottom: '12px' }}>
+              <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-dim)', marginBottom: '4px' }}>CRYPTO Pool (USD)</label>
+              <input type="number" value={cryptoPool} onChange={e => setCryptoPool(e.target.value)}
+                style={{ width: '100%', padding: '8px', background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: '4px' }}
+              />
+            </div>
+
+            <div style={{ marginBottom: '12px' }}>
+              <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-dim)', marginBottom: '4px' }}>INDIA Pool (INR)</label>
+              <input type="number" value={indiaPool} onChange={e => setIndiaPool(e.target.value)}
+                style={{ width: '100%', padding: '8px', background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: '4px' }}
+              />
+            </div>
+
+            <div style={{ marginBottom: '16px' }}>
+              <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--text-dim)', marginBottom: '4px' }}>FOREX Pool (USD)</label>
+              <input type="number" value={forexPool} onChange={e => setForexPool(e.target.value)}
+                style={{ width: '100%', padding: '8px', background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: '4px' }}
+              />
+            </div>
+
+            <div style={{ marginBottom: '16px', padding: '12px', background: 'rgba(255,165,0,0.1)', borderRadius: '6px', border: '1px solid rgba(255,165,0,0.2)' }}>
+              <label style={{ display: 'block', fontSize: '0.8rem', color: 'var(--accent)', fontWeight: 'bold', marginBottom: '4px' }}>Trade Allocation (Override)</label>
+              <input type="number" value={tradeAllocationInput} onChange={e => setTradeAllocationInput(e.target.value)}
+                style={{ width: '100%', padding: '8px', background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text)', borderRadius: '4px' }}
+              />
+              <div style={{ fontSize: '0.65rem', color: 'var(--text-dim)', marginTop: '4px' }}>
+                Set to <strong>0</strong> for dynamic statistical sizing (Kelly Criterion).
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <button 
+                onClick={() => setShowCapitalModal(false)}
+                style={{ flex: 1, padding: '8px', background: 'transparent', border: '1px solid var(--border)', color: 'var(--text-dim)', borderRadius: '4px', cursor: 'pointer' }}
+              >Cancel</button>
+              <button 
+                onClick={syncCapitalPools} disabled={savingCapital}
+                style={{ flex: 1, padding: '8px', background: 'var(--accent)', border: 'none', color: '#fff', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}
+              >{savingCapital ? 'Saving...' : 'Save Pools'}</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── Tab Navigation ─────────────────────────────────────────────────── */}
       <nav className="tab-navigation" style={{ display: 'flex', gap: '20px', padding: '10px 20px', background: 'var(--panel-bg)', borderBottom: '1px solid var(--border)' }}>
@@ -536,41 +643,29 @@ function App() {
             </div>
           </section>
 
-          {/* Capital Control */}
+          {/* Trading Style Control */}
           <section className="panel panel--compact">
-            <div className="panel-title">Capital Control</div>
-            <div className="capital-row">
-              <span className="input-label">Total Capital (USD)</span>
-              <input
-                id="capital-input"
-                className="capital-input"
-                type="number"
-                value={capitalInput}
-                onChange={(e) => setCapitalInput(e.target.value)}
-              />
+            <div className="panel-title">Trading Style</div>
+            <div className="capital-row" style={{ marginTop: '10px' }}>
+              <span className="input-label">Active Profile</span>
+              <select 
+                className="capital-input" 
+                style={{ width: '100%', padding: '8px', background: 'var(--bg)', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: '4px' }}
+                value={session?.trading_style ?? 'Intraday'}
+                onChange={async (e) => {
+                  try {
+                    await fetch(`${API_URL}/api/session/style/${e.target.value}`, { method: 'POST' });
+                  } catch (err) {
+                    console.error('Failed to change trading style', err);
+                  }
+                }}
+              >
+                <option value="Scalping">Scalping (1m)</option>
+                <option value="Intraday">Intraday (15m)</option>
+                <option value="Swing">Swing (4h)</option>
+              </select>
             </div>
-            <div className="capital-row">
-              <span className="input-label">Trade Amt (USD · 0 = Auto)</span>
-              <input
-                id="trade-allocation-input"
-                className="capital-input"
-                type="number"
-                placeholder="0"
-                value={tradeAllocationInput}
-                onChange={(e) => setTradeAllocationInput(e.target.value)}
-              />
-            </div>
-            <button
-              id="sync-capital-button"
-              type="button"
-              className="action-button"
-              style={{ width: '100%', marginBottom: '10px' }}
-              onClick={syncCapital}
-              disabled={savingCapital}
-            >
-              {savingCapital ? 'Saving...' : '⟳  Sync Settings'}
-            </button>
-            <div className="metric-list">
+            <div className="metric-list" style={{ marginTop: '10px' }}>
               <div className="metric-item">
                 <span>Symbol</span>
                 <strong>{market?.symbol ?? 'BTCUSDT'}</strong>
@@ -585,7 +680,7 @@ function App() {
               {/* Hero Price Row */}
               <div className="metric-item metric-item--price">
                 <span>Live Price</span>
-                <span className="price-value">{formatCurrency(livePrice ?? market?.close_price)}</span>
+                <span className="price-value">{formatMarketCurrency(livePrice ?? market?.close_price, session?.active_tab)}</span>
               </div>
               <div className="metric-item">
                 <span>RSI (14)</span>
@@ -600,7 +695,7 @@ function App() {
                 <span>VWAP</span>
                 <strong style={{
                   color: (livePrice ?? 0) > (market?.vwap ?? 0) ? 'var(--bullish)' : 'var(--bearish)'
-                }}>{formatCurrency(market?.vwap)}</strong>
+                }}>{formatMarketCurrency(market?.vwap, session?.active_tab)}</strong>
               </div>
               <div className="metric-item">
                 <span>ATR</span>
@@ -646,6 +741,7 @@ function App() {
               onExecute={executeNow}
               executing={executing}
               activeTiers={activeTiers}
+              activeTab={session?.active_tab}
             />
 
             <div className="mid-right">
@@ -678,12 +774,10 @@ function App() {
                 </div>
               </section>
 
-              {/* Active Trades */}
-              <ActiveTrades
-                trades={activeTrades}
-                closingOrderId={closingOrderId}
-                onCloseTrade={closeTrade}
-                onClearStale={clearStaleTrades}
+              {/* High Conviction Signals */}
+              <HighConvictionSignals
+                signals={snapshot?.live_signals ?? []}
+                activeTab={session?.active_tab}
               />
             </div>
           </div>
@@ -702,8 +796,11 @@ function App() {
                       <div className="trade-meta">{trade.symbol} / {trade.status}</div>
                     </div>
                     <div className="trade-side">
-                      <div>{trade.time}</div>
-                      <div>{trade.trigger_source}</div>
+                      <div style={{ fontSize: '0.85rem', fontWeight: '600' }}>
+                        {formatMarketCurrency(trade.execution_plan?.est_pnl, session?.active_tab)}
+                      </div>
+                      <div style={{ fontSize: '0.7rem', color: 'var(--text-dim)' }}>{trade.time}</div>
+                      <div style={{ fontSize: '0.7rem', color: 'var(--text-dimmer)' }}>{trade.trigger_source}</div>
                     </div>
                   </div>
                 ))
