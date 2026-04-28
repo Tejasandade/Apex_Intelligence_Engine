@@ -193,38 +193,52 @@ function GlobalMasterView({ snapshot }) {
 
 // ---------------------------------------------------------------------------
 function TradingViewChart({ symbol = 'BTCUSDT', timezone = 'UTC' }) {
-  let tvSymbol = symbol;
-  // NSE indices are blocked from iframe embeds by TradingView, so we must use the continuous future.
-  if (symbol === 'BANKNIFTY') tvSymbol = 'NSE:NIFTYBANK';
-  else if (symbol === 'BTCUSDT') tvSymbol = 'BINANCE:BTCUSDTPERP';
-  else if (symbol === 'EURUSD') tvSymbol = 'FX:EURUSD';
+  const containerId = 'tradingview_apex';
+  const widgetRef = useRef(null);
 
-  const src =
-    `https://s.tradingview.com/widgetembed/?symbol=${encodeURIComponent(tvSymbol)}` +
-    `&interval=1&theme=dark&style=1&locale=en` +
-    `&toolbar_bg=%23141418&enable_publishing=0` +
-    `&allow_symbol_change=0&save_image=0&hide_top_toolbar=0` +
-    `&withdateranges=1&hide_side_toolbar=0` +
-    `&container_id=tradingview_apex` +
-    `&timezone=${encodeURIComponent(timezone)}`
+  useEffect(() => {
+    // Determine the actual ticker for TradingView
+    let tvSymbol = symbol;
+    if (symbol === 'BANKNIFTY') tvSymbol = 'NSE:BANKNIFTY';
+    else if (symbol === 'BTCUSDT') tvSymbol = 'BINANCE:BTCUSDTPERP';
+    else if (symbol === 'EURUSD') tvSymbol = 'FX:EURUSD';
+
+    if (window.TradingView) {
+      widgetRef.current = new window.TradingView.widget({
+        "width": "100%",
+        "height": "100%",
+        "symbol": tvSymbol,
+        "interval": "1",
+        "timezone": timezone,
+        "theme": "dark",
+        "style": "1",
+        "locale": "en",
+        "toolbar_bg": "#141418",
+        "enable_publishing": false,
+        "hide_top_toolbar": false,
+        "hide_legend": false,
+        "save_image": false,
+        "container_id": containerId,
+        "allow_symbol_change": true,
+        "withdateranges": true,
+        "details": true,
+        "hotlist": true,
+        "calendar": true,
+        "show_popup_button": true,
+        "popup_width": "1000",
+        "popup_height": "650"
+      });
+    }
+  }, [symbol, timezone]);
 
   return (
     <section className="panel tradingview-hero" aria-label="Live Price Chart">
       <div className="panel-title-row">
-        <div className="panel-title">Live Chart — {tvSymbol}</div>
-        <div className="chart-badge">REAL-TIME</div>
+        <div className="panel-title">Live Chart — {symbol}</div>
+        <div className="chart-badge">ADVANCED</div>
       </div>
-      <div className="tradingview-wrapper">
-        <iframe
-          id="tradingview_apex"
-          title={`TradingView Advanced Chart — ${symbol}`}
-          src={src}
-          frameBorder="0"
-          allowTransparency="true"
-          scrolling="no"
-          allow="autoplay"
-          style={{ width: '100%', height: '100%', border: 'none', display: 'block' }}
-        />
+      <div className="tradingview-wrapper" id={containerId} style={{ height: '420px' }}>
+        {/* Widget will be injected here */}
       </div>
     </section>
   )
@@ -280,7 +294,7 @@ function App() {
     let active = true
     const pollPrice = async () => {
       try {
-        const res = await fetch(`${API_URL}/api/market/tick`)
+        const res = await fetch(`${API_URL}/api/market/tick?t=${Date.now()}`)
         if (!res.ok) throw new Error('Bad response')
         const data = await res.json()
         if (active && data?.price > 0) {
@@ -457,6 +471,8 @@ function App() {
   const news = snapshot?.news ?? []
   const hasActiveTrade = activeTrades.length > 0
   const activeTiers = activeTrades.map(t => t.confidence_tier || 1)
+
+  const tvSymbol = session?.active_tab === 'INDIA' ? 'BANKNIFTY' : (session?.symbol || 'BTCUSDT');
 
   return (
     <div className="app-shell">
@@ -705,7 +721,7 @@ function App() {
               {/* Hero Price Row */}
               <div className="metric-item metric-item--price">
                 <span>Live Price</span>
-                <span className="price-value">{formatMarketCurrency(livePrice ?? market?.close_price, session?.active_tab)}</span>
+                <span className="price-value">{formatMarketCurrency(livePrice || market?.close_price, session?.active_tab)}</span>
               </div>
               <div className="metric-item">
                 <span>RSI (14)</span>
@@ -758,7 +774,8 @@ function App() {
 
           {/* ── HERO: Full-Width Chart ──────────────────────────────────────── */}
           <TradingViewChart
-            symbol={getTradingViewSymbol(session?.active_tab)}
+            key={tvSymbol}
+            symbol={tvSymbol}
             timezone={session?.active_tab === 'INDIA' ? 'Asia/Kolkata' : 'UTC'}
           />
 

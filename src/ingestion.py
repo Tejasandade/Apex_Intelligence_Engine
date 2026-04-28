@@ -218,6 +218,16 @@ async def on_message(message: AdapterMessage):
         lob.apply_update(parsed_event)
         await db_manager.update_order_book(parsed_event)
         
+        # ── Epic 27: Zero-Latency Price Bridge ───────────────────────────────
+        if parsed_event.is_top_of_book and parsed_event.bids and parsed_event.asks:
+            try:
+                mid = (float(parsed_event.bids[0][0]) + float(parsed_event.asks[0][0])) / 2.0
+                if mid > 0:
+                    await db_manager.redis_pool.set(f"tick:{parsed_event.symbol.upper()}", str(round(mid, 2)))
+            except (ValueError, TypeError, IndexError):
+                pass
+        # ───────────────────────────────────────────────────────────────────
+
         if db_manager.redis_pool:
             await db_manager.redis_pool.expire(REDIS_CANDLE_KEY, 10)
 

@@ -85,7 +85,7 @@ def _default_warmup_status() -> dict:
     }
 
 
-async def _get_redis_live_price() -> float:
+async def _get_redis_live_price(symbol: str) -> Optional[float]:
     """Zero-latency bridge — reads the best-bid/ask mid-price directly from the
     order book Redis key for tick-for-tick price parity with the live feed.
     Falls back to the latest candle close if the order book key is unavailable."""
@@ -94,8 +94,18 @@ async def _get_redis_live_price() -> float:
             return 0.0
         import json as _json
 
-        # Primary: live order book mid-price (matches what the AI model sees)
-        book_payload = await db_manager.redis_pool.get(f"book:{DEFAULT_SYMBOL.upper()}")
+        # Primary: live tick bridge (direct LTP or mid-price)
+        tick_price = await db_manager.redis_pool.get(f"tick:{symbol.upper()}")
+        if tick_price:
+            try:
+                price = float(tick_price)
+                if price > 0:
+                    return round(price, 2)
+            except (ValueError, TypeError):
+                pass
+
+        # Secondary: live order book mid-price (matches what the AI model sees)
+        book_payload = await db_manager.redis_pool.get(f"book:{symbol.upper()}")
         if book_payload:
             book = _json.loads(book_payload)
             bids = book.get("bids", [])
@@ -109,7 +119,8 @@ async def _get_redis_live_price() -> float:
                     pass
 
         # Fallback: last candle close from Redis candle key
-        payload = await db_manager.redis_pool.get(REDIS_CANDLE_KEY)
+        from src.data.db import build_candle_cache_key
+        payload = await db_manager.redis_pool.get(build_candle_cache_key(symbol))
         if not payload:
             return 0.0
         candles = _json.loads(payload)
@@ -1525,7 +1536,9 @@ async def switch_market_tab(tab_name: str):
 async def get_market_tick():
     """Zero-latency price endpoint: reads directly from Redis candle key.
     Frontend polls this every 100 ms for tick-for-tick price parity with TradingView."""
-    redis_price = await _get_redis_live_price()
+    redis_price = await _get_redis_live_price(DEFAULT_SYMBOL)
+    if redis_price is None:
+        redis_price = 0.0
     # Fall back gracefully to latest snapshot price when Redis is cold / warming up
     if redis_price <= 0.0 and runtime.latest_snapshot is not None:
         redis_price = runtime.latest_snapshot.market.close_price

@@ -4,6 +4,7 @@ import os
 import sys
 import time
 import pyotp
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from loguru import logger
 
@@ -41,15 +42,17 @@ class NSEIngestionEngine:
         self.loop = None
         self.current_minute = -1
         self.current_candle = None
+        self.candles = []
 
     async def _push_candle(self, candle: dict):
-        key = "market:candles:1m:BANKNIFTY"
+        self.candles.append(candle)
+        if len(self.candles) > 100:
+            self.candles = self.candles[-100:]
         try:
-            await db_manager.redis_pool.lpush(key, json.dumps(candle))
-            await db_manager.redis_pool.ltrim(key, 0, 99)
-            logger.info(f"Pushed 1m candle to {key}: {candle}")
+            await db_manager.cache_market_candles("BANKNIFTY", self.candles)
+            logger.info(f"Cached {len(self.candles)} 1m candles for BANKNIFTY")
         except Exception as e:
-            logger.error(f"Failed to push candle: {e}")
+            logger.error(f"Failed to cache candle: {e}")
 
     async def connect_db(self):
         await db_manager.connect()
@@ -102,7 +105,11 @@ class NSEIngestionEngine:
                     
                     if self.loop and self.loop.is_running():
                         asyncio.run_coroutine_threadsafe(
-                            db_manager.redis.publish("market:ticks:BANKNIFTY", json.dumps(payload)),
+                            db_manager.redis_pool.publish("market:ticks:BANKNIFTY", json.dumps(payload)),
+                            self.loop
+                        )
+                        asyncio.run_coroutine_threadsafe(
+                            db_manager.redis_pool.set("tick:BANKNIFTY", str(ltp)),
                             self.loop
                         )
                         
@@ -153,9 +160,9 @@ class NSEIngestionEngine:
             logger.error(f"Error parsing NSE tick: {e} | Raw message: {message}")
 
     def _on_open(self, ws):
-        logger.info("Angel One SmartWebSocketV2 Opened. Subscribing to BANKNIFTY & HDFCBANK Spot...")
-        # 99926009 = BankNifty, 1333 = HDFCBANK, 3045 = SBIN
-        token_list = [{"exchangeType": 1, "tokens": ["99926009", "1333", "3045"]}]
+        logger.info("Angel One SmartWebSocketV2 Opened. Subscribing to BANKNIFTY Spot only...")
+        # 99926009 = BankNifty
+        token_list = [{"exchangeType": 1, "tokens": ["99926009"]}]
         self.sws.subscribe("corrid", 1, token_list)
 
     def _on_close(self, ws, close_status_code, close_msg):
@@ -164,11 +171,70 @@ class NSEIngestionEngine:
     def _on_error(self, ws, error):
         logger.error(f"Angel One SmartWebSocketV2 Error: {error}")
 
+    async def _bootstrap_historical_candles(self):
+        logger.info("Bootstrapping recent 1m candles for BANKNIFTY from Angel One REST API...")
+        now = datetime.now()
+        # Fetch last 1 hour to ensure we hit at least 14 organic candles
+        from_date = now - timedelta(hours=1)
+        
+        historicParam = {
+            "exchange": "NSE",
+            "symboltoken": "99926009",
+            "interval": "ONE_MINUTE",
+            "fromdate": from_date.strftime("%Y-%m-%d %H:%M"),
+            "todate": now.strftime("%Y-%m-%d %H:%M")
+        }
+        
+        try:
+            # Run the synchronous API call in the executor
+            response = await self.loop.run_in_executor(
+                None, 
+                lambda: self.smart_connect.getCandleData(historicParam)
+            )
+            
+            if response and response.get('status') and response.get('data'):
+                candles = response['data']
+                
+                # Clear existing cache in memory
+                self.candles = []
+                
+                # data format: [timestamp, open, high, low, close, volume]
+                for c in candles:
+                    ts_str, o, h, l, c_price, v = c
+                    
+                    # Angel One timestamp format: '2024-04-25T09:15:00+05:30'
+                    try:
+                        dt = datetime.fromisoformat(ts_str)
+                    except ValueError:
+                        continue
+                        
+                    ts_ms = int(dt.timestamp() * 1000)
+                    
+                    candle_obj = {
+                        "symbol": "banknifty",
+                        "open_time": ts_ms,
+                        "close_time": ts_ms + 59999,
+                        "open": float(o),
+                        "high": float(h),
+                        "low": float(l),
+                        "close": float(c_price),
+                        "volume": float(v)
+                    }
+                    self.candles.append(candle_obj)
+                    
+                await db_manager.cache_market_candles("BANKNIFTY", self.candles)
+                logger.success(f"Bootstrapped {len(self.candles)} historical candles for BANKNIFTY! Engine is warm.")
+            else:
+                logger.warning(f"Failed to fetch historical candles: {response}")
+        except Exception as e:
+            logger.error(f"Historical bootstrap failed: {e}")
+
     async def start(self):
         await self.connect_db()
         self.loop = asyncio.get_running_loop()
         
         self._authenticate()
+        await self._bootstrap_historical_candles()
         
         self.sws = SmartWebSocketV2(
             auth_token=self.smart_connect.access_token,
@@ -178,7 +244,7 @@ class NSEIngestionEngine:
         )
         
         self.sws.on_open = self._on_open
-        self.sws.on_message = self._on_message
+        self.sws.on_data = self._on_message
         self.sws.on_close = self._on_close
         self.sws.on_error = self._on_error
         
