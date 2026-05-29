@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Apex Intelligence Engine V5 — Command Center</title>
+    <meta name="description" content="Real-time trading intelligence dashboard for Apex V5">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="dashboard.css">
+</head>
+<body>
+    <!-- ━━ Header ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ -->
+    <header class="header">
+        <div class="header__brand">
+            <div class="header__logo">⚡</div>
+            <div>
+                <h1 class="header__title">APEX V5</h1>
+                <span class="header__subtitle">Intelligence Engine</span>
+            </div>
+        </div>
+        <div class="header__status">
+            <div class="status-pill" style="background: rgba(255,255,255,0.05); color: var(--text-primary); font-family: 'JetBrains Mono', monospace;" id="livePrice">Live Price: $--</div>
+            <div class="status-pill" id="wsStatus">
+                <span class="status-dot"></span>
+                <span id="wsStatusText">Disconnected</span>
+            </div>
+            <div class="status-pill status-pill--mode" id="modeStatus">PAPER</div>
+            <div class="header__uptime" id="uptime">00:00:00</div>
+        </div>
+    </header>
+
+    <!-- ━━ Key Metrics Bar ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ -->
+    <section class="metrics-bar">
+        <div class="metric-card metric-card--primary">
+            <div class="metric-card__label">Balance</div>
+            <div class="metric-card__value" id="balance">$10,000.00</div>
+            <div class="metric-card__delta" id="balanceDelta">+$0.00</div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-card__label">Total P&L</div>
+            <div class="metric-card__value" id="totalPnl">$0.00</div>
+            <div class="metric-card__delta" id="totalPnlPct">0.00%</div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-card__label">Win Rate</div>
+            <div class="metric-card__value" id="winRate">—</div>
+            <div class="metric-card__delta" id="totalTrades">0 trades</div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-card__label">Drawdown</div>
+            <div class="metric-card__value" id="drawdown">0.0%</div>
+            <div class="metric-card__delta" id="maxDrawdown">Max: 0.0%</div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-card__label">Regime</div>
+            <div class="metric-card__value" id="regime">—</div>
+            <div class="metric-card__delta" id="regimeADX">ADX: —</div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-card__label">Signals</div>
+            <div class="metric-card__value" id="signalCount">0</div>
+            <div class="metric-card__delta" id="candleCount">0 candles</div>
+        </div>
+    </section>
+
+    <!-- ━━ Main Content ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ -->
+    <main class="dashboard">
+        <!-- Left Column: Signal Feed + Council -->
+        <div class="dashboard__left">
+            <!-- Active Position -->
+            <section class="panel" id="positionPanel">
+                <div class="panel__header">
+                    <h2 class="panel__title">📊 Active Position</h2>
+                    <span class="panel__badge" id="positionBadge">No Position</span>
+                </div>
+                <div class="panel__body" id="positionBody">
+                    <div class="position-empty">
+                        <span class="position-empty__icon">⏳</span>
+                        <span>Waiting for signal...</span>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Signal Feed -->
+            <section class="panel panel--grow">
+                <div class="panel__header">
+                    <h2 class="panel__title">📡 Signal Feed</h2>
+                    <span class="panel__badge" id="signalBadge">Live</span>
+                </div>
+                <div class="panel__body signal-feed" id="signalFeed">
+                    <div class="signal-empty">
+                        <span class="signal-empty__icon">🔍</span>
+                        <span>Scanning market for opportunities...</span>
+                    </div>
+                </div>
+            </section>
+        </div>
+
+        <!-- Right Column: Council + Trades -->
+        <div class="dashboard__right">
+            <!-- Council Panel -->
+            <section class="panel">
+                <div class="panel__header">
+                    <h2 class="panel__title">🏛️ Council</h2>
+                    <span class="panel__badge" id="councilBadge">5 Advisors</span>
+                </div>
+                <div class="panel__body" id="councilPanel">
+                    <div class="advisor-grid">
+                        <div class="advisor" id="adv-momentum">
+                            <div class="advisor__icon">📈</div>
+                            <div class="advisor__name">Momentum</div>
+                            <div class="advisor__vote advisor__vote--waiting">—</div>
+                            <div class="advisor__weight">w=1.5</div>
+                        </div>
+                        <div class="advisor" id="adv-structure">
+                            <div class="advisor__icon">🏗️</div>
+                            <div class="advisor__name">Structure</div>
+                            <div class="advisor__vote advisor__vote--waiting">—</div>
+                            <div class="advisor__weight">w=1.2</div>
+                        </div>
+                        <div class="advisor" id="adv-volume">
+                            <div class="advisor__icon">📊</div>
+                            <div class="advisor__name">Volume</div>
+                            <div class="advisor__vote advisor__vote--waiting">—</div>
+                            <div class="advisor__weight">w=1.0</div>
+                        </div>
+                        <div class="advisor" id="adv-regime">
+                            <div class="advisor__icon">🌊</div>
+                            <div class="advisor__name">Regime</div>
+                            <div class="advisor__vote advisor__vote--waiting">—</div>
+                            <div class="advisor__weight">w=1.3</div>
+                        </div>
+                        <div class="advisor" id="adv-risk">
+                            <div class="advisor__icon">🛡️</div>
+                            <div class="advisor__name">Risk</div>
+                            <div class="advisor__vote advisor__vote--waiting">—</div>
+                            <div class="advisor__weight">w=2.0</div>
+                        </div>
+                    </div>
+                    <div class="council-consensus">
+                        <div class="consensus-bar">
+                            <div class="consensus-bar__fill" id="consensusFill" style="width: 0%"></div>
+                            <div class="consensus-bar__threshold"></div>
+                        </div>
+                        <div class="consensus-label">
+                            <span id="consensusScore">—</span>
+                            <span class="consensus-threshold">Threshold: 60%</span>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Trade History -->
+            <section class="panel panel--grow">
+                <div class="panel__header">
+                    <h2 class="panel__title">📜 Trade History</h2>
+                    <span class="panel__badge" id="tradeBadge">0 trades</span>
+                </div>
+                <div class="panel__body trade-history" id="tradeHistory">
+                    <div class="trade-empty">
+                        <span>No trades yet</span>
+                    </div>
+                </div>
+            </section>
+        </div>
+    </main>
+
+    <!-- ━━ Ensemble Bar ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ -->
+    <footer class="ensemble-bar">
+        <div class="ensemble-member">
+            <span class="ensemble-member__label">Trending Model</span>
+            <div class="ensemble-member__bar">
+                <div class="ensemble-member__fill" id="trendingBar" style="width: 50%"></div>
+            </div>
+            <span class="ensemble-member__value" id="trendingProb">—</span>
+        </div>
+        <div class="ensemble-member">
+            <span class="ensemble-member__label">Ranging Model</span>
+            <div class="ensemble-member__bar">
+                <div class="ensemble-member__fill ensemble-member__fill--ranging" id="rangingBar" style="width: 50%"></div>
+            </div>
+            <span class="ensemble-member__value" id="rangingProb">—</span>
+        </div>
+        <div class="ensemble-member">
+            <span class="ensemble-member__label">Agreement</span>
+            <div class="ensemble-member__bar">
+                <div class="ensemble-member__fill ensemble-member__fill--agreement" id="agreementBar" style="width: 0%"></div>
+            </div>
+            <span class="ensemble-member__value" id="agreementPct">—</span>
+        </div>
+    </footer>
+
+    <script src="dashboard.js"></script>
+</body>
+</html>

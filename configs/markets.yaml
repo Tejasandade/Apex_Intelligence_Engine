@@ -1,0 +1,126 @@
+# ============================================================================
+# Apex Intelligence Engine V5 — Market Configuration
+# ============================================================================
+# Every market-specific constant lives here. No hardcoding in Python files.
+# ============================================================================
+
+markets:
+  crypto:
+    btcusdt:
+      exchange: binance_futures
+      display_name: "Bitcoin / USDT"
+      base_currency: BTC
+      quote_currency: USDT
+      tick_size: 0.10
+      lot_size: 0.001
+      min_notional: 5.0        # Minimum order value in USDT
+      session: "24/7"
+      timezone: UTC
+      commission_bps: 2.0       # Maker fee in basis points
+      taker_commission_bps: 4.0 # Taker fee in basis points
+      expected_slippage_bps: 1.0
+      max_slippage_bps: 3.0     # Worst-case for backtesting
+      data_source: binance
+      candle_intervals: ["1m", "5m", "15m", "1h"]
+      warmup_candles: 60        # Minimum candles before inference
+      features_version: "crypto_v1"
+
+    ethusdt:
+      exchange: binance_futures
+      display_name: "Ethereum / USDT"
+      base_currency: ETH
+      quote_currency: USDT
+      tick_size: 0.01
+      lot_size: 0.01
+      min_notional: 5.0
+      session: "24/7"
+      timezone: UTC
+      commission_bps: 2.0
+      taker_commission_bps: 4.0
+      expected_slippage_bps: 1.5
+      max_slippage_bps: 3.0
+      data_source: binance
+      candle_intervals: ["1m", "5m", "15m", "1h"]
+      warmup_candles: 60
+      features_version: "crypto_v1"
+
+  india_equity:
+    banknifty:
+      exchange: dhan
+      display_name: "Bank Nifty"
+      base_currency: BANKNIFTY
+      quote_currency: INR
+      tick_size: 0.05
+      lot_size: 15              # BankNifty lot size
+      min_notional: 0           # Lot-based, not notional
+      session:
+        timezone: "Asia/Kolkata"
+        open: "09:15"
+        close: "15:30"
+        days: [0, 1, 2, 3, 4]  # Monday=0 through Friday=4
+        pre_market: "09:00"
+        post_market: "15:40"
+      commission_bps: 3.0
+      taker_commission_bps: 3.0
+      expected_slippage_bps: 2.0
+      max_slippage_bps: 5.0
+      data_source: dhan
+      candle_intervals: ["1m", "5m", "15m"]
+      warmup_candles: 30
+      features_version: "india_equity_v1"
+      # NSE-specific
+      drop_open_bars: 5         # Skip first N minutes (gap noise)
+      expiry_day: "wednesday"   # Weekly expiry day
+
+    nifty50:
+      exchange: dhan
+      display_name: "Nifty 50"
+      base_currency: NIFTY
+      quote_currency: INR
+      tick_size: 0.05
+      lot_size: 25
+      min_notional: 0
+      session:
+        timezone: "Asia/Kolkata"
+        open: "09:15"
+        close: "15:30"
+        days: [0, 1, 2, 3, 4]
+      commission_bps: 3.0
+      taker_commission_bps: 3.0
+      expected_slippage_bps: 1.5
+      max_slippage_bps: 4.0
+      data_source: dhan
+      candle_intervals: ["1m", "5m", "15m"]
+      warmup_candles: 30
+      features_version: "india_equity_v1"
+      drop_open_bars: 5
+      expiry_day: "thursday"
+
+  # Forex placeholder — abstraction ready, implementation deferred
+  forex:
+    eurusd:
+      exchange: oanda
+      display_name: "EUR/USD"
+      base_currency: EUR
+      quote_currency: USD
+      tick_size: 0.00001
+      lot_size: 1000            # Micro lot
+      min_notional: 0
+      session: "24/5"
+      timezone: UTC
+      commission_bps: 0.5
+      taker_commission_bps: 0.8
+      expected_slippage_bps: 0.3
+      max_slippage_bps: 1.0
+      data_source: oanda
+      candle_intervals: ["1m", "5m", "15m", "1h"]
+      warmup_candles: 60
+      features_version: "forex_v1"
+      _status: "deferred"       # Not implemented yet
+
+# Global defaults
+defaults:
+  candle_interval: "1m"
+  backtest_lookback_days: 90
+  warmup_candles: 60
+  max_features: 25

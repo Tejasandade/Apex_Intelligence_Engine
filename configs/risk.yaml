@@ -1,0 +1,57 @@
+# ============================================================================
+# Apex Intelligence Engine V5 — Risk Configuration
+# ============================================================================
+
+# Capital pools — isolated per market to prevent cross-market contamination
+capital_pools:
+  crypto:
+    starting_balance: 10000.0   # USDT
+    currency: USDT
+  india_equity:
+    starting_balance: 100000.0  # INR
+    currency: INR
+  forex:
+    starting_balance: 10000.0   # USD (deferred)
+    currency: USD
+
+# Position sizing
+sizing:
+  kelly_fraction: 0.5           # Half-Kelly (NEVER full Kelly)
+  max_kelly_multiplier: 1.0     # Hard cap: no aggression multiplier
+  min_allocation_pct: 0.01      # 1% minimum position size
+  max_allocation_pct: 0.05      # 5% maximum per trade
+  max_concurrent_trades: 3      # Per market
+  max_total_exposure_pct: 0.40  # 40% total capital across all markets
+
+# Drawdown protection
+drawdown:
+  daily_limit_pct: 0.05         # 5% daily loss → halt trading
+  portfolio_kill_pct: 0.10      # 10% portfolio drawdown → kill switch
+  consecutive_loss_penalties:
+    3: 0.50                     # After 3 losses: reduce size 50%
+    5: 0.10                     # After 5 losses: reduce size 90%
+    7: 0.00                     # After 7 losses: STOP trading
+
+# Kill switch conditions
+kill_switch:
+  max_drawdown_pct: 0.10        # Portfolio drops 10% from high-water mark
+  win_rate_collapse_sigma: 3.0  # Win rate drops 3σ below backtested mean
+  max_api_failures: 3           # Consecutive broker failures
+  max_latency_ms: 2000          # Latency spike threshold
+  rolling_trade_window: 20      # Window for rolling win rate
+
+# Trade management
+trade_management:
+  scale_out_at_rr: 1.0          # Take 50% profit at 1:1 R:R
+  scale_out_pct: 0.50           # Close 50% of position
+  trail_to_breakeven: true      # Move stop to entry after scale-out
+  default_rr_target: 2.0        # Default risk:reward target
+  cooldown_minutes: 5           # Post-trade cooldown per symbol
+
+# Conviction thresholds (council output)
+conviction:
+  min_signal_threshold: 0.60    # Below this: HOLD
+  high_conviction_threshold: 0.80
+  threshold_adjustment:
+    hot_portfolio: 0.70         # When portfolio is >25% exposed, raise threshold
+    cold_portfolio: 0.55        # When portfolio is empty, lower threshold
