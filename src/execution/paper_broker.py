@@ -67,6 +67,7 @@ class PaperBroker(BaseBroker):
         self._orders: dict[str, Order] = {}  # order_id → order
         self._trades: list[TradeRecord] = []
         self._current_prices: dict[str, float] = {}
+        self._current_time: datetime | None = None
 
         # Stats
         self._total_trades = 0
@@ -87,7 +88,7 @@ class PaperBroker(BaseBroker):
         self._connected = True
         logger.info(
             "paper_broker_connected",
-            balance=f"${self._balance:,.2f}",
+            balance=f"{self._currency}{self._balance:,.2f}",
             commission=f"{self._commission_bps}bps",
             slippage=f"{self._slippage_bps}bps",
         )
@@ -97,9 +98,10 @@ class PaperBroker(BaseBroker):
         self._connected = False
         logger.info(
             "paper_broker_disconnected",
-            final_balance=f"${self._balance:,.2f}",
-            total_pnl=f"${self._total_pnl:,.2f}",
+            final_balance=f"{self._currency}{self._balance:,.2f}",
+            total_pnl=f"{self._currency}{self._total_pnl:,.2f}",
             trades=self._total_trades,
+            peak_equity=f"{self._currency}{self._peak_equity:,.2f}",
         )
 
     # ── Orders ───────────────────────────────────────────────────────────────
@@ -134,7 +136,7 @@ class PaperBroker(BaseBroker):
         order.commission = round(commission, 4)
         order.slippage = round(abs(fill_price - current_price), 8)
         order.status = OrderStatus.FILLED
-        order.filled_at = datetime.now(timezone.utc)
+        order.filled_at = self._current_time or datetime.now(timezone.utc)
 
         self._orders[order.order_id] = order
 
@@ -172,21 +174,39 @@ class PaperBroker(BaseBroker):
     async def get_positions(self) -> list[Position]:
         return list(self._positions.values())
 
-    async def close_position(self, symbol: str) -> Order:
+    async def close_position(self, symbol: str, execution_price: float = 0.0) -> Order:
         """Close a position by placing an opposing market order."""
         pos = self._positions.get(symbol)
         if pos is None or pos.side == PositionSide.FLAT:
             return Order(status=OrderStatus.REJECTED)
 
         close_side = OrderSide.SELL if pos.side == PositionSide.LONG else OrderSide.BUY
+        
+        # Calculate slippage adjusted execution price if we're simulating a limit/stop
+        if execution_price > 0:
+            slippage_mult = self._slippage_bps / 10000.0
+            if close_side == OrderSide.SELL:
+                execution_price *= (1 - slippage_mult)
+            else:
+                execution_price *= (1 + slippage_mult)
+        else:
+            execution_price = self._current_prices.get(symbol, 0.0)
+            
         close_order = Order(
             symbol=symbol,
             side=close_side,
             order_type=OrderType.MARKET,
             quantity=pos.quantity,
-            price=self._current_prices.get(symbol, 0.0),
+            price=execution_price,
         )
-        return await self.place_order(close_order)
+        
+        # Override the current price temporarily to ensure place_order fills at the correct price
+        old_price = self._current_prices.get(symbol, 0.0)
+        self._current_prices[symbol] = execution_price
+        try:
+            return await self.place_order(close_order)
+        finally:
+            self._current_prices[symbol] = old_price
 
     # ── Account ──────────────────────────────────────────────────────────────
 
@@ -208,9 +228,11 @@ class PaperBroker(BaseBroker):
 
     # ── Paper-specific methods ───────────────────────────────────────────────
 
-    def update_price(self, symbol: str, price: float) -> None:
+    def update_price(self, symbol: str, price: float, current_time: datetime | None = None) -> None:
         """Update the current price for a symbol (called by tick handler)."""
         self._current_prices[symbol] = price
+        if current_time:
+            self._current_time = current_time
 
         # Update position P&L
         pos = self._positions.get(symbol)
@@ -245,7 +267,17 @@ class PaperBroker(BaseBroker):
                 exit_reason = "take_profit"
 
         if exit_reason:
-            return self._close_position_internal(symbol, price, exit_reason)
+            # Execute at the actual stop price to prevent massive inaccurate slippage
+            # from the candle's absolute high/low
+            if exit_reason == "stop_loss":
+                execution_price = pos.stop_loss
+            elif exit_reason == "take_profit":
+                execution_price = pos.take_profit
+            else:
+                execution_price = price
+                
+            return self._close_position_internal(symbol, execution_price, exit_reason)
+
 
         return None
 
@@ -265,6 +297,8 @@ class PaperBroker(BaseBroker):
                 current_price=order.filled_price,
                 signal_id=order.client_order_id,
             )
+            # Override the default datetime.now() with the simulated filled time
+            self._positions[symbol].opened_at = order.filled_at
         else:
             # Closing existing position
             if (pos.side == PositionSide.LONG and order.side == OrderSide.SELL) or \
@@ -277,14 +311,24 @@ class PaperBroker(BaseBroker):
         """Close a position and record the trade."""
         pos = self._positions[symbol]
 
-        # Calculate P&L
+        # Calculate Gross P&L
         if pos.side == PositionSide.LONG:
-            pnl = (exit_price - pos.entry_price) * pos.quantity
+            gross_pnl = (exit_price - pos.entry_price) * pos.quantity
         else:
-            pnl = (pos.entry_price - exit_price) * pos.quantity
+            gross_pnl = (pos.entry_price - exit_price) * pos.quantity
 
-        pnl_pct = pnl / (pos.entry_price * pos.quantity) if pos.entry_price > 0 else 0.0
-        duration = (datetime.now(timezone.utc) - pos.opened_at).total_seconds()
+        # Calculate Commissions
+        entry_commission = (pos.entry_price * pos.quantity) * (self._commission_bps / 10000.0)
+        exit_commission = (exit_price * pos.quantity) * (self._commission_bps / 10000.0)
+        total_commission = entry_commission + exit_commission
+
+        # Calculate Net P&L
+        net_pnl = gross_pnl - total_commission
+
+        pnl_pct = net_pnl / (pos.entry_price * pos.quantity) if pos.entry_price > 0 else 0.0
+        
+        now = self._current_time or datetime.now(timezone.utc)
+        duration = (now - pos.opened_at).total_seconds() if pos.opened_at else 0.0
 
         # Record trade
         trade = TradeRecord(
@@ -295,10 +339,10 @@ class PaperBroker(BaseBroker):
             entry_price=pos.entry_price,
             exit_price=exit_price,
             quantity=pos.quantity,
-            pnl=round(pnl, 4),
+            pnl=round(net_pnl, 4),
             pnl_pct=round(pnl_pct, 6),
             entry_time=pos.opened_at,
-            exit_time=datetime.now(timezone.utc),
+            exit_time=now,
             exit_reason=exit_reason,
             duration_seconds=duration,
         )
@@ -306,10 +350,14 @@ class PaperBroker(BaseBroker):
 
         # Update stats
         self._total_trades += 1
-        self._total_pnl += pnl
-        self._balance += pnl
+        self._total_pnl += net_pnl
+        
+        # entry_commission was deducted when opening the position via place_order.
+        # exit_commission is deducted by place_order right after this returns.
+        # So we only add gross_pnl here.
+        self._balance += gross_pnl
 
-        if pnl > 0:
+        if net_pnl > 0:
             self._winning_trades += 1
 
         # Track drawdown
@@ -330,7 +378,7 @@ class PaperBroker(BaseBroker):
             side=pos.side.value,
             entry=f"${pos.entry_price:.2f}",
             exit=f"${exit_price:.2f}",
-            pnl=f"${pnl:+.2f}",
+            pnl=f"${net_pnl:+.2f}",
             pnl_pct=f"{pnl_pct:+.4%}",
             reason=exit_reason,
             balance=f"${self._balance:,.2f}",
@@ -365,16 +413,17 @@ class PaperBroker(BaseBroker):
             pnl = (pos.entry_price - price) * close_qty
 
         pnl_pct = pnl / (pos.entry_price * close_qty) if pos.entry_price > 0 else 0.0
-        duration = (datetime.now(timezone.utc) - pos.opened_at).total_seconds()
+        
+        now = self._current_time or datetime.now(timezone.utc)
+        duration = (now - pos.opened_at).total_seconds() if pos.opened_at else 0.0
 
         # Apply slippage and commission
         slippage_mult = self._slippage_bps / 10000.0
         slippage_cost = price * close_qty * slippage_mult
         commission = price * close_qty * (self._commission_bps / 10000.0)
 
-        pnl -= commission  # Deduct commission from partial close P&L
-        self._balance -= commission
-        self._balance += pnl + commission  # Add P&L to balance (commission already deducted)
+        pnl -= commission  # Net P&L after commission
+        self._balance += pnl  # Add net P&L to balance (commission already included)
 
         # Record partial trade
         trade = TradeRecord(
@@ -388,7 +437,7 @@ class PaperBroker(BaseBroker):
             pnl=round(pnl, 4),
             pnl_pct=round(pnl_pct, 6),
             entry_time=pos.opened_at,
-            exit_time=datetime.now(timezone.utc),
+            exit_time=now,
             exit_reason="scale_out",
             duration_seconds=duration,
         )

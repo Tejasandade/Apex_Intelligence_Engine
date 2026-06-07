@@ -158,7 +158,7 @@ async def main():
             print("[FAIL] Position open failed")
             
         # Simulate price moving to take profit
-        trade = pos_mgr.update_price("btcusdt", 62050.0)
+        trade, partial = await pos_mgr.update_price("btcusdt", 62050.0)
         if trade:
             print(f"[OK] Position closed successfully. Exit reason: {trade.exit_reason}")
             print(f"   PnL: ${trade.pnl:.2f}")

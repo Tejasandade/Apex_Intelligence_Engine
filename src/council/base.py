@@ -53,6 +53,7 @@ class CouncilDecision:
     approved: bool
     direction: str  # BUY / SELL
     consensus_score: float  # Weighted approval ratio [0, 1]
+    trade_type: str = "SWING"  # SWING or SCALP
     votes: list[AdvisorVote] = field(default_factory=list)
     total_weight_approve: float = 0.0
     total_weight_reject: float = 0.0
@@ -104,6 +105,7 @@ class BaseAdvisor(ABC):
         price: float,
         regime: str,
         atr: float,
+        scalp_mode: bool = False,
         **kwargs: Any,
     ) -> AdvisorVote:
         """

@@ -86,6 +86,12 @@ class BinanceWebSocket:
         self._candles_received = 0
         self._connect_time: float = 0.0
 
+        # Orderbook State (Phase 4)
+        self._orderbook_state: dict[str, dict[str, float]] = {
+            sym: {"best_bid": 0.0, "best_bid_qty": 0.0, "best_ask": 0.0, "best_ask_qty": 0.0}
+            for sym in self.symbols
+        }
+
     @property
     def is_connected(self) -> bool:
         return self._connected and self._ws is not None
@@ -98,7 +104,10 @@ class BinanceWebSocket:
 
     def _build_stream_url(self) -> str:
         """Build the combined stream URL for all symbols."""
-        streams = [f"{sym}@kline_{self.interval}" for sym in self.symbols]
+        streams = []
+        for sym in self.symbols:
+            streams.append(f"{sym}@kline_{self.interval}")
+            streams.append(f"{sym}@bookTicker")
         stream_path = "/".join(streams)
         return f"wss://stream.binance.com:9443/stream?streams={stream_path}"
 
@@ -186,12 +195,28 @@ class BinanceWebSocket:
                 else:
                     data = msg
 
-                if "e" not in data or data["e"] != "kline":
+                if "e" not in data:
+                    # bookTicker doesn't have an "e" field, but we can detect it by its structure
+                    if "u" in data and "b" in data and "B" in data and "a" in data and "A" in data:
+                        symbol = data["s"].lower()
+                        if symbol in self._orderbook_state:
+                            self._orderbook_state[symbol] = {
+                                "best_bid": float(data["b"]),
+                                "best_bid_qty": float(data["B"]),
+                                "best_ask": float(data["a"]),
+                                "best_ask_qty": float(data["A"]),
+                            }
+                    continue
+
+                if data["e"] != "kline":
                     continue
 
                 kline = data["k"]
                 symbol = kline["s"].lower()  # e.g., "btcusdt"
                 is_closed = kline["x"]  # True when candle is complete
+                
+                # Fetch latest orderbook state
+                lob = self._orderbook_state.get(symbol, {})
 
                 candle = {
                     "symbol": symbol,
@@ -205,6 +230,11 @@ class BinanceWebSocket:
                     "trades": int(kline["n"]),
                     "quote_volume": float(kline["q"]),
                     "taker_buy_volume": float(kline["V"]),
+                    # Orderbook fields
+                    "best_bid": lob.get("best_bid", 0.0),
+                    "best_bid_qty": lob.get("best_bid_qty", 0.0),
+                    "best_ask": lob.get("best_ask", 0.0),
+                    "best_ask_qty": lob.get("best_ask_qty", 0.0),
                 }
 
                 self._ticks_received += 1

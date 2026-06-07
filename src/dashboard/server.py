@@ -50,10 +50,11 @@ class DashboardServer:
     def __init__(self, host: str = "localhost", port: int = 8765):
         self.host = host
         self.port = port
-        self._clients: set = set()
+        self._clients: set[websockets.WebSocketServerProtocol] = set()
         self._server = None
         self._running = False
         self._message_count = 0
+        self._last_messages: dict[str, dict[str, Any]] = {}
 
     async def start(self) -> None:
         """Start the WebSocket server."""
@@ -88,34 +89,42 @@ class DashboardServer:
         self._clients.add(websocket)
         client_id = f"client_{len(self._clients)}"
 
-        logger.info("dashboard_client_connected", client=client_id, total=len(self._clients))
+        logger.info("dashboard_client_connected", client=id(websocket), total=len(self._clients))
+        
+        # Send cached history to new client
+        for msg_type, message in self._last_messages.items():
+            try:
+                await websocket.send(message)
+            except Exception:
+                pass
 
         try:
             async for message in websocket:
-                # Handle incoming messages from dashboard (future: commands)
-                try:
-                    data = json.loads(message)
-                    await self._handle_command(data, websocket)
-                except json.JSONDecodeError:
-                    pass
+                # Handle incoming messages from dashboard (commands like pause/resume, etc)
+                cmd = json.loads(message).get("command")
+                if cmd == "ping":
+                    await websocket.send(json.dumps({"type": "pong", "timestamp": time.time()}))
         except Exception:
             pass
         finally:
-            self._clients.discard(websocket)
+            self._clients.remove(websocket)
             logger.info("dashboard_client_disconnected", total=len(self._clients))
-
-    async def _handle_command(self, data: dict, websocket) -> None:
-        """Handle commands from the dashboard (future feature)."""
-        cmd = data.get("command")
-        if cmd == "ping":
-            await websocket.send(json.dumps({"type": "pong", "timestamp": time.time()}))
 
     def _broadcast(self, msg_type: str, data: dict[str, Any]) -> None:
         """Broadcast a message to all connected dashboard clients."""
+        # Handle potential numpy types from models
+        def default_encoder(obj):
+            if hasattr(obj, "item"):  # Handle numpy scalar types
+                return obj.item()
+        msg_dict = {"type": msg_type, "data": data, "ts": time.time()}
+        message = json.dumps(msg_dict, default=default_encoder)
+        
+        # Cache for new connections
+        self._last_messages[msg_type] = message
+
         if not self._clients:
             return
 
-        message = json.dumps({"type": msg_type, "data": data, "ts": time.time()})
         self._message_count += 1
 
         # Fire and forget — don't block the trading engine
@@ -133,6 +142,7 @@ class DashboardServer:
     def broadcast_status(
         self,
         balance: float = 0,
+        initial_balance: float = 0,
         total_pnl: float = 0,
         total_trades: int = 0,
         winning_trades: int = 0,
@@ -143,6 +153,7 @@ class DashboardServer:
         candles: int = 0,
         cooldown_remaining: int = 0,
         trailing_stops: dict = None,
+        currency: str = "$",
     ) -> None:
         """Broadcast system status update."""
         if trailing_stops is None:
@@ -150,6 +161,7 @@ class DashboardServer:
             
         self._broadcast("status", {
             "balance": balance,
+            "initial_balance": initial_balance,
             "total_pnl": total_pnl,
             "total_trades": total_trades,
             "winning_trades": winning_trades,
@@ -160,6 +172,7 @@ class DashboardServer:
             "candles": candles,
             "cooldown_remaining": cooldown_remaining,
             "trailing_stops": trailing_stops,
+            "currency": currency,
         })
 
     def broadcast_ensemble(self, trending: float, ranging: float, agreement: float) -> None:
@@ -248,7 +261,7 @@ class DashboardServer:
         exit_reason: str,
         duration_seconds: float,
     ) -> None:
-        """Broadcast a closed trade with P&L."""
+        """Broadcast a closed position."""
         self._broadcast("trade_close", {
             "symbol": symbol,
             "side": side,
@@ -260,16 +273,16 @@ class DashboardServer:
             "duration_seconds": duration_seconds,
         })
 
+    def broadcast_tick(self, current_price: float, unrealized_pnl: float = 0.0) -> None:
+        """Broadcast real-time price tick and unrealized P&L."""
+        self._broadcast("tick", {
+            "current_price": current_price,
+            "unrealized_pnl": unrealized_pnl,
+        })
+
     def broadcast_trail_update(self, update: dict) -> None:
         """Broadcast trailing stop update."""
         self._broadcast("trail_update", update)
-
-    def broadcast_tick(self, unrealized_pnl: float, current_price: float = 0.0) -> None:
-        """Broadcast unrealized P&L update and current price."""
-        self._broadcast("tick", {
-            "unrealized_pnl": unrealized_pnl,
-            "current_price": current_price
-        })
 
     @property
     def client_count(self) -> int:

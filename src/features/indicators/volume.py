@@ -13,6 +13,25 @@ import numpy as np
 import pandas as pd
 
 
+# ── Anchored VWAP (AVWAP) ───────────────────────────────────────────────────
+def compute_avwap(df: pd.DataFrame, anchor_signal: pd.Series) -> pd.Series:
+    """
+    Compute Anchored VWAP.
+    Resets the VWAP calculation whenever anchor_signal > 0.
+    """
+    tp = (df["high"] + df["low"] + df["close"]) / 3.0
+    tv = tp * df["volume"]
+    v = df["volume"]
+    
+    group_key = (anchor_signal > 0).cumsum()
+    
+    cum_tv = tv.groupby(group_key).cumsum()
+    cum_v = v.groupby(group_key).cumsum()
+    
+    avwap = cum_tv / cum_v.replace(0, np.nan)
+    return avwap.fillna(df['close'])
+
+
 # ── CVD (Cumulative Volume Delta) ───────────────────────────────────────────
 def compute_cvd(df: pd.DataFrame, window: int = 14) -> pd.Series:
     """
@@ -111,4 +130,38 @@ def build_volume_features(df: pd.DataFrame) -> pd.DataFrame:
     out["CVD"] = compute_cvd(out)
     out["OBV"] = compute_obv(out)
     out["order_flow_imbalance"] = compute_order_flow_imbalance(out, window=14)
+
+    # --- Phase 3 Advanced Features ---
+    # 5. OBV Slope (Momentum of OBV over 10 periods)
+    out["OBV_Slope"] = out["OBV"] - out["OBV"].shift(10).fillna(out["OBV"])
+    
+    # 6. Volume Profile POC Distance
+    # Approximate POC as the close price of the candle with the highest volume in a 50-period window
+    highest_vol_idx = out["volume"].rolling(window=50, min_periods=1).apply(np.argmax, raw=True)
+    # Using numpy to quickly extract the prices
+    close_prices = out["close"].values
+    poc_prices = close_prices[highest_vol_idx.fillna(0).astype(int)]
+    # This gives us index offset within the window, not absolute index, so we need a slightly different approach
+    # Let's use pandas rolling with custom function or just simple logic:
+    # Actually, the apply(np.argmax) returns the index relative to the window (0 to 49).
+    # Absolute index = current_idx - window + 1 + argmax
+    # A cleaner vectorised way:
+    # Just compute price * volume, then rolling sum? No, POC is single price with max vol.
+    # Let's just create a rolling max of volume, and take the close where volume == max_vol.
+    roll_max_vol = out["volume"].rolling(window=50, min_periods=1).max()
+    # Where volume == rolling max, take close, else NaN, then forward fill
+    poc_series = out["close"].where(out["volume"] >= roll_max_vol).ffill().bfill()
+    out["Volume_Profile_POC_Dist"] = (out["close"] - poc_series) / poc_series.replace(0, np.nan)
+    out["Volume_Profile_POC_Dist"] = out["Volume_Profile_POC_Dist"].fillna(0.0)
+
+    # 7. Anchored VWAP Distance (Anchored to Major Structure Breaks)
+    if "structure_break_signal" in out.columns:
+        anchor = out["structure_break_signal"].abs()
+    else:
+        anchor = pd.Series(0, index=out.index)
+        anchor.iloc[0] = 1
+        
+    out["AVWAP"] = compute_avwap(out, anchor)
+    out["AVWAP_distance"] = ((out["close"] - out["AVWAP"]) / out["AVWAP"].replace(0, np.nan)).fillna(0.0)
+
     return out

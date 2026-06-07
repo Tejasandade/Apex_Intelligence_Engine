@@ -28,12 +28,13 @@ logger = get_logger("apex.features.labeling")
 
 def apply_triple_barrier_labels(
     df: pd.DataFrame,
-    profit_target_pct: float = 0.0020,
-    stop_loss_pct: float = 0.0012,
-    max_holding_bars: int = 20,
+    profit_target_atr: float = 2.0,
+    stop_loss_atr: float = 2.0,
+    max_holding_bars: int = 30,
     close_col: str = "close",
     high_col: str = "high",
     low_col: str = "low",
+    atr_col: str = "ATR",
 ) -> pd.DataFrame:
     """
     Apply triple-barrier labeling to a DataFrame of OHLCV data.
@@ -45,12 +46,13 @@ def apply_triple_barrier_labels(
 
     Args:
         df: DataFrame with OHLCV data.
-        profit_target_pct: Take profit threshold as percentage (e.g., 0.002 = 0.2%).
-        stop_loss_pct: Stop loss threshold as percentage (e.g., 0.0012 = 0.12%).
+        profit_target_atr: Take profit threshold as ATR multiple.
+        stop_loss_atr: Stop loss threshold as ATR multiple.
         max_holding_bars: Maximum bars to hold before time expiry.
         close_col: Column name for close price.
         high_col: Column name for high price.
         low_col: Column name for low price.
+        atr_col: Column name for ATR.
 
     Returns:
         DataFrame with added columns:
@@ -61,6 +63,11 @@ def apply_triple_barrier_labels(
     close = df[close_col].values
     high = df[high_col].values
     low = df[low_col].values
+    
+    if atr_col not in df.columns:
+        raise ValueError(f"ATR column '{atr_col}' not found in DataFrame.")
+    atr = df[atr_col].values
+    
     n = len(df)
 
     targets = np.full(n, np.nan)
@@ -69,14 +76,16 @@ def apply_triple_barrier_labels(
 
     for i in range(n - 1):
         entry_price = close[i]
-        if entry_price <= 0:
+        entry_atr = atr[i]
+        
+        if entry_price <= 0 or entry_atr <= 0:
             targets[i] = 0
             barrier_types[i] = "invalid"
             bars_to_barrier[i] = 0
             continue
 
-        upper_barrier = entry_price * (1.0 + profit_target_pct)
-        lower_barrier = entry_price * (1.0 - stop_loss_pct)
+        upper_barrier = entry_price + (entry_atr * profit_target_atr)
+        lower_barrier = entry_price - (entry_atr * stop_loss_atr)
 
         # Look forward bar by bar
         upper_hit_bar = -1
@@ -158,8 +167,8 @@ def apply_triple_barrier_labels(
             lower_barrier_hits=int(lower_count),
             time_barrier_hits=int(time_count),
             avg_bars_to_barrier=f"{avg_bars:.1f}",
-            profit_target_pct=f"{profit_target_pct:.4%}",
-            stop_loss_pct=f"{stop_loss_pct:.4%}",
+            profit_target_atr=profit_target_atr,
+            stop_loss_atr=stop_loss_atr,
             max_holding_bars=max_holding_bars,
         )
 

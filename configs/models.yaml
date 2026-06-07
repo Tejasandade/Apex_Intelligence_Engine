@@ -7,33 +7,33 @@ models:
   crypto:
     algorithm: xgboost
     hyperparameters:
-      n_estimators: 300
-      learning_rate: 0.03
-      max_depth: 6
-      min_child_weight: 3
-      subsample: 0.8
-      colsample_bytree: 0.8
-      gamma: 0.1
-      reg_alpha: 0.1
-      reg_lambda: 1.0
+      n_estimators: 500
+      learning_rate: 0.01
+      max_depth: 4
+      min_child_weight: 10
+      subsample: 0.7
+      colsample_bytree: 0.6
+      gamma: 0.5
+      reg_alpha: 1.0
+      reg_lambda: 5.0
       eval_metric: logloss
-      early_stopping_rounds: 20
+      early_stopping_rounds: 30
     training:
       lookback_days: 90
       candle_interval: "1m"
       total_candles: 50000
       fetch_batch: 1000
       cv_folds: 5
-      purge_gap: 15             # Bars to purge between train/val folds
+      purge_gap: 15
     labeling:
       method: triple_barrier
-      profit_target_pct: 0.0020  # +0.20% take profit
-      stop_loss_pct: 0.0012      # -0.12% stop loss (asymmetric R:R > 1.5)
-      max_holding_bars: 20       # Time barrier: 20 bars
+      profit_target_atr: 3.0     # Massive structural runner target
+      stop_loss_atr: 2.0         # Wide stop to avoid premature exits
+      max_holding_bars: 45       # Longer holding time to let the 3.0 ATR move develop
     calibration:
       method: isotonic
       cv_folds: 3
-    regime_split: true           # Train separate models for TRENDING/CHOPPY
+    regime_split: true
     regime_thresholds:
       adx_trending: 25.0
       chop_choppy: 61.8

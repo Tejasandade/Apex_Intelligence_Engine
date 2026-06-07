@@ -26,13 +26,21 @@ from src.core.config import DATA_DIR, get_model_params
 from src.core.logging import get_logger
 from src.data.providers.binance import BinanceHistoricalProvider
 from src.data.providers.binance_ws import BinanceWebSocket
+from src.data.providers.angel_ws import AngelWebSocket
 from src.engine.signal_engine import LiveSignalEngine, TradingSignal
 from src.execution.paper_broker import PaperBroker
 from src.execution.position_manager import PositionManager
 from src.execution.broker import PositionSide
 from src.dashboard.server import DashboardServer
+
+# India-specific imports
+from src.data.providers.angel_api import AngelApiProvider
+from src.execution.angel_broker import AngelBroker
+from src.execution.options_router import OptionsRouter
+from src.execution.premium_monitor import PremiumDecayMonitor
 from src.models.xgboost_model import ApexXGBoostModel
 from src.features.store import FeatureStore
+from src.oracle.oracle import HTFOracle, OracleBootError
 
 logger = get_logger("apex.engine.live_runner")
 
@@ -62,6 +70,8 @@ class LiveRunner:
         daily_loss_limit: float = 500.0,
         dashboard_port: int = 8765,
         enable_dashboard: bool = True,
+        asymmetric_mode: bool = False,
+        scalp_mode: bool = False,
     ):
         self.symbols = [s.lower() for s in (symbols or ["btcusdt"])]
         self.market_type = market_type
@@ -75,10 +85,22 @@ class LiveRunner:
         # Phase 4: Execution components
         self._broker: PaperBroker | None = None
         self._position_mgr: PositionManager | None = None
-        self._initial_balance = initial_balance
-        self._max_positions = max_positions
-        self._max_drawdown_pct = max_drawdown_pct
-        self._daily_loss_limit = daily_loss_limit
+        
+        self.asymmetric_mode = asymmetric_mode
+        self.scalp_mode = scalp_mode
+        self._initial_balance = 1000.0 if self.asymmetric_mode else (10000.0 if self.market_type == "crypto" else 100000.0)
+        self._max_positions = 3 if self.market_type == "crypto" else 1
+        self._max_drawdown_pct = 15.0
+        self._daily_loss_limit = self._initial_balance * 0.15
+        
+        # India Options specific
+        self._options_router = None
+        self._premium_monitor = None
+        self._angel_provider = None
+
+        # V6: Oracle (HTF macro context)
+        self._oracle: HTFOracle | None = None
+        self._oracle_active = False
 
         # Phase 5: Dashboard server
         self._dashboard: DashboardServer | None = None
@@ -100,22 +122,56 @@ class LiveRunner:
             await self._dashboard.start()
 
         # ── Phase 4: Initialize broker + position manager ─────────────────────
-        if self.paper_mode:
-            self._broker = PaperBroker(
-                initial_balance=self._initial_balance,
-                commission_bps=10.0,
-                slippage_bps=5.0,
-            )
+        if self.market_type == "india_options":
+            self._angel_provider = AngelApiProvider()
+            self._broker = AngelBroker(self._angel_provider, initial_balance=self._initial_balance)
             await self._broker.connect()
+            self._options_router = OptionsRouter(self._broker)
+            self._premium_monitor = PremiumDecayMonitor()
+            # For options, we don't use the standard ATR PositionManager
+            self._position_mgr = None
+            
+        else: # Crypto
+            if self.paper_mode:
+                self._broker = PaperBroker(
+                    initial_balance=self._initial_balance,
+                    commission_bps=2.0,  # Binance Futures maker fee
+                    slippage_bps=0.5,
+                )
+                await self._broker.connect()
 
-        if self._broker:
-            self._position_mgr = PositionManager(
-                broker=self._broker,
-                max_positions=self._max_positions,
-                max_drawdown_pct=self._max_drawdown_pct,
-                daily_loss_limit=self._daily_loss_limit,
-            )
-            await self._position_mgr.initialize()
+            if self._broker:
+                self._position_mgr = PositionManager(
+                    broker=self._broker,
+                    max_positions=self._max_positions,
+                    max_drawdown_pct=self._max_drawdown_pct,
+                    daily_loss_limit=self._daily_loss_limit,
+                    enable_scale_out=not self.asymmetric_mode,
+                )
+                await self._position_mgr.initialize()
+
+        # ── V6: Boot Oracle (HTF macro context) ─────────────────────────────
+        if self.market_type != "india_options":
+            for symbol in self.symbols:
+                try:
+                    self._oracle = HTFOracle(symbol=symbol)
+                    await self._oracle.boot(symbol)
+                    self._oracle_active = True
+                    oracle_summary = self._oracle.get_summary()
+                    print(f"[ORACLE] Booted successfully: {oracle_summary['active_levels']} active HTF levels")
+                    logger.info("oracle_boot_success", **oracle_summary)
+
+                    # Start background refresh (every 4 hours)
+                    asyncio.create_task(self._oracle.refresh_loop(interval_hours=4))
+                except OracleBootError as e:
+                    logger.warning("oracle_boot_failed", error=str(e))
+                    print(f"[ORACLE] Boot failed: {e}. Running without HTF context.")
+                    self._oracle_active = False
+                except Exception as e:
+                    logger.warning("oracle_boot_unexpected_error", error=str(e))
+                    print(f"[ORACLE] Unexpected error: {e}. Running without HTF context.")
+                    self._oracle_active = False
+                break  # Oracle is shared across symbols for now
 
         # ── Load signal engines ───────────────────────────────────────────────
         for symbol in self.symbols:
@@ -127,14 +183,22 @@ class LiveRunner:
 
             print(f"[DIAGNOSTICS] Successfully loaded {len(models)} models for {symbol}: {list(models.keys())}")
 
+            market_feature_type = "india_equity" if self.market_type == "india_options" else "crypto"
+            
             engine = LiveSignalEngine(
                 symbol=symbol,
-                market_type=self.market_type,
+                market_type=market_feature_type,
                 models=models,
-                conviction_threshold=0.60,
-                risk_per_trade=200.0,
-                default_rr=2.0,
+                conviction_threshold=0.54,
+                risk_per_trade=50.0,  # High-Leverage Futures: Flat $50 risk instead of % of equity
             )
+            
+            if self.market_type == "india_options":
+                engine.council.setup_india_advisors(broker=self._broker)
+
+            # V6: Pass Oracle reference to engine
+            if self._oracle_active and self._oracle:
+                engine._oracle = self._oracle
 
             await self._warm_up_engine(engine, symbol)
             self._signal_engines[symbol] = engine
@@ -151,9 +215,14 @@ class LiveRunner:
 
         # ── WebSocket ─────────────────────────────────────────────────────────
         print("[DIAGNOSTICS] Connecting to WebSocket stream...")
-        self._ws = BinanceWebSocket(symbols=self.symbols)
+        if self.market_type == "india_options":
+            # Live Phase 4 integration: Angel One streaming WS
+            self._ws = AngelWebSocket(symbols=self.symbols) 
+        else:
+            self._ws = BinanceWebSocket(symbols=self.symbols)
+            
         self._ws.on_candle = self._on_candle
-        self._ws.on_tick = self._on_tick  # Phase 4: monitor stops on every tick
+        self._ws.on_tick = self._on_tick
 
         logger.info(
             "live_runner_ready",
@@ -167,10 +236,11 @@ class LiveRunner:
     def _load_models(self, symbol: str) -> dict[str, Any]:
         """Load trained models for a symbol from disk."""
         models: dict[str, Any] = {}
-        feature_store = FeatureStore(self.market_type)
+        market_feature_type = "india_equity" if self.market_type == "india_options" else "crypto"
+        feature_store = FeatureStore(market_feature_type)
 
         for regime in ["trending", "ranging"]:
-            model_name = f"{symbol}_{self.market_type}_{regime}"
+            model_name = f"{symbol}_{market_feature_type}_{regime}"
             model_path = MODELS_DIR / f"{model_name}.json"
 
             if not model_path.exists():
@@ -188,7 +258,25 @@ class LiveRunner:
 
     async def _warm_up_engine(self, engine: LiveSignalEngine, symbol: str) -> None:
         """Fetch recent history and warm up the feature store."""
-        cache_path = DATA_DIR / "historical" / "crypto" / f"{symbol}.parquet"
+
+        # V6: Seed MTF buffer from Oracle's 1m history (1500 candles)
+        if self._oracle_active and self._oracle:
+            oracle_1m = self._oracle.get_1m_history()
+            if not oracle_1m.empty:
+                logger.info("warming_from_oracle", candles=len(oracle_1m))
+                engine.warm_up(oracle_1m.tail(200))
+
+                # Seed the MTF buffer with full 1m history
+                if hasattr(engine, '_mtf_buffer') and engine._mtf_buffer is not None:
+                    engine._mtf_buffer.seed_from_historical(oracle_1m)
+                    print(f"[ORACLE] MTF buffer seeded: {len(oracle_1m)} candles")
+                return
+
+        # Fallback: Load from cache based on market
+        if self.market_type == "india_options":
+            cache_path = DATA_DIR / "historical" / "india_equity" / f"{symbol}.parquet"
+        else:
+            cache_path = DATA_DIR / "historical" / "crypto" / f"{symbol}.parquet"
 
         if cache_path.exists():
             logger.info("warming_from_cache", path=str(cache_path))
@@ -221,7 +309,7 @@ class LiveRunner:
             return
 
         # Update position manager with latest price
-        main_trade, partial_trade = self._position_mgr.update_price(symbol, price)
+        main_trade, partial_trade = await self._position_mgr.update_price(symbol, price)
 
         for trade in (partial_trade, main_trade):
             if trade is not None:
@@ -241,7 +329,7 @@ class LiveRunner:
         if self._dashboard:
             pos = self._position_mgr._positions.get(symbol)
             unrealized_pnl = pos.unrealized_pnl if pos and pos.quantity > 0 else 0.0
-            self._dashboard.broadcast_tick(unrealized_pnl, price)
+            self._dashboard.broadcast_tick(current_price=price, unrealized_pnl=unrealized_pnl)
 
         # Feed risk state back to Council
         self._update_council_risk()
@@ -252,11 +340,29 @@ class LiveRunner:
         if engine is None:
             return
 
+        # Update dynamic risk from live equity
+        if self._broker:
+            balance = await self._broker.get_balance()
+            # Base risk is always 2% of the CURRENT live equity
+            engine.risk_per_trade = balance.total_equity * 0.02
+
         # Update position count in signal engine
         if self._position_mgr:
             engine.set_open_positions(self._position_mgr.open_position_count)
 
-        signal = await engine.process_candle(candle)
+        # V6: Invalidate Oracle levels on every candle close
+        if self._oracle_active and self._oracle:
+            self._oracle.invalidate_levels(candle)
+
+        # V6: Query Oracle levels for current price and pass to signal engine
+        oracle_levels = []
+        if self._oracle_active and self._oracle:
+            close_price = float(candle.get("close", 0))
+            atr_estimate = engine._last_signal.atr if engine._last_signal else 0.0
+            if atr_estimate > 0:
+                oracle_levels = self._oracle.query_levels(close_price, atr_estimate)
+
+        signal = await engine.process_candle(candle, oracle_levels=oracle_levels)
 
         # Update trailing stops on candle close
         if self._position_mgr:
@@ -265,7 +371,9 @@ class LiveRunner:
                 symbol=symbol,
                 close_price=close_price,
                 atr=engine._last_signal.atr if engine._last_signal else 0.0, # Approximate
-                regime=engine.regime_detector.current_regime.value
+                regime=engine.regime_detector.current_regime.value,
+                df_5m=engine.mtf_buffer.get_5m_df() if engine.mtf_buffer.is_ready() else None,
+                df_15m=engine.mtf_buffer.get_15m_df() if engine.mtf_buffer.is_ready() else None
             )
             if trail_update and self._dashboard:
                 self._dashboard.broadcast_trail_update(trail_update)
@@ -324,11 +432,12 @@ class LiveRunner:
 
         # ── Handle Blocked Signals ───────────────────────────────────────────
         if not signal.council_approved:
+            reason = signal.council_explanation if signal.council_explanation else "Blocked by Council"
             if self._dashboard:
                 self._dashboard.broadcast_signal(
                     direction=signal.direction, symbol=signal.symbol,
                     price=signal.price, conviction=signal.conviction,
-                    council_score=signal.council_score, reason=signal.reason,
+                    council_score=signal.council_score, reason=reason,
                     blocked=True,
                 )
             return
@@ -351,64 +460,78 @@ class LiveRunner:
             )
 
             if order and order.status.value == "FILLED":
-                arrow = "▲" if signal.direction == "BUY" else "▼"
+                arrow = "^" if signal.direction == "BUY" else "v"
+                curr = "₹" if self.market_type == "india_options" else "$"
                 print(
                     f"\n  [{mode}] {arrow} {signal.direction} {signal.symbol.upper()} "
-                    f"@ ${order.filled_price:,.2f}"
+                    f"@ {curr}{order.filled_price:,.2f}"
                 )
                 print(f"    Conviction: {signal.conviction:.4f} | Regime: {signal.regime}")
-                print(f"    Stop: ${signal.stop_loss:,.2f} | Target: ${signal.take_profit:,.2f}")
-                print(f"    Qty: {order.filled_quantity:.6f} | ATR: ${signal.atr:.2f}")
-                print(f"    Council: {signal.council_score:.2f} | Commission: ${order.commission:.4f}")
+                print(f"    Stop: {curr}{signal.stop_loss:,.2f} | Target: {curr}{signal.take_profit:,.2f}")
+                print(f"    Qty: {order.filled_quantity:.6f} | ATR: {curr}{signal.atr:.2f}")
+                print(f"    Council: {signal.council_score:.2f} | Commission: {curr}{order.commission:.4f}")
                 print(f"    Reason: {signal.reason}")
                 print()
 
                 # Broadcast to dashboard
                 if self._dashboard:
-                    self._dashboard.broadcast_signal(
-                        direction=signal.direction, symbol=signal.symbol,
-                        price=order.filled_price, conviction=signal.conviction,
-                        council_score=signal.council_score, reason=signal.reason,
-                    )
-                    self._dashboard.broadcast_trade_open(
-                        symbol=signal.symbol, direction=signal.direction,
-                        entry_price=order.filled_price,
-                        stop_loss=signal.stop_loss, take_profit=signal.take_profit,
-                    )
-                    # Broadcast ensemble + council
-                    self._dashboard.broadcast_ensemble(
-                        trending=signal.member_predictions.get('btcusdt_crypto_trending', 0.5),
-                        ranging=signal.member_predictions.get('btcusdt_crypto_ranging', 0.5),
-                        agreement=signal.ensemble_conviction,
-                    )
+                    try:
+                        self._dashboard.broadcast_signal(
+                            direction=signal.direction, symbol=signal.symbol,
+                            price=order.filled_price, conviction=signal.conviction,
+                            council_score=signal.council_score, reason=signal.reason,
+                        )
+                        self._dashboard.broadcast_trade_open(
+                            symbol=signal.symbol, direction=signal.direction,
+                            entry_price=order.filled_price,
+                            stop_loss=signal.stop_loss, take_profit=signal.take_profit,
+                        )
+                        # Broadcast ensemble + council
+                        self._dashboard.broadcast_ensemble(
+                            trending=float(signal.member_predictions.get(f'{signal.symbol}_{self.market_type}_trending', 0.5)),
+                            ranging=float(signal.member_predictions.get(f'{signal.symbol}_{self.market_type}_ranging', 0.5)),
+                            agreement=signal.ensemble_conviction,
+                        )
+                    except Exception as e:
+                        logger.error("dashboard_broadcast_error", error=str(e), exc_info=True)
+                        print(f"ERROR BROADCASTING TO DASHBOARD: {e}")
             else:
                 reason = "risk blocked" if order else "position manager blocked"
                 logger.info("signal_not_executed", reason=reason, signal=signal.signal_id)
+                if self._dashboard:
+                    self._dashboard.broadcast_signal(
+                        direction=signal.direction, symbol=signal.symbol,
+                        price=signal.price, conviction=signal.conviction,
+                        council_score=signal.council_score, reason=reason,
+                        blocked=True,
+                    )
         else:
             # Fallback: print-only mode
             arrow = "▲" if signal.direction == "BUY" else "▼"
+            curr = "₹" if self.market_type == "india_options" else "$"
             print(
                 f"\n  [{mode}] {arrow} {signal.direction} {signal.symbol.upper()} "
-                f"@ ${signal.price:,.2f}"
+                f"@ {curr}{signal.price:,.2f}"
             )
             print(f"    Conviction: {signal.conviction:.4f} | Regime: {signal.regime}")
-            print(f"    Stop: ${signal.stop_loss:,.2f} | Target: ${signal.take_profit:,.2f}")
-            print(f"    Qty: {signal.quantity:.6f} | ATR: ${signal.atr:.2f}")
+            print(f"    Stop: {curr}{signal.stop_loss:,.2f} | Target: {curr}{signal.take_profit:,.2f}")
+            print(f"    Qty: {signal.quantity:.6f} | ATR: {curr}{signal.atr:.2f}")
             print(f"    Reason: {signal.reason}")
             print()
 
     def _handle_trade_close(self, trade) -> None:
         """Handle a trade that was closed (stop/TP hit)."""
-        pnl_icon = "💰" if trade.pnl > 0 else "🔻"
+        pnl_icon = "[WIN]" if trade.pnl > 0 else "[LOSS]"
+        curr = "₹" if self.market_type == "india_options" else "$"
         print(
             f"\n  {pnl_icon} TRADE CLOSED: {trade.symbol.upper()} "
             f"({trade.exit_reason.upper()})"
         )
         print(
-            f"    Entry: ${trade.entry_price:,.2f} → Exit: ${trade.exit_price:,.2f}"
+            f"    Entry: {curr}{trade.entry_price:,.2f} -> Exit: {curr}{trade.exit_price:,.2f}"
         )
         print(
-            f"    P&L: ${trade.pnl:+,.2f} ({trade.pnl_pct:+.4%}) | "
+            f"    P&L: {curr}{trade.pnl:+,.2f} ({trade.pnl_pct:+.4%}) | "
             f"Duration: {trade.duration_seconds:.0f}s"
         )
 
@@ -463,7 +586,8 @@ class LiveRunner:
 
         broker_info = ""
         if self._broker:
-            broker_info = f"\n  Balance: ${self._initial_balance:,.2f}"
+            curr = "₹" if self.market_type == "india_options" else "$"
+            broker_info = f"\n  Balance: {curr}{self._initial_balance:,.2f}"
             broker_info += f"\n  Max DD:  {self._max_drawdown_pct}%"
 
         print("\n" + "=" * 60)
@@ -523,15 +647,18 @@ class LiveRunner:
         if self._position_mgr and self._broker:
             balance = self._broker._balance
             pm_stats = self._position_mgr.get_stats()
-            total_pnl = pm_stats.get('total_pnl', 0.0)
+            total_pnl = balance - self._initial_balance  # Show Net P&L (Gross - Commissions)
             total_trades = pm_stats.get('total_trades', 0)
             winning_trades = pm_stats.get('winning_trades', 0)
             drawdown_pct = pm_stats.get('max_drawdown_pct', 0.0)
             cooldown_remaining = pm_stats.get('cooldown_remaining', 0)
             trailing_stops = pm_stats.get('trailing_stops', {})
 
+        currency = "₹" if self.market_type == "india_options" else "$"
+
         self._dashboard.broadcast_status(
             balance=balance,
+            initial_balance=self._initial_balance,
             total_pnl=total_pnl,
             total_trades=total_trades,
             winning_trades=winning_trades,
@@ -542,41 +669,48 @@ class LiveRunner:
             candles=total_candles,
             cooldown_remaining=cooldown_remaining,
             trailing_stops=trailing_stops,
+            currency=currency,
         )
+
+    def _print_status(self) -> None:
+        """Helper to log status console message."""
+        uptime = time.time() - self._start_time
+        total_signals = sum(e._signals_generated for e in self._signal_engines.values())
+        total_candles = sum(e._candles_processed for e in self._signal_engines.values())
+        ws_stats = self._ws.get_stats() if self._ws else {}
+
+        status = (
+            f"  [STATUS] Uptime: {uptime / 60:.1f}min | "
+            f"Candles: {total_candles} | "
+            f"Signals: {total_signals} | "
+            f"WS ticks: {ws_stats.get('ticks_received', 0)} | "
+            f"Connected: {ws_stats.get('connected', False)}"
+        )
+
+        if self._position_mgr:
+            pm_stats = self._position_mgr.get_stats()
+            status += (
+                f"\n  [P&L]    Balance: ${self._broker._balance:,.2f} | "
+                f"Trades: {pm_stats['total_trades']} | "
+                f"Win: {pm_stats['win_rate']:.0%} | "
+                f"PnL: ${pm_stats['total_pnl']:+,.2f} | "
+                f"DD: {pm_stats['max_drawdown_pct']:.1f}%"
+            )
+
+        print(status)
 
     async def _print_stats_loop(self) -> None:
         """Print status every 60 seconds and broadcast to dashboard."""
+        # Broadcast initial status immediately so dashboard cache is populated
+        self._print_status()
+        self._broadcast_dashboard_status()
+        
         while self._running:
             await asyncio.sleep(60)
             if not self._running:
                 break
-
-            uptime = time.time() - self._start_time
-            total_signals = sum(e._signals_generated for e in self._signal_engines.values())
-            total_candles = sum(e._candles_processed for e in self._signal_engines.values())
-            ws_stats = self._ws.get_stats() if self._ws else {}
-
-            status = (
-                f"  [STATUS] Uptime: {uptime / 60:.1f}min | "
-                f"Candles: {total_candles} | "
-                f"Signals: {total_signals} | "
-                f"WS ticks: {ws_stats.get('ticks_received', 0)} | "
-                f"Connected: {ws_stats.get('connected', False)}"
-            )
-
-            if self._position_mgr:
-                pm_stats = self._position_mgr.get_stats()
-                status += (
-                    f"\n  [P&L]    Balance: ${self._broker._balance:,.2f} | "
-                    f"Trades: {pm_stats['total_trades']} | "
-                    f"Win: {pm_stats['win_rate']:.0%} | "
-                    f"PnL: ${pm_stats['total_pnl']:+,.2f} | "
-                    f"DD: {pm_stats['max_drawdown_pct']:.1f}%"
-                )
-
-            print(status)
-
-            # Also broadcast to dashboard
+            
+            self._print_status()
             self._broadcast_dashboard_status()
 
     async def shutdown(self) -> None:

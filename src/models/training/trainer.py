@@ -130,9 +130,10 @@ class UnifiedTrainer:
         labeling_cfg = self.model_params.get("labeling", {})
         labeled_df = apply_triple_barrier_labels(
             combined,
-            profit_target_pct=labeling_cfg.get("profit_target_pct", 0.002),
-            stop_loss_pct=labeling_cfg.get("stop_loss_pct", 0.0012),
-            max_holding_bars=labeling_cfg.get("max_holding_bars", 20),
+            profit_target_atr=labeling_cfg.get("profit_target_atr", 2.0),
+            stop_loss_atr=labeling_cfg.get("stop_loss_atr", 2.0),
+            max_holding_bars=labeling_cfg.get("max_holding_bars", 30),
+            atr_col="ATR"
         )
 
         if len(labeled_df) < 200:
@@ -260,14 +261,14 @@ class UnifiedTrainer:
             avg_precision=f"{avg_metrics['precision']:.4f}",
         )
 
-        # Train final model on ALL data (with 80/20 split for calibration)
+        # Train final model on ALL data (90/10 split for early stopping)
         final_model = ApexXGBoostModel(
             name=model_name,
             feature_columns=self.feature_store.feature_columns,
             hyperparams=hp,
         )
 
-        split_idx = int(len(X) * 0.85)
+        split_idx = int(len(X) * 0.90)
         X_train_final = X.iloc[:split_idx]
         y_train_final = y.iloc[:split_idx]
         X_cal = X.iloc[split_idx:]
@@ -277,10 +278,19 @@ class UnifiedTrainer:
 
         # Save model if quality check passes
         if save_models:
-            save_dir = WEIGHTS_DIR
-            final_model.save(save_dir)
-            self._models[regime_suffix] = final_model
-            logger.info("model_saved", model=model_name)
+            # Enforce minimal viable quality gate (adjusted for 3:1 R:R)
+            if final_metrics.get("accuracy", 0) > 0.45 and final_metrics.get("log_loss", 1.0) < 0.700:
+                save_dir = WEIGHTS_DIR
+                final_model.save(save_dir)
+                self._models[regime_suffix] = final_model
+                logger.info("model_saved", model=model_name, metrics=final_metrics)
+            else:
+                logger.warning(
+                    "model_failed_quality_gates", 
+                    model=model_name, 
+                    accuracy=final_metrics.get("accuracy"),
+                    log_loss=final_metrics.get("log_loss")
+                )
 
         return {
             "model_name": model_name,
@@ -298,7 +308,7 @@ class UnifiedTrainer:
         if self.market_type == "crypto":
             search_dir = data_dir / "crypto"
         elif self.market_type == "india_equity":
-            search_dir = data_dir / "india"
+            search_dir = data_dir / "india_equity"
         else:
             search_dir = data_dir
 

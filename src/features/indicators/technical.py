@@ -224,29 +224,43 @@ def compute_vwap_session(
     if df_v["volume"].sum() > 0:
         # Real volume data
         tv = tp * df_v["volume"]
-        cum_tv = df_v.groupby("_local_date").apply(
-            lambda g: tv.loc[g.index].cumsum()
-        )
-        cum_v = df_v.groupby("_local_date").apply(
-            lambda g: df_v["volume"].loc[g.index].cumsum()
-        )
-        # Flatten multi-index from groupby
-        if isinstance(cum_tv.index, pd.MultiIndex):
-            cum_tv = cum_tv.droplevel(0)
-            cum_v = cum_v.droplevel(0)
+        df_v["_tv"] = tv
+        cum_tv = df_v.groupby("_local_date")["_tv"].cumsum()
+        cum_v = df_v.groupby("_local_date")["volume"].cumsum()
         vwap = cum_tv / cum_v.replace(0, np.nan)
     else:
         # No volume (index data) — use cumulative mean per session
         df_v["_tp"] = tp
-        cum_tp = df_v.groupby("_local_date").apply(
-            lambda g: df_v["_tp"].loc[g.index].cumsum()
-        )
+        cum_tp = df_v.groupby("_local_date")["_tp"].cumsum()
         bar_num = df_v.groupby("_local_date").cumcount() + 1
-        if isinstance(cum_tp.index, pd.MultiIndex):
-            cum_tp = cum_tp.droplevel(0)
         vwap = cum_tp / bar_num
 
     return vwap.fillna(tp).reindex(df.index)
+
+
+def compute_vwap_zscore(
+    close: pd.Series,
+    vwap: pd.Series,
+    window: int = 100,
+) -> pd.Series:
+    """
+    Compute the Z-Score of the price's deviation from VWAP.
+    High absolute values (>2.0) indicate mean reversion potential.
+    
+    Args:
+        close: Series of closing prices.
+        vwap: Series of VWAP values.
+        window: Rolling window for mean/std of the deviation.
+        
+    Returns:
+        Series of Z-Scores.
+    """
+    pct_dev = (close - vwap) / vwap.replace(0, np.nan)
+    roll_mean = pct_dev.rolling(window=window, min_periods=window).mean()
+    roll_std = pct_dev.rolling(window=window, min_periods=window).std().replace(0, np.nan)
+    
+    zscore = (pct_dev - roll_mean) / roll_std
+    return zscore.fillna(0.0)
 
 
 # ── Bollinger Bands ──────────────────────────────────────────────────────────
@@ -283,6 +297,59 @@ def compute_bb_width(close: pd.Series, length: int = 20, std_dev: float = 2.0) -
     return ((upper - lower) / middle).fillna(0.0)
 
 
+# ── Pseudo-Order Flow / Microstructure ───────────────────────────────────────
+def compute_vsa_absorption(df: pd.DataFrame, window: int = 14) -> pd.Series:
+    """
+    Volume Spread Analysis: Absorption.
+    High volume + small candle body = Absorption.
+    Returns ratio of volume to body size, normalized by rolling mean.
+    """
+    body = (df['close'] - df['open']).abs()
+    body = pd.Series(np.where(body == 0, df['close'] * 0.0001, body), index=df.index)
+    
+    vol_body_ratio = df['volume'] / body
+    roll_mean = vol_body_ratio.rolling(window=window, min_periods=1).mean()
+    absorption = vol_body_ratio / roll_mean.replace(0, np.nan)
+    return absorption.fillna(1.0)
+
+def compute_liquidity_sweep(df: pd.DataFrame, window: int = 20) -> pd.Series:
+    """
+    Detects Liquidity Sweeps (Stop Hunts).
+    Bullish Sweep (+1): Low breaks 20-period low, but close is > open.
+    Bearish Sweep (-1): High breaks 20-period high, but close is < open.
+    """
+    rolling_high = df['high'].shift(1).rolling(window=window).max()
+    rolling_low = df['low'].shift(1).rolling(window=window).min()
+    
+    bearish_sweep = (df['high'] > rolling_high) & (df['close'] < df['open'])
+    bullish_sweep = (df['low'] < rolling_low) & (df['close'] > df['open'])
+    
+    sweep = pd.Series(0.0, index=df.index)
+    sweep[bullish_sweep] = 1.0
+    sweep[bearish_sweep] = -1.0
+    return sweep
+
+def compute_trend_exhaustion(df: pd.DataFrame) -> pd.Series:
+    """
+    Detects Micro-Trend Exhaustion.
+    3 consecutive green candles with decreasing volume = Bullish Exhaustion (-1).
+    3 consecutive red candles with decreasing volume = Bearish Exhaustion (+1).
+    """
+    is_green = df['close'] > df['open']
+    is_red = df['close'] < df['open']
+    
+    vol_down = df['volume'] < df['volume'].shift(1)
+    vol_down_2 = vol_down & (df['volume'].shift(1) < df['volume'].shift(2))
+    
+    bull_exhaustion = is_green & is_green.shift(1) & is_green.shift(2) & vol_down_2
+    bear_exhaustion = is_red & is_red.shift(1) & is_red.shift(2) & vol_down_2
+    
+    exhaustion = pd.Series(0.0, index=df.index)
+    exhaustion[bull_exhaustion] = -1.0
+    exhaustion[bear_exhaustion] = 1.0
+    return exhaustion
+
+
 # ── Utility: Build All Technical Features ───────────────────────────────────
 def build_technical_features(
     df: pd.DataFrame,
@@ -308,11 +375,13 @@ def build_technical_features(
 
     # Core indicators
     out["RSI"] = compute_rsi(close, 14)
-    out["EMA_14"] = compute_ema(close, 14)
-    out["EMA_50"] = compute_ema(close, 50)
+    ema_14 = compute_ema(close, 14)
+    ema_50 = compute_ema(close, 50)
+    out["EMA_14"] = ema_14  # Keep for council/other modules
+    out["EMA_50"] = ema_50  # Keep for council/other modules
     macd, macd_sig, macd_hist = compute_macd(close)
-    out["MACD"] = macd
-    out["MACD_signal"] = macd_sig
+    out["MACD"] = macd      # Keep raw for council
+    out["MACD_signal"] = macd_sig  # Keep raw for council
     out["MACD_hist"] = macd_hist
     out["ATR"] = compute_atr(out, 14)
     out["ADX"] = compute_adx(out, 14)
@@ -324,5 +393,69 @@ def build_technical_features(
         out["VWAP"] = compute_vwap_continuous(out)
     else:
         out["VWAP"] = compute_vwap_session(out, timestamp_col=timestamp_col)
+        
+    # VWAP Mean Reversion feature
+    out["VWAP_zscore"] = compute_vwap_zscore(out["close"], out["VWAP"])
+
+    # --- Normalized Price-Relative Features (no absolute price leakage) ---
+    atr_safe = out["ATR"].replace(0, np.nan).fillna(1.0)
+    
+    # Distance from EMAs normalized by ATR
+    out["price_vs_ema14"] = (close - ema_14) / atr_safe
+    out["price_vs_ema50"] = (close - ema_50) / atr_safe
+    out["ema_cross"] = (ema_14 - ema_50) / atr_safe
+    
+    # MACD normalized by ATR (scale-independent)
+    out["MACD_norm"] = macd / atr_safe
+    out["MACD_signal_norm"] = macd_sig / atr_safe
+
+    # --- Phase 3 Advanced Features ---
+    # 1. ATR Ratio (current ATR / 20-period moving average of ATR)
+    out["ATR_Ratio"] = out["ATR"] / out["ATR"].rolling(window=20, min_periods=1).mean().replace(0, np.nan)
+    out["ATR_Ratio"] = out["ATR_Ratio"].fillna(1.0)
+    
+    # 2. RSI Trend (Momentum of RSI over 10 periods)
+    out["RSI_Trend"] = out["RSI"] - out["RSI"].shift(10).fillna(out["RSI"])
+    
+    # 3. VWAP Distance (Percentage distance from VWAP)
+    out["VWAP_Distance"] = (out["close"] - out["VWAP"]) / out["VWAP"].replace(0, np.nan)
+    out["VWAP_Distance"] = out["VWAP_Distance"].fillna(0.0)
+    
+    # 4. Volatility Regime (Binary: 1 if ATR_Ratio > 1.2 else 0)
+    out["Volatility_Regime"] = (out["ATR_Ratio"] > 1.2).astype(float)
+
+    # 5. Volume Spike (relative volume vs 20-bar average)
+    vol_ma = out["volume"].rolling(window=20, min_periods=1).mean().replace(0, np.nan)
+    out["volume_spike"] = out["volume"] / vol_ma
+    out["volume_spike"] = out["volume_spike"].fillna(1.0)
+
+    # 6. Time-of-day cyclic encoding (let model learn session patterns)
+    if timestamp_col in out.columns:
+        try:
+            ts = out[timestamp_col]
+            if ts.dtype in ('int64', 'float64'):
+                hours = pd.to_datetime(ts, unit='ms', utc=True).dt.hour + \
+                        pd.to_datetime(ts, unit='ms', utc=True).dt.minute / 60.0
+            else:
+                hours = pd.to_datetime(ts, utc=True).dt.hour + \
+                        pd.to_datetime(ts, utc=True).dt.minute / 60.0
+            out["hour_sin"] = np.sin(2 * np.pi * hours / 24.0)
+            out["hour_cos"] = np.cos(2 * np.pi * hours / 24.0)
+        except Exception:
+            out["hour_sin"] = 0.0
+            out["hour_cos"] = 0.0
+    else:
+        out["hour_sin"] = 0.0
+        out["hour_cos"] = 0.0
+
+    # 7. VSA Absorption
+    out["vsa_absorption"] = compute_vsa_absorption(out)
+    
+    # 8. Liquidity Sweep
+    out["liquidity_sweep_signal"] = compute_liquidity_sweep(out)
+    
+    # 9. Micro-Trend Exhaustion
+    out["trend_exhaustion"] = compute_trend_exhaustion(out)
 
     return out
+

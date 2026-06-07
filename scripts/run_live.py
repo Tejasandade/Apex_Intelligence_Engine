@@ -28,16 +28,22 @@ async def main():
     parser.add_argument("--live", action="store_true", help="Run with real money (disables paper mode)")
     parser.add_argument("--port", type=int, default=8765, help="Dashboard WebSocket port")
     parser.add_argument("--no-dashboard", action="store_true", help="Disable dashboard server")
+    parser.add_argument("--asymmetric", action="store_true", help="Enable Asymmetric Risk Mode (no early scale-outs)")
+    parser.add_argument("--scalp", action="store_true", help="Enable Scalp Mode (high frequency, lower thresholds, loose rules)")
     
     args = parser.parse_args()
     
     symbols = args.symbol or ["btcusdt"]
     paper_mode = not args.live
     enable_dashboard = not args.no_dashboard
+    asymmetric_mode = args.asymmetric
+    scalp_mode = args.scalp
     
     print(f"Starting Apex Engine...")
     print(f"Symbols: {symbols}")
     print(f"Mode: {'PAPER' if paper_mode else 'LIVE'}")
+    print(f"Risk Mode: {'ASYMMETRIC' if asymmetric_mode else 'STANDARD'}")
+    print(f"Scalp Mode: {'ENABLED' if scalp_mode else 'DISABLED'}")
     print(f"Dashboard: {'Enabled (Port ' + str(args.port) + ')' if enable_dashboard else 'Disabled'}")
     
     runner = LiveRunner(
@@ -45,7 +51,9 @@ async def main():
         market_type=args.market,
         paper_mode=paper_mode,
         dashboard_port=args.port,
-        enable_dashboard=enable_dashboard
+        enable_dashboard=enable_dashboard,
+        asymmetric_mode=asymmetric_mode,
+        scalp_mode=scalp_mode
     )
     
     await runner.setup()

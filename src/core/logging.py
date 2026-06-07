@@ -55,7 +55,7 @@ def _configure_structlog() -> None:
             structlog.processors.UnicodeDecoder(),
             renderer,
         ],
-        wrapper_class=structlog.make_filtering_bound_logger(0),  # DEBUG and above
+        wrapper_class=structlog.make_filtering_bound_logger(30),  # WARNING and above (suppresses DEBUG/INFO noise)
         context_class=dict,
         logger_factory=structlog.PrintLoggerFactory(),
         cache_logger_on_first_use=True,

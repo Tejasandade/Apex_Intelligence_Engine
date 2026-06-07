@@ -39,7 +39,7 @@ class FeatureStore:
     - Version tracking for reproducibility
     """
 
-    VERSION = "1.0.0"
+    VERSION = "1.2.0"
 
     # ── Per-Market Feature Definitions ──────────────────────────────────────
     # These are the EXACT columns the model will receive, in THIS order.
@@ -47,34 +47,51 @@ class FeatureStore:
 
     FEATURE_SETS: dict[str, list[str]] = {
         "crypto": [
-            # Technical indicators
-            "RSI",
-            "EMA_14",
-            "EMA_50",
-            "MACD",
-            "MACD_signal",
-            "MACD_hist",
-            "VWAP",
+            # Technical indicators (all scale-independent)
+            "price_vs_ema14",       # (close - EMA_14) / ATR — normalized
+            "price_vs_ema50",       # (close - EMA_50) / ATR — normalized
+            "ema_cross",            # (EMA_14 - EMA_50) / ATR — trend direction
+            "MACD_norm",            # MACD / ATR — scale-independent
+            "MACD_signal_norm",     # MACD_signal / ATR — scale-independent
             "ATR",
             "ADX",
             "CHOP",
             "BB_width",
+            "VWAP_zscore",
+            # Advanced Order Flow / VSA
+            "vsa_absorption",
+            "trend_exhaustion",
+            "liquidity_sweep_signal",
             # Volume & order flow
             "CVD",
             "order_flow_imbalance",
             "spread",
-            "book_imbalance",
+            "volume_spike",         # volume / 20-bar avg volume
+            # MTF Macro Injection
+            "MTF_ADX_15m",
             # SMC structure
             "fvg_signal",
             "fvg_gap_pct",
             "structure_break_signal",
             "structure_break_strength",
-            "liquidity_sweep_signal",
             "liquidity_reclaim_strength",
+            "dist_to_pivot_high",
+            "dist_to_pivot_low",
             "structural_confluence",
-            # Macro
-            "macro_sentiment_score",
-        ],  # 23 features
+            "OB_bull_dist",
+            "OB_bear_dist",
+            # Advanced Phase 3 Features
+            "ATR_Ratio",
+            "Volume_Profile_POC_Dist",
+            "AVWAP_distance",
+            "Liquidity_Sweep_1H",
+            "RSI_Trend",
+            "OBV_Slope",
+            "Volatility_Regime",
+            # Time encoding (cyclic)
+            "hour_sin",
+            "hour_cos",
+        ],  # 38 features — all normalized, no price leakage
         "india_equity": [
             # Technical indicators
             "RSI",
@@ -88,6 +105,7 @@ class FeatureStore:
             "ADX",
             "CHOP",
             "BB_width",
+            "VWAP_zscore",
             # Volume & order flow
             "CVD",
             "order_flow_imbalance",
@@ -101,6 +119,8 @@ class FeatureStore:
             "structure_break_strength",
             "liquidity_sweep_signal",
             "liquidity_reclaim_strength",
+            "dist_to_pivot_high",
+            "dist_to_pivot_low",
             "structural_confluence",
             # Macro
             "macro_sentiment_score",
@@ -172,11 +192,30 @@ class FeatureStore:
             df, market_type=self.market_type, timestamp_col=timestamp_col
         )
 
-        # Step 2: Volume & order flow
-        result = build_volume_features(result)
+        # Step 1.5: MTF Injection
+        if timestamp_col in result.columns and len(result) > 60:
+            try:
+                dt_series = pd.to_datetime(result[timestamp_col], unit='ms', utc=True)
+                temp = result[['high', 'low', 'close']].copy()
+                temp.index = dt_series
+                df_15m = temp.resample('15min').agg({'high': 'max', 'low': 'min', 'close': 'last'}).dropna()
+                if len(df_15m) > 14:
+                    from src.features.indicators.technical import compute_adx
+                    adx_15m = compute_adx(df_15m, 14)
+                    adx_1m = adx_15m.reindex(temp.index, method='ffill').fillna(0.0)
+                    result['MTF_ADX_15m'] = adx_1m.values
+                else:
+                    result['MTF_ADX_15m'] = 0.0
+            except Exception:
+                result['MTF_ADX_15m'] = 0.0
+        else:
+            result['MTF_ADX_15m'] = 0.0
 
-        # Step 3: SMC structure features
+        # Step 2: SMC structure features
         result = build_structure_features(result)
+
+        # Step 3: Volume & order flow (requires structure for AVWAP)
+        result = build_volume_features(result)
 
         # Step 4: Market-specific features
         if self.market_type == "crypto":

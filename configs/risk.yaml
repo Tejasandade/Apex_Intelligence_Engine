@@ -42,10 +42,10 @@ kill_switch:
 
 # Trade management
 trade_management:
-  scale_out_at_rr: 1.0          # Take 50% profit at 1:1 R:R
-  scale_out_pct: 0.50           # Close 50% of position
+  scale_out_at_rr: 2.5          # Take 25% profit at 2.5 R:R
+  scale_out_pct: 0.25           # Close 25% of position
   trail_to_breakeven: true      # Move stop to entry after scale-out
-  default_rr_target: 2.0        # Default risk:reward target
+  default_rr_target: 4.0        # Default risk:reward target
   cooldown_minutes: 5           # Post-trade cooldown per symbol
 
 # Conviction thresholds (council output)

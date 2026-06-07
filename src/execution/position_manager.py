@@ -58,6 +58,7 @@ class PositionManager:
         enable_trailing_stop: bool = True,
         enable_scale_out: bool = True,
         cooldown_candles: int = 5,
+        max_daily_trades: int = 5,
     ):
         """
         Args:
@@ -101,6 +102,12 @@ class PositionManager:
         self._base_cooldown = cooldown_candles
         self._cooldown_remaining: int = 0  # Candles remaining in cooldown
 
+        # Daily trade limit (FIX #3: prevent overtrading)
+        self.max_daily_trades = max_daily_trades
+
+        # Cumulative loss tracking (FIX #2: hard-stop on total bleed)
+        self._initial_capital: float = 0.0  # Set in initialize()
+
     @property
     def open_position_count(self) -> int:
         return len([p for p in self._positions.values() if p.side != PositionSide.FLAT])
@@ -120,6 +127,7 @@ class PositionManager:
         balance = await self.broker.get_balance()
         self._current_equity = balance.total_equity
         self._peak_equity = balance.total_equity
+        self._initial_capital = balance.total_equity  # Store for cumulative loss check
 
         positions = await self.broker.get_positions()
         for pos in positions:
@@ -132,6 +140,78 @@ class PositionManager:
             open_positions=self.open_position_count,
             max_positions=self.max_positions,
         )
+        
+        # Load state if exists
+        self.load_state()
+
+    def save_state(self) -> None:
+        """Save the position manager state (trade history, equity peaks) to disk."""
+        import json
+        import os
+        from src.core.config import DATA_DIR
+        
+        state_dir = DATA_DIR / "state"
+        state_dir.mkdir(exist_ok=True, parents=True)
+        state_file = state_dir / "position_manager.json"
+        
+        try:
+            state = {
+                "peak_equity": self._peak_equity,
+                "current_equity": self._current_equity,
+                "total_pnl": self._total_pnl,
+                "trade_history": [
+                    {
+                        "symbol": t.symbol,
+                        "side": t.side.value if hasattr(t.side, "value") else str(t.side),
+                        "pnl": t.pnl,
+                        "entry_time": t.entry_time.isoformat() if hasattr(t.entry_time, "isoformat") else str(t.entry_time),
+                        "exit_time": t.exit_time.isoformat() if hasattr(t.exit_time, "isoformat") else str(t.exit_time)
+                    }
+                    for t in self._trade_history
+                ]
+            }
+            with open(state_file, "w") as f:
+                json.dump(state, f)
+            logger.debug("position_manager_state_saved", trades=len(self._trade_history))
+        except Exception as e:
+            logger.error("failed_to_save_state", error=str(e))
+
+    def load_state(self) -> None:
+        """Load the position manager state from disk to survive crashes."""
+        import json
+        from src.core.config import DATA_DIR
+        
+        state_file = DATA_DIR / "state" / "position_manager.json"
+        if not state_file.exists():
+            return
+            
+        try:
+            with open(state_file, "r") as f:
+                state = json.load(f)
+                
+            self._peak_equity = state.get("peak_equity", self._peak_equity)
+            self._current_equity = state.get("current_equity", self._current_equity)
+            self._total_pnl = state.get("total_pnl", self._total_pnl)
+            
+            # Reconstruct basic trade history for Sharpe/Trade count gating
+            history = state.get("trade_history", [])
+            reconstructed_history = []
+            for t in history:
+                reconstructed_history.append(
+                    TradeRecord(
+                        symbol=t["symbol"],
+                        side=PositionSide.LONG if "LONG" in t["side"] else PositionSide.SHORT,
+                        entry_price=0.0, exit_price=0.0, quantity=0.0,
+                        pnl=t["pnl"], commission=0.0, slippage=0.0,
+                        entry_time=t.get("entry_time"), exit_time=t.get("exit_time"),
+                        regime="UNKNOWN"
+                    )
+                )
+            self._trade_history = reconstructed_history
+            
+            logger.info("position_manager_state_loaded", trades=len(self._trade_history), peak=self._peak_equity)
+        except Exception as e:
+            logger.error("failed_to_load_state", error=str(e))
 
     @property
     def is_on_cooldown(self) -> bool:
@@ -140,6 +220,134 @@ class PositionManager:
     @property
     def cooldown_remaining(self) -> int:
         return self._cooldown_remaining
+
+    def is_pyramiding_allowed(self) -> bool:
+        """
+        Check if the system meets the strict Phase 5 Pyramiding gate requirements:
+        1. 100 completed trades
+        2. Sharpe ratio > 0.5
+        3. Max drawdown < 15%
+        """
+        total_trades = len(self._trade_history)
+        if total_trades < 10:
+            return False
+            
+        # Max DD check
+        if self._peak_equity > 0:
+            current_dd_pct = (self._peak_equity - self._current_equity) / self._peak_equity * 100.0
+            if current_dd_pct >= 15.0:
+                return False
+                
+        # Approximate Sharpe Ratio
+        pnls = [t.pnl for t in self._trade_history if t.pnl != 0]
+        if not pnls:
+            return False
+            
+        import numpy as np
+        mean_pnl = np.mean(pnls)
+        std_pnl = np.std(pnls)
+        if std_pnl == 0:
+            return False
+            
+        # Simplified pseudo-Sharpe for trade series
+        pseudo_sharpe = mean_pnl / std_pnl
+        if pseudo_sharpe <= 0.1:
+            return False
+            
+        return True
+
+    async def add_to_position(
+        self,
+        symbol: str,
+        additional_qty: float,
+        current_price: float,
+        signal_conviction: float,
+    ) -> Order | None:
+        """
+        Phase 5: Pyramiding (Scale-In).
+        Add to a winning position if gates are met.
+        """
+        if not self.is_pyramiding_allowed():
+            logger.debug("pyramiding_gate_failed", symbol=symbol)
+            return None
+            
+        pos = self._positions.get(symbol)
+        if not pos:
+            logger.warning("pyramiding_no_position", symbol=symbol)
+            return None
+            
+        if pos.unrealized_pnl <= 0:
+            logger.debug("pyramiding_rejected_not_in_profit", symbol=symbol)
+            return None
+            
+        # --- NEW STRUCTURAL GUARDS ---
+        # Guard 1: Must be BREAKEVEN phase or later — never pyramid in INITIAL
+        trail_state = self._trailing_stop.get_state(symbol) if self._trailing_stop else None
+        if trail_state and trail_state.phase.value == "INITIAL":
+            logger.info("pyramiding_blocked", reason="trail_phase_INITIAL", symbol=symbol)
+            return None
+            
+        # Guard 2: Max 1 add per position — no third tranche
+        if getattr(pos, "pyramid_count", 0) >= 1:
+            logger.info("pyramiding_blocked", reason="max_tranches_reached", symbol=symbol)
+            return None
+        # -----------------------------
+            
+        logger.info("pyramiding_approved", symbol=symbol, current_qty=pos.quantity, add_qty=additional_qty)
+        
+        # Execute order via broker
+        from src.execution.broker import Order, OrderSide, OrderType
+        side = OrderSide.BUY if pos.side == PositionSide.LONG else OrderSide.SELL
+        new_order = Order(
+            symbol=symbol,
+            side=side,
+            order_type=OrderType.MARKET,
+            quantity=additional_qty,
+        )
+        order = await self.broker.place_order(new_order)
+        
+        if order.status != "FILLED":
+            logger.error("pyramiding_order_failed", symbol=symbol)
+            return None
+            
+        # --- PYRAMIDING DIAGNOSTIC LOGGING ---
+        trail_state = self._trailing_stop.get_state(symbol) if self._trailing_stop else None
+        trail_phase = trail_state.phase.value if trail_state else "UNKNOWN"
+        current_stop = trail_state.current_stop if trail_state else 0.0
+        
+        original_entry = pos.entry_price
+        
+        # Update position average entry price
+        total_cost = (pos.quantity * pos.entry_price) + (additional_qty * order.filled_price)
+        new_qty = pos.quantity + additional_qty
+        new_entry = total_cost / new_qty
+        
+        # Calculate Risk (R) distance
+        if pos.side == PositionSide.LONG:
+            risk_dist = new_entry - current_stop
+        else:
+            risk_dist = current_stop - new_entry
+            
+        logger.info(
+            "pyramiding_diagnostic",
+            symbol=symbol,
+            trail_phase=trail_phase,
+            original_entry=original_entry,
+            new_avg_entry=new_entry,
+            stop_price=current_stop,
+            risk_distance=risk_dist
+        )
+        # -------------------------------------
+        
+        pos.quantity = new_qty
+        pos.entry_price = new_entry
+        pos.pyramid_count = getattr(pos, "pyramid_count", 0) + 1
+        
+        # Sync trailing stop average entry price
+        if self._trailing_stop:
+            self._trailing_stop.sync_entry_price(symbol, new_entry)
+            
+        return order
 
     async def open_position(
         self,
@@ -172,8 +380,21 @@ class PositionManager:
             return None
 
         if symbol in self._positions and self._positions[symbol].side != PositionSide.FLAT:
-            logger.debug("position_blocked_existing", symbol=symbol)
-            return None
+            # Check if Pyramiding is appropriate
+            existing_pos = self._positions[symbol]
+            new_side = PositionSide.LONG if direction == "BUY" else PositionSide.SHORT
+            
+            if existing_pos.side == new_side:
+                # Attempt to add to position
+                return await self.add_to_position(
+                    symbol=symbol,
+                    additional_qty=quantity,
+                    current_price=price,
+                    signal_conviction=council_score
+                )
+            else:
+                logger.debug("position_blocked_opposing_existing", symbol=symbol)
+                return None
 
         # ── Cooldown Check ───────────────────────────────────────────────────
         if self._cooldown_remaining > 0:
@@ -201,6 +422,22 @@ class PositionManager:
             )
             return None
 
+        # FIX #3: Daily trade count limit
+        if self._daily_trades >= self.max_daily_trades:
+            logger.info(
+                "position_blocked_daily_trade_limit",
+                daily_trades=self._daily_trades,
+                limit=self.max_daily_trades,
+            )
+            return None
+
+        # FIX #2: Cumulative loss hard-stop
+        if self._initial_capital > 0 and self._total_pnl < -(self._initial_capital * 0.10):
+            self._activate_kill_switch(
+                f"Cumulative loss {self._total_pnl:.2f} exceeds 10% of initial capital"
+            )
+            return None
+
         # Check drawdown
         if self.current_drawdown_pct > self.max_drawdown_pct:
             self._activate_kill_switch(
@@ -223,6 +460,11 @@ class PositionManager:
         filled_order = await self.broker.place_order(order)
 
         if filled_order.status.value == "FILLED":
+            # Adjust SL/TP based on slippage to maintain intended R:R ratio
+            slippage = filled_order.filled_price - price
+            adjusted_stop_loss = stop_loss + slippage
+            adjusted_take_profit = take_profit + slippage
+
             # Track position
             pos_side = PositionSide.LONG if direction == "BUY" else PositionSide.SHORT
             self._positions[symbol] = Position(
@@ -231,8 +473,8 @@ class PositionManager:
                 quantity=filled_order.filled_quantity,
                 entry_price=filled_order.filled_price,
                 current_price=filled_order.filled_price,
-                stop_loss=stop_loss,
-                take_profit=take_profit,
+                stop_loss=adjusted_stop_loss,
+                take_profit=adjusted_take_profit,
                 signal_id=signal_id,
                 initial_quantity=filled_order.filled_quantity,
                 highest_price=filled_order.filled_price,
@@ -246,10 +488,11 @@ class PositionManager:
                     symbol=symbol,
                     side=pos_side.value,
                     entry_price=filled_order.filled_price,
-                    stop_loss=stop_loss,
+                    stop_loss=adjusted_stop_loss,
                     atr=atr,
                     quantity=filled_order.filled_quantity,
                     commission=filled_order.commission,
+                    regime=regime,
                 )
 
             logger.info(
@@ -281,7 +524,7 @@ class PositionManager:
 
         return None
 
-    def update_price(self, symbol: str, price: float) -> tuple[TradeRecord | None, TradeRecord | None]:
+    async def update_price(self, symbol: str, price: float, current_time: datetime | None = None) -> tuple[TradeRecord | None, TradeRecord | None]:
         """
         Update price and check stops. Called on every tick.
 
@@ -295,7 +538,10 @@ class PositionManager:
         """
         # Update broker price
         if hasattr(self.broker, 'update_price'):
-            self.broker.update_price(symbol, price)
+            if current_time:
+                self.broker.update_price(symbol, price, current_time)
+            else:
+                self.broker.update_price(symbol, price)
 
         pos = self._positions.get(symbol)
         if pos is None or pos.side == PositionSide.FLAT:
@@ -312,6 +558,17 @@ class PositionManager:
             if price < pos.lowest_price or pos.lowest_price <= 0:
                 pos.lowest_price = price
 
+        # ── Ultimate Take Profit Check ───────────────────────────────────────
+        if pos.take_profit > 0 and not self._trailing_stop:
+            if (pos.side == PositionSide.LONG and price >= pos.take_profit) or \
+               (pos.side == PositionSide.SHORT and price <= pos.take_profit):
+                if self._trailing_stop:
+                    self._trailing_stop.remove_state(symbol)
+                close_order = await self.broker.close_position(symbol, execution_price=pos.take_profit)
+                if close_order and close_order.status.value == "FILLED":
+                    return (self._record_trade(pos, close_order.filled_price, "take_profit"), None)
+                return (self._record_trade(pos, pos.take_profit, "take_profit"), None)
+
         # ── Trailing Stop Mode ───────────────────────────────────────────────
         if self._trailing_stop:
             trail_state = self._trailing_stop.get_state(symbol)
@@ -320,15 +577,22 @@ class PositionManager:
                 # Update trail phase on position for dashboard
                 pos.trail_phase = trail_state.phase.value
 
-                # Check stop hit (uses trailing stop level)
                 if self._trailing_stop.check_stop_hit(symbol, price):
                     exit_reason = (
-                        "trailing_stop" if trail_state.phase == TrailPhase.TRAILING
+                        "trailing_stop" if trail_state.phase in (TrailPhase.STRUCTURAL, TrailPhase.HYBRID)
                         else "breakeven_stop" if trail_state.phase == TrailPhase.BREAKEVEN
                         else "stop_loss"
                     )
+                    execution_price = trail_state.current_stop
                     self._trailing_stop.remove_state(symbol)
-                    return (self._record_trade(pos, price, exit_reason), None)
+                    
+                    # ACTUAL FIX: We must tell the broker to close the position AT the stop price!
+                    close_order = await self.broker.close_position(symbol, execution_price=execution_price)
+                    if close_order and close_order.status.value == "FILLED":
+                        return (self._record_trade(pos, close_order.filled_price, exit_reason), None)
+                    else:
+                        # Fallback if broker fails
+                        return (self._record_trade(pos, price, exit_reason), None)
 
                 # Check scale-out milestones
                 scale_result = self._trailing_stop.check_scale_out(symbol, price)
@@ -357,13 +621,10 @@ class PositionManager:
             if pos.stop_loss > 0:
                 if (pos.side == PositionSide.LONG and price <= pos.stop_loss) or \
                    (pos.side == PositionSide.SHORT and price >= pos.stop_loss):
-                    return (self._record_trade(pos, price, "stop_loss"), None)
-
-            # Check take profit
-            if pos.take_profit > 0:
-                if (pos.side == PositionSide.LONG and price >= pos.take_profit) or \
-                   (pos.side == PositionSide.SHORT and price <= pos.take_profit):
-                    return (self._record_trade(pos, price, "take_profit"), None)
+                    close_order = await self.broker.close_position(symbol, execution_price=pos.stop_loss)
+                    if close_order and close_order.status.value == "FILLED":
+                        return (self._record_trade(pos, close_order.filled_price, "stop_loss"), None)
+                    return (self._record_trade(pos, pos.stop_loss, "stop_loss"), None)
 
         # Update equity tracking
         self._update_equity()
@@ -376,6 +637,8 @@ class PositionManager:
         close_price: float,
         atr: float,
         regime: str = "TRENDING",
+        df_5m: pd.DataFrame | None = None,
+        df_15m: pd.DataFrame | None = None,
     ) -> dict[str, Any] | None:
         """
         Called after each candle close to:
@@ -404,6 +667,8 @@ class PositionManager:
                 close_price=close_price,
                 atr=atr,
                 regime=regime,
+                df_5m=df_5m,
+                df_15m=df_15m,
             )
 
             # Sync trail stop level to position and broker

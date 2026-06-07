@@ -144,6 +144,29 @@ def compute_liquidity_sweep(
     return signal, reclaim
 
 
+# ── Pivot Distance (Order Block / Liquidity Pool proxy) ─────────────────────
+def compute_pivot_distance(
+    df: pd.DataFrame,
+    window: int = 20,
+) -> tuple[pd.Series, pd.Series]:
+    """
+    Compute distance to the nearest swing high and swing low.
+    This acts as a proxy for distance to nearest Order Block or Liquidity Pool.
+    
+    Returns:
+        Tuple of (dist_to_high_pct, dist_to_low_pct).
+        Values are positive percentages.
+    """
+    pivot_high = df["high"].shift(1).rolling(window).max()
+    pivot_low = df["low"].shift(1).rolling(window).min()
+    close = df["close"].replace(0, np.nan)
+    
+    dist_high = ((pivot_high - close) / close).clip(lower=0).fillna(0.0)
+    dist_low = ((close - pivot_low) / close).clip(lower=0).fillna(0.0)
+    
+    return dist_high, dist_low
+
+
 # ── Structural Confluence ───────────────────────────────────────────────────
 def compute_structural_confluence(
     fvg_signal: pd.Series,
@@ -174,6 +197,95 @@ def compute_structural_confluence(
     )
 
 
+# ── True Liquidity Sweeps / Stop Runs (Advanced SMC) ────────────────────────
+def detect_liquidity_pools(
+    df: pd.DataFrame,
+    left_bars: int = 5,
+    right_bars: int = 2
+) -> tuple[pd.Series, pd.Series]:
+    """
+    Detects true structural swing highs and lows (fractals).
+    A true swing high is higher than the `left_bars` before it and `right_bars` after it.
+    
+    Returns:
+        Tuple of (swing_highs, swing_lows) where values are the price levels.
+        Empty or non-swing bars are NaN.
+    """
+    high = df['high']
+    low = df['low']
+    
+    # Use rolling window to check if current bar is local max/min
+    window = left_bars + right_bars + 1
+    
+    # We shift the rolling max backwards so the current index aligns with the center
+    local_max = high.rolling(window=window, center=False).max().shift(-right_bars)
+    local_min = low.rolling(window=window, center=False).min().shift(-right_bars)
+    
+    is_swing_high = (high == local_max)
+    is_swing_low = (low == local_min)
+    
+    swing_highs = pd.Series(np.nan, index=df.index)
+    swing_lows = pd.Series(np.nan, index=df.index)
+    
+    swing_highs[is_swing_high] = high[is_swing_high]
+    swing_lows[is_swing_low] = low[is_swing_low]
+    
+    # Forward fill to carry the liquidity pool level forward in time
+    return swing_highs.ffill(), swing_lows.ffill()
+
+def detect_stop_runs(df: pd.DataFrame, swing_highs: pd.Series, swing_lows: pd.Series) -> tuple[pd.Series, pd.Series]:
+    """
+    Detects when price sweeps a mapped liquidity pool (stop run) and rejects.
+    
+    Bullish Stop Run: Wick goes below swing low, but candle closes above it.
+    Bearish Stop Run: Wick goes above swing high, but candle closes below it.
+    
+    Returns:
+        Tuple of (bullish_stop_runs, bearish_stop_runs) boolean series.
+    """
+    # We must shift the swing pools by 1 so we don't trigger a sweep on the bar that created the pool
+    prev_swing_highs = swing_highs.shift(1)
+    prev_swing_lows = swing_lows.shift(1)
+    
+    high = df['high']
+    low = df['low']
+    close = df['close']
+    
+    # Bullish stop run: Low pierced previous swing low, but closed above it
+    bullish_run = (low < prev_swing_lows) & (close > prev_swing_lows)
+    
+    # Bearish stop run: High pierced previous swing high, but closed below it
+    bearish_run = (high > prev_swing_highs) & (close < prev_swing_highs)
+    
+    return bullish_run, bearish_run
+
+# ── True Order Block (OB) Detection ───────────────────────────────────────────
+def compute_order_blocks(df: pd.DataFrame, bos_signal: pd.Series) -> tuple[pd.Series, pd.Series]:
+    """
+    Detects true Order Blocks based on BOS signals.
+    Bullish OB: Last down candle before a Bullish BOS.
+    Bearish OB: Last up candle before a Bearish BOS.
+    
+    Returns:
+        Tuple of (dist_bull_ob, dist_bear_ob) as percentages.
+    """
+    is_down = df['close'] < df['open']
+    is_up = df['close'] > df['open']
+    
+    last_down_high = df['high'].where(is_down, np.nan).ffill()
+    last_up_low = df['low'].where(is_up, np.nan).ffill()
+    
+    bull_ob_high = last_down_high.shift(1).where(bos_signal == 1.0, np.nan)
+    bear_ob_low = last_up_low.shift(1).where(bos_signal == -1.0, np.nan)
+    
+    active_bull_ob_high = bull_ob_high.ffill()
+    active_bear_ob_low = bear_ob_low.ffill()
+    
+    dist_bull_ob = ((df['close'] - active_bull_ob_high) / df['close']).fillna(0.0)
+    dist_bear_ob = ((active_bear_ob_low - df['close']) / df['close']).fillna(0.0)
+    
+    return dist_bull_ob, dist_bear_ob
+
 # ── Utility: Build All Structure Features ───────────────────────────────────
 def build_structure_features(
     df: pd.DataFrame,
@@ -196,6 +308,7 @@ def build_structure_features(
     fvg_sig, fvg_pct = compute_fvg(out)
     bos_sig, bos_str = compute_bos(out, bos_window)
     sweep_sig, sweep_rcl = compute_liquidity_sweep(out, sweep_window)
+    dist_high, dist_low = compute_pivot_distance(out, bos_window)
 
     out["fvg_signal"] = fvg_sig
     out["fvg_gap_pct"] = fvg_pct
@@ -203,6 +316,28 @@ def build_structure_features(
     out["structure_break_strength"] = bos_str
     out["liquidity_sweep_signal"] = sweep_sig
     out["liquidity_reclaim_strength"] = sweep_rcl
+    out["dist_to_pivot_high"] = dist_high
+    out["dist_to_pivot_low"] = dist_low
     out["structural_confluence"] = compute_structural_confluence(fvg_sig, bos_sig)
+
+    # Advanced SMC True Liquidity Sweeps
+    swing_highs, swing_lows = detect_liquidity_pools(out)
+    bull_run, bear_run = detect_stop_runs(out, swing_highs, swing_lows)
+    out["true_liquidity_pool_high"] = swing_highs
+    out["true_liquidity_pool_low"] = swing_lows
+    
+    # Advanced SMC Order Blocks
+    ob_bull_dist, ob_bear_dist = compute_order_blocks(out, bos_sig)
+    out["OB_bull_dist"] = ob_bull_dist
+    out["OB_bear_dist"] = ob_bear_dist
+    
+    out["bullish_stop_run"] = bull_run.astype(float)
+    out["bearish_stop_run"] = bear_run.astype(float)
+
+    # --- Phase 3 Advanced Features ---
+    # 7. Liquidity Sweep 1H (Proxy: 60-period sweep signal)
+    sweep_sig_1h, _ = compute_liquidity_sweep(out, 60)
+    out["Liquidity_Sweep_1H"] = sweep_sig_1h
+
 
     return out

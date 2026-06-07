@@ -221,11 +221,8 @@ class ApexXGBoostModel(BaseModel):
 
         raw_prob = self._model.predict_proba(X_ordered)[:, 1]
 
-        # Calibrate
-        if self._calibrator.is_fitted:
-            calibrated = self._calibrator.calibrate(raw_prob)
-            return float(calibrated[0])
-
+        # Calibration DISABLED — isotonic calibration squashes variance to near-zero
+        # Raw XGBoost probabilities retain signal variance needed for thresholding
         return float(raw_prob[0])
 
     def predict_batch(self, X: pd.DataFrame) -> pd.Series:
@@ -244,10 +241,7 @@ class ApexXGBoostModel(BaseModel):
         X_ordered = X[self._feature_columns].copy()
         raw_probs = self._model.predict_proba(X_ordered)[:, 1]
 
-        if self._calibrator.is_fitted:
-            calibrated = self._calibrator.calibrate(raw_probs)
-            return pd.Series(calibrated, index=X.index)
-
+        # Calibration DISABLED — return raw probabilities with full variance
         return pd.Series(raw_probs, index=X.index)
 
     def get_feature_importance(self) -> dict[str, float]:

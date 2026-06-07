@@ -40,6 +40,7 @@ class WeightingMethod(str, Enum):
     EQUAL = "equal"
     PERFORMANCE = "performance"
     REGIME = "regime"
+    RL = "rl"
 
 
 @dataclass
@@ -113,6 +114,11 @@ class ModelEnsemble:
         self.min_weight = min_weight
         self.disagreement_penalty = disagreement_penalty
         self._members: list[EnsembleMember] = []
+        self._rl_weights: dict[str, float] = {}
+
+    def set_rl_weights(self, weights: dict[str, float]) -> None:
+        """Inject explicit weights dynamically from the RL Meta-Controller."""
+        self._rl_weights = weights
 
     @property
     def num_members(self) -> int:
@@ -226,6 +232,10 @@ class ModelEnsemble:
                 return base_weight * 1.0  # Neutral for general models
             else:
                 return base_weight * 0.5  # Penalty for wrong-regime model
+                
+        elif self.weighting == WeightingMethod.RL:
+            # RL agent explicitly sets the weight dynamically
+            return self._rl_weights.get(member.model.model_name, self.min_weight)
 
         return 1.0
 

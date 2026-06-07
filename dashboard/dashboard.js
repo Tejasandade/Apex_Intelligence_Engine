@@ -32,7 +32,9 @@ const $ = (id) => document.getElementById(id);
 
 // ── WebSocket Connection ─────────────────────────────────────────────────────
 let ws = null;
-const WS_URL = 'ws://localhost:8765';
+const urlParams = new URLSearchParams(window.location.search);
+const wsPort = urlParams.get('port') || '8765';
+const WS_URL = `ws://localhost:${wsPort}`;
 
 function connectWebSocket() {
     try {
@@ -134,6 +136,11 @@ function updateStatus(data) {
     state.adx = data.adx || 0;
     state.signals = data.signals || 0;
     state.candles = data.candles || 0;
+    state.currency = data.currency || '$';
+    
+    if (data.initial_balance) {
+        state.initialBalance = data.initial_balance;
+    }
     
     // Cooldown status
     if (data.cooldown_remaining && data.cooldown_remaining > 0) {
@@ -188,20 +195,59 @@ function addSignal(data) {
     const arrow = dir === 'BUY' ? '▲' : '▼';
     const icon = blocked ? '🚫' : (dir === 'BUY' ? '🟢' : '🔴');
 
+    const priceStr = `${state.currency || '$'}${(data.price || 0).toLocaleString(undefined, {minimumFractionDigits: 2})}`;
+    const convStr = `${((data.conviction || 0) * 100).toFixed(1)}%`;
+    const councilStr = `${((data.council_score || 0) * 100).toFixed(0)}%`;
+
     const card = document.createElement('div');
     card.className = `signal-card signal-card--${cls}`;
+    
+    // Format reason text to look like a terminal log if it's long
+    let reasonHtml = '';
+    if (data.reason) {
+        if (data.reason.length > 100) {
+            let formattedReason = data.reason;
+            if (formattedReason.includes('[Vote.')) {
+                formattedReason = formattedReason
+                    .replace(/\[Vote\.APPROVE\]/g, '<span class="log-badge log-badge--approve">APPROVE</span>')
+                    .replace(/\[Vote\.REJECT\]/g, '<span class="log-badge log-badge--reject">REJECT</span>')
+                    .replace(/\[Vote\.ABSTAIN\]/g, '<span class="log-badge log-badge--abstain">ABSTAIN</span>')
+                    .replace(/❌/g, '<span style="color:var(--red);">❌</span>')
+                    .replace(/✅/g, '<span style="color:var(--green);">✅</span>')
+                    .replace(/⚪/g, '<span style="color:var(--blue);">⚪</span>')
+                    .replace(/ \| /g, '<br><span style="color:var(--text-muted); opacity: 0.5; margin-right: 6px;">|</span>');
+            }
+            reasonHtml = `<div class="signal-card__reason signal-card__reason--log">${formattedReason}</div>`;
+        } else {
+            reasonHtml = `<div class="signal-card__reason">${data.reason}</div>`;
+        }
+    }
+
     card.innerHTML = `
         <div class="signal-card__header">
-            <span class="signal-card__direction">${icon} ${arrow} ${dir} ${(data.symbol || 'BTCUSDT').toUpperCase()}</span>
+            <div class="signal-card__badge-group">
+                <span class="signal-badge signal-badge--${cls}">
+                    ${icon} ${dir} ${(data.symbol || 'BTCUSDT').toUpperCase()}
+                </span>
+                ${blocked ? '<span class="signal-badge signal-badge--blocked-tag">VETOED</span>' : '<span class="signal-badge signal-badge--approved-tag">APPROVED</span>'}
+            </div>
             <span class="signal-card__time">${new Date().toLocaleTimeString()}</span>
         </div>
-        <div class="signal-card__details">
-            <span>Price: $${(data.price || 0).toLocaleString(undefined, {minimumFractionDigits: 2})}</span>
-            <span>Conv: ${((data.conviction || 0) * 100).toFixed(1)}%</span>
-            <span>Council: ${((data.council_score || 0) * 100).toFixed(0)}%</span>
+        <div class="signal-card__metrics">
+            <div class="signal-metric">
+                <span class="signal-metric__label">PRICE</span>
+                <span class="signal-metric__value">${priceStr}</span>
+            </div>
+            <div class="signal-metric">
+                <span class="signal-metric__label">CONVICTION</span>
+                <span class="signal-metric__value">${convStr}</span>
+            </div>
+            <div class="signal-metric">
+                <span class="signal-metric__label">COUNCIL</span>
+                <span class="signal-metric__value">${councilStr}</span>
+            </div>
         </div>
-        ${blocked ? '<div class="signal-card__reason">Blocked by Council</div>' : ''}
-        ${data.reason ? `<div class="signal-card__reason">${data.reason}</div>` : ''}
+        ${reasonHtml}
     `;
 
     feed.insertBefore(card, feed.firstChild);
@@ -217,22 +263,41 @@ function addSignal(data) {
 function updateCouncil(data) {
     state.lastCouncil = data;
     const votes = data.votes || {};
-    const advisorMap = {
-        'Momentum': 'adv-momentum',
-        'Structure': 'adv-structure',
-        'Volume': 'adv-volume',
-        'Regime': 'adv-regime',
-        'Risk': 'adv-risk',
-    };
+    const grid = document.querySelector('.advisor-grid');
+    if (grid) {
+        // Build dynamic HTML for advisors based on payload
+        let html = '';
+        for (const [name, voteObj] of Object.entries(votes)) {
+            const v = voteObj.vote || 'ABSTAIN';
+            const iconStr = v === 'APPROVE' ? '✅' : v === 'REJECT' ? '❌' : '⚪';
+            const vClass = `advisor__vote--${v.toLowerCase()}`;
+            const w = voteObj.weight ? voteObj.weight.toFixed(1) : '1.0';
+            
+            // Map simple icon (fallback to abstract)
+            let icon = '🏛️';
+            if (name.includes('Momentum')) icon = '📈';
+            else if (name.includes('Structure')) icon = '🏗️';
+            else if (name.includes('Volume')) icon = '📊';
+            else if (name.includes('Regime')) icon = '🌊';
+            else if (name.includes('Risk')) icon = '🛡️';
+            else if (name.includes('Session')) icon = '⏱️';
+            else if (name.includes('VIX')) icon = '⚡';
 
-    for (const [name, vote] of Object.entries(votes)) {
-        const el = $(advisorMap[name]);
-        if (!el) continue;
-
-        const voteEl = el.querySelector('.advisor__vote');
-        const v = vote.vote || 'ABSTAIN';
-        voteEl.textContent = v === 'APPROVE' ? '✅' : v === 'REJECT' ? '❌' : '⚪';
-        voteEl.className = `advisor__vote advisor__vote--${v.toLowerCase()}`;
+            html += `
+                <div class="advisor">
+                    <div class="advisor__icon">${icon}</div>
+                    <div class="advisor__name" style="font-size: 0.65rem; word-break: break-word; line-height: 1.1; margin-bottom: 4px;">${name.replace('Advisor', '')}</div>
+                    <div class="advisor__vote ${vClass}">${iconStr}</div>
+                    <div class="advisor__weight">w=${w}</div>
+                </div>
+            `;
+        }
+        grid.innerHTML = html;
+        // Dynamically adjust grid columns if there are more than 5 advisors
+        const numAdvisors = Object.keys(votes).length;
+        if (numAdvisors > 5) {
+            grid.style.gridTemplateColumns = `repeat(${numAdvisors}, 1fr)`;
+        }
     }
 
     // Update consensus bar
@@ -241,7 +306,7 @@ function updateCouncil(data) {
     $('consensusScore').textContent = `${(score * 100).toFixed(1)}% — ${data.approved ? 'APPROVED' : 'REJECTED'}`;
     $('consensusScore').style.color = data.approved ? 'var(--green)' : 'var(--red)';
 
-    $('councilBadge').textContent = data.summary || '5 Advisors';
+    $('councilBadge').textContent = data.summary || `${Object.keys(votes).length} Advisors`;
 }
 
 function updateEnsemble(data) {
@@ -267,44 +332,56 @@ function updatePosition(data) {
     const badge = $('positionBadge');
 
     const dir = data.direction || 'LONG';
-    badge.textContent = `${dir} ${(data.symbol || '').toUpperCase()}`;
-    badge.style.color = dir === 'LONG' || dir === 'BUY' ? 'var(--green)' : 'var(--red)';
-    
+    const isLong = (dir === 'LONG' || dir === 'BUY');
+    badge.innerHTML = `<span class="signal-badge signal-badge--${isLong ? 'buy' : 'sell'}">${isLong ? '🟢 BUY' : '🔴 SELL'} ${(data.symbol || '').toUpperCase()}</span>`;
+    badge.className = ""; // clear default padding
+
     let trailHtml = '';
     if (data.trail_phase && data.trail_phase !== 'INITIAL') {
-        const phaseColor = data.trail_phase === 'BREAKEVEN' ? '#F59E0B' : '#10B981'; // yellow / green
-        trailHtml = `<div style="color: ${phaseColor}; font-size: 11px; margin-top: 2px; font-weight: 600;">⚡ ${data.trail_phase}</div>`;
+        const phaseColor = data.trail_phase === 'BREAKEVEN' ? '#F59E0B' : '#10B981';
+        trailHtml = `<div class="position-hud__trail" style="color: ${phaseColor}; border-color: ${phaseColor}40; background: ${phaseColor}15;">⚡ ${data.trail_phase}</div>`;
     }
 
     panel.innerHTML = `
-        <div class="position-card">
-            <div class="position-card__row">
-                <span class="position-card__label">Entry</span>
-                <span class="position-card__value">$${(data.entry_price || 0).toLocaleString(undefined, {minimumFractionDigits: 2})}</span>
+        <div class="position-hud">
+            <div class="position-hud__metrics">
+                <div class="signal-metric">
+                    <span class="signal-metric__label">ENTRY PRICE</span>
+                    <span class="signal-metric__value">${state.currency || '$'}${(data.entry_price || 0).toLocaleString(undefined, {minimumFractionDigits: 2})}</span>
+                </div>
+                <div class="signal-metric" style="text-align: right;">
+                    <span class="signal-metric__label">CURRENT PRICE</span>
+                    <span class="signal-metric__value" id="positionCurrentPrice">${state.currency || '$'}${(data.current_price || data.entry_price || 0).toLocaleString(undefined, {minimumFractionDigits: 2})}</span>
+                </div>
             </div>
-            <div class="position-card__row">
-                <span class="position-card__label">Current</span>
-                <span class="position-card__value">$${(data.current_price || data.entry_price || 0).toLocaleString(undefined, {minimumFractionDigits: 2})}</span>
+
+            <div class="position-hud__visual">
+                <div class="position-hud__target position-hud__target--sl">
+                    <span class="position-hud__target-label">SL</span>
+                    <span class="position-hud__target-price">${state.currency || '$'}${(data.stop_loss || 0).toLocaleString(undefined, {minimumFractionDigits: 2})}</span>
+                </div>
+                <div class="position-hud__line">
+                    <div class="position-hud__glow-dot"></div>
+                </div>
+                <div class="position-hud__target position-hud__target--tp">
+                    <span class="position-hud__target-label">TP</span>
+                    <span class="position-hud__target-price">${state.currency || '$'}${(data.take_profit || 0).toLocaleString(undefined, {minimumFractionDigits: 2})}</span>
+                </div>
             </div>
-            <div class="position-card__row">
-                <span class="position-card__label">Stop Loss ${trailHtml}</span>
-                <span class="position-card__value" style="color: var(--red)">$${(data.stop_loss || 0).toLocaleString(undefined, {minimumFractionDigits: 2})}</span>
+            ${trailHtml}
+
+            <div class="position-hud__pnl-container">
+                <div class="position-hud__pnl-label">UNREALIZED P&L</div>
+                <div class="position-hud__pnl" id="positionPnl">${state.currency || '$'}0.00</div>
             </div>
-            <div class="position-card__row">
-                <span class="position-card__label">Take Profit</span>
-                <span class="position-card__value" style="color: var(--green)">$${(data.take_profit || 0).toLocaleString(undefined, {minimumFractionDigits: 2})}</span>
-            </div>
-            <div class="position-card__pnl" id="positionPnl">$0.00</div>
         </div>
     `;
 }
 
 function updateTick(data) {
-    if (data.current_price) {
-        const livePriceEl = document.getElementById('livePrice');
-        if (livePriceEl) {
-            livePriceEl.textContent = `Live Price: $${data.current_price.toLocaleString(undefined, {minimumFractionDigits: 2})}`;
-        }
+    const livePriceEl = $('livePrice');
+    if (livePriceEl && data.current_price) {
+        livePriceEl.innerHTML = `LIVE PRICE: ${state.currency || '$'}${data.current_price.toLocaleString(undefined, {minimumFractionDigits: 2})}`;
     }
 
     if (state.position) {
@@ -313,14 +390,31 @@ function updateTick(data) {
         const pnlEl = document.getElementById('positionPnl');
         if (pnlEl) {
             pnlEl.textContent = formatCurrency(pnl, true);
-            pnlEl.className = `position-card__pnl ${pnl >= 0 ? 'positive' : 'negative'}`;
+            pnlEl.className = `position-hud__pnl ${pnl >= 0 ? 'positive' : 'negative'}`;
         }
         
         // Update Current Price
         if (data.current_price) {
-            const priceEl = document.querySelector('.position-card__row:nth-child(2) .position-card__value');
+            const priceEl = document.getElementById('positionCurrentPrice');
             if (priceEl) {
-                priceEl.textContent = `$${data.current_price.toLocaleString(undefined, {minimumFractionDigits: 2})}`;
+                priceEl.textContent = `${state.currency || '$'}${data.current_price.toLocaleString(undefined, {minimumFractionDigits: 2})}`;
+            }
+            
+            // Animate Glow Dot
+            if (state.position.stop_loss && state.position.take_profit) {
+                const sl = state.position.stop_loss;
+                const tp = state.position.take_profit;
+                const current = data.current_price;
+                
+                const dot = document.querySelector('.position-hud__glow-dot');
+                if (dot) {
+                    const totalRange = Math.abs(tp - sl);
+                    if (totalRange > 0) {
+                        let pct = Math.abs(current - sl) / totalRange;
+                        pct = Math.max(0, Math.min(1, pct));
+                        dot.style.left = `${pct * 100}%`;
+                    }
+                }
             }
         }
     }
@@ -367,7 +461,7 @@ function addTradeCard(data) {
                 <span style="font-size: 0.65rem; color: var(--text-muted)">${data.side || 'SHORT'}</span>
             </div>
             <div class="trade-card__meta">
-                $${(data.entry_price || 0).toFixed(2)} → $${(data.exit_price || 0).toFixed(2)}
+                ${state.currency || '$'}${(data.entry_price || 0).toFixed(2)} → ${state.currency || '$'}${(data.exit_price || 0).toFixed(2)}
                 · ${Math.round(data.duration_seconds || 0)}s
             </div>
         </div>
@@ -385,7 +479,8 @@ function addTradeCard(data) {
 
 function formatCurrency(val, signed = false) {
     const abs = Math.abs(val);
-    const formatted = '$' + abs.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const curr = state.currency || '$';
+    const formatted = curr + abs.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     if (signed) {
         return val >= 0 ? '+' + formatted : '-' + formatted;
     }

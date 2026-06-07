@@ -39,6 +39,7 @@ from src.council.advisors import (
     VolumeAdvisor,
     RegimeAdvisor,
     RiskAdvisor,
+    SessionAdvisor,
 )
 from src.core.logging import get_logger
 
@@ -55,18 +56,21 @@ class Council:
 
     def __init__(
         self,
-        consensus_threshold: float = 0.60,
+        consensus_threshold: float = 0.50,
         min_voting_advisors: int = 3,
         enable_veto: bool = True,
+        scalp_mode: bool = False,
     ):
         """
         Args:
             consensus_threshold: Min weighted approval ratio to approve [0, 1].
             min_voting_advisors: Min advisors that must vote (not abstain).
             enable_veto: If True, Risk advisor REJECT blocks everything.
+            scalp_mode: If True, lowers thresholds and bypasses strict trend/volume constraints.
         """
-        self.consensus_threshold = consensus_threshold
-        self.min_voting_advisors = min_voting_advisors
+        self.scalp_mode = scalp_mode
+        self.consensus_threshold = 0.40 if scalp_mode else consensus_threshold
+        self.min_voting_advisors = 2 if scalp_mode else min_voting_advisors
         self.enable_veto = enable_veto
 
         # Advisors (initialized with default weights)
@@ -80,18 +84,41 @@ class Council:
 
     def setup_default_advisors(self) -> None:
         """Initialize the standard 5-advisor council."""
-        self._risk_advisor = RiskAdvisor(weight=2.0)
+        self._risk_advisor = RiskAdvisor(weight=0.0)
 
         self.advisors = [
             MomentumAdvisor(weight=1.5),
             StructureAdvisor(weight=1.2),
             VolumeAdvisor(weight=1.0),
             RegimeAdvisor(weight=1.3),
+            SessionAdvisor(weight=1.0),
             self._risk_advisor,
         ]
 
         logger.info(
             "council_initialized",
+            advisors=[a.name for a in self.advisors],
+            weights=[a.weight for a in self.advisors],
+            threshold=self.consensus_threshold,
+        )
+
+    def setup_india_advisors(self, broker: Any = None) -> None:
+        """Initialize the India-specific council."""
+        from src.council.advisors_india import IndiaSessionAdvisor, IndiaVIXAdvisor
+        
+        self._risk_advisor = RiskAdvisor(weight=2.0)
+
+        self.advisors = [
+            MomentumAdvisor(weight=1.5),
+            StructureAdvisor(weight=1.2),
+            RegimeAdvisor(weight=1.3),
+            IndiaSessionAdvisor(weight=1.5),
+            IndiaVIXAdvisor(broker=broker, weight=1.2),
+            self._risk_advisor,
+        ]
+
+        logger.info(
+            "india_council_initialized",
             advisors=[a.name for a in self.advisors],
             weights=[a.weight for a in self.advisors],
             threshold=self.consensus_threshold,
@@ -136,6 +163,7 @@ class Council:
                     price=price,
                     regime=regime,
                     atr=atr,
+                    scalp_mode=self.scalp_mode,
                     **kwargs,
                 )
                 votes.append(vote)
@@ -159,9 +187,9 @@ class Council:
             for vote in votes:
                 # Risk advisor always has veto power
                 is_veto = (vote.advisor_name == "Risk" and vote.vote == Vote.REJECT)
-                
-                # Volume advisor has veto power if it strongly disagrees
-                if vote.advisor_name == "Volume" and vote.vote == Vote.REJECT and vote.conviction >= 0.6:
+                    
+                # IndiaSessionAdvisor always has veto power
+                if vote.advisor_name == "IndiaSessionAdvisor" and vote.vote == Vote.REJECT:
                     is_veto = True
                 
                 if is_veto:
@@ -219,10 +247,34 @@ class Council:
         # ── Build explanation ────────────────────────────────────────────────
         explanation = self._build_explanation(votes, consensus, approved, direction)
 
+        trade_type = "SCALP"
+        if approved:
+            # Handle both DataFrame and dict feature inputs
+            if hasattr(features, "iloc"):
+                row = features.iloc[-1]
+            else:
+                row = features
+                
+            # Dynamic Trade Type routing based on structure & sentiment
+            confluence = float(row.get("structural_confluence", 0.0))
+            sentiment = float(row.get("macro_sentiment_score", 0.0))
+            vwap_z = float(row.get("VWAP_zscore", 0.0))
+            
+            # SWING if structure strongly aligns with direction
+            if direction == "BUY" and (confluence > 0.5 or sentiment > 0.5):
+                trade_type = "SWING"
+            elif direction == "SELL" and (confluence < -0.5 or sentiment < -0.5):
+                trade_type = "SWING"
+            
+            # Revert to SCALP if extended from VWAP (mean-reversion risk)
+            if abs(vwap_z) > 2.0:
+                trade_type = "SCALP"
+
         decision = CouncilDecision(
             approved=approved,
             direction=direction,
             consensus_score=consensus,
+            trade_type=trade_type,
             votes=votes,
             total_weight_approve=weight_approve,
             total_weight_reject=weight_reject,
