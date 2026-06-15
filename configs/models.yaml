@@ -1,88 +1,114 @@
-# ============================================================================
-# Apex Intelligence Engine V5 — Model Configuration
-# ============================================================================
-
-# Per-market model configurations
+council_weights:
+  btcusdt:
+    council_threshold: 0.50
+    weight_momentum: 0.6000000000000001
+    weight_regime: 2.6
+    weight_session: 0.8
+    weight_structure: 2.0
+    weight_volume: 0.8
+  default:
+    council_threshold: 0.50
+    weight_momentum: 1.0
+    weight_regime: 2.0
+    weight_session: 1.0
+    weight_structure: 2.5
+    weight_volume: 1.0
+  ethusdt:
+    council_threshold: 0.50
+    weight_momentum: 1.0
+    weight_regime: 2.0
+    weight_session: 1.0
+    weight_structure: 2.5
+    weight_volume: 1.0
+crypto:
+  hyperparameters:
+    colsample_bytree: 0.6230987571672704
+    gamma: 2.236953614293645
+    learning_rate: 0.005837778509335305
+    max_depth: 5
+    min_child_weight: 10
+    reg_alpha: 0.7226073795144563
+    reg_lambda: 5.922279459889946
+    subsample: 0.8706186344220896
+decay_detection:
+  cusum_threshold: 5.0
+  rolling_accuracy_window: 50
+  shap_drift_alert_pct: 0.3
+  shap_drift_window_days: 30
 models:
   crypto:
     algorithm: xgboost
+    calibration:
+      cv_folds: 3
+      method: isotonic
     hyperparameters:
-      n_estimators: 500
+      colsample_bytree: 0.6
+      early_stopping_rounds: 30
+      eval_metric: logloss
+      gamma: 0.5
       learning_rate: 0.01
       max_depth: 4
       min_child_weight: 10
-      subsample: 0.7
-      colsample_bytree: 0.6
-      gamma: 0.5
+      n_estimators: 500
       reg_alpha: 1.0
       reg_lambda: 5.0
-      eval_metric: logloss
-      early_stopping_rounds: 30
-    training:
-      lookback_days: 90
-      candle_interval: "1m"
-      total_candles: 50000
-      fetch_batch: 1000
-      cv_folds: 5
-      purge_gap: 15
+      subsample: 0.7
     labeling:
+      max_holding_bars: 45
       method: triple_barrier
-      profit_target_atr: 3.0     # Massive structural runner target
-      stop_loss_atr: 2.0         # Wide stop to avoid premature exits
-      max_holding_bars: 45       # Longer holding time to let the 3.0 ATR move develop
-    calibration:
-      method: isotonic
-      cv_folds: 3
+      profit_target_atr: 3.0
+      stop_loss_atr: 2.0
     regime_split: true
     regime_thresholds:
       adx_trending: 25.0
       chop_choppy: 61.8
-
+    training:
+      candle_interval: 1m
+      cv_folds: 5
+      fetch_batch: 1000
+      lookback_days: 90
+      purge_gap: 15
+      total_candles: 50000
   india_equity:
     algorithm: xgboost
+    calibration:
+      cv_folds: 3
+      method: isotonic
     hyperparameters:
-      n_estimators: 250
+      colsample_bytree: 0.8
+      early_stopping_rounds: 15
+      eval_metric: logloss
+      gamma: 0.15
       learning_rate: 0.03
       max_depth: 5
       min_child_weight: 5
-      subsample: 0.8
-      colsample_bytree: 0.8
-      gamma: 0.15
+      n_estimators: 250
       reg_alpha: 0.2
       reg_lambda: 1.5
-      eval_metric: logloss
-      early_stopping_rounds: 15
-    training:
-      lookback_days: 60
-      candle_interval: "1m"
-      total_candles: 30000
-      fetch_batch: 500
-      cv_folds: 5
-      purge_gap: 15
+      subsample: 0.8
     labeling:
+      max_holding_bars: 15
       method: triple_barrier
-      profit_target_pct: 0.0018  # +0.18% (BankNifty has tighter moves)
-      stop_loss_pct: 0.0012      # -0.12%
-      max_holding_bars: 15       # Shorter holding for session-bound market
-    calibration:
-      method: isotonic
-      cv_folds: 3
+      profit_target_pct: 0.0018
+      stop_loss_pct: 0.0012
     regime_split: true
     regime_thresholds:
       adx_trending: 25.0
       chop_choppy: 61.8
-
-# Model quality gates — must pass to be deployed
+    training:
+      candle_interval: 1m
+      cv_folds: 5
+      fetch_batch: 500
+      lookback_days: 60
+      purge_gap: 15
+      total_candles: 30000
 quality_gates:
-  min_sharpe: 1.5
   max_drawdown_pct: 0.15
-  min_win_rate: 0.40            # With R:R > 1.5, 40% win rate is profitable
   min_profit_factor: 1.3
-  min_samples: 200              # Minimum trades in backtest
-
-# Decay detection
-decay_detection:
-  cusum_threshold: 5.0          # CUSUM drift threshold
-  shap_drift_window_days: 30
-  shap_drift_alert_pct: 0.30    # Alert if top-5 feature importance drifts >30%
-  rolling_accuracy_window: 50   # Rolling window for accuracy monitoring
+  min_samples: 200
+  min_sharpe: 1.5
+  min_win_rate: 0.4
+trade_management:
+  breakeven: 1.5
+  trail_mult: 2.0
+  trail_trigger: 1.5

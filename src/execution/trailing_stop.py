@@ -62,10 +62,10 @@ class TrailPhase(str, Enum):
 
 # Regime → trail multiplier (× ATR)
 REGIME_TRAIL_MULTIPLIERS: dict[str, float] = {
-    "TRENDING": 3.0,   # Tighter than 3.5, but looser than 2.5
-    "RANGING": 2.0,    # Room for chops
-    "VOLATILE": 4.0,   # Wide — avoid noise
-    "QUIET": 2.0,      # Tight trail
+    "TRENDING": 1.5,   # Aggressive ratcheting for runners
+    "RANGING": 1.2,    # Tight for chops
+    "VOLATILE": 2.5,   # Slightly wider for noise
+    "QUIET": 1.0,      # Extremely tight
 }
 
 # Default trail multiplier if regime is unknown
@@ -73,21 +73,21 @@ DEFAULT_TRAIL_MULTIPLIER = 2.0
 
 # Regime-aware breakeven and trailing trigger thresholds (in ATR multiples)
 REGIME_BREAKEVEN_TRIGGERS: dict[str, float] = {
-    "TRENDING": 1.5,   
-    "RANGING": 1.5,    
-    "VOLATILE": 1.5,   
-    "QUIET": 1.5,      
+    "TRENDING": 0.75,   # Was 1.0 — move to breakeven faster in trends
+    "RANGING": 1.0,     # Was 2.0 — stop giving back profits in chop
+    "VOLATILE": 1.0,    # Was 1.5
+    "QUIET": 0.75,      # Was 1.5
 }
 
 REGIME_TRAILING_TRIGGERS: dict[str, float] = {
-    "TRENDING": 2.0,  
-    "RANGING": 2.0,   
-    "VOLATILE": 2.0,   
-    "QUIET": 2.0,      
+    "TRENDING": 1.25,  # Was 1.5 — start locking profit sooner
+    "RANGING": 1.5,    # Was 3.0 — much tighter in chop
+    "VOLATILE": 1.5,   # Was 2.0
+    "QUIET": 1.25,     # Was 2.0
 }
 
 # Regimes where scale-out is disabled (scalp mode takes full profit)
-SCALP_REGIMES = set() # Always scale out!
+SCALP_REGIMES = {"RANGING", "RANGING_LOW_VOL", "RANGING_HIGH_VOL", "QUIET"}
 
 # 100% Runner Strategy: No scale-outs. Hold 100% of the position to capture massive runners.
 SCALE_OUT_MILESTONES: list[tuple[float, float]] = []
@@ -150,6 +150,9 @@ class SmartTrailingStop:
         trailing_trigger_atr: float = 1.0,
         default_trail_multiplier: float = DEFAULT_TRAIL_MULTIPLIER,
         enable_scale_out: bool = True,
+        dynamic_breakeven_triggers: dict[str, float] | None = None,
+        dynamic_trailing_triggers: dict[str, float] | None = None,
+        dynamic_trail_multipliers: dict[str, float] | None = None,
     ):
         """
         Args:
@@ -162,6 +165,10 @@ class SmartTrailingStop:
         self.trailing_trigger_atr = trailing_trigger_atr
         self.default_trail_multiplier = default_trail_multiplier
         self.enable_scale_out = enable_scale_out
+        
+        self.dynamic_breakeven = dynamic_breakeven_triggers or REGIME_BREAKEVEN_TRIGGERS
+        self.dynamic_trailing = dynamic_trailing_triggers or REGIME_TRAILING_TRIGGERS
+        self.dynamic_trail_multipliers = dynamic_trail_multipliers or REGIME_TRAIL_MULTIPLIERS
 
         self._states: dict[str, TrailingStopState] = {}
 
@@ -197,9 +204,9 @@ class SmartTrailingStop:
         is_scalp = regime_upper in SCALP_REGIMES
 
         # Set regime-adaptive thresholds
-        be_trigger = REGIME_BREAKEVEN_TRIGGERS.get(regime_upper, self.breakeven_trigger_atr)
-        trail_trigger = REGIME_TRAILING_TRIGGERS.get(regime_upper, self.trailing_trigger_atr)
-        trail_mult = REGIME_TRAIL_MULTIPLIERS.get(regime_upper, self.default_trail_multiplier)
+        be_trigger = self.dynamic_breakeven.get(regime_upper, self.breakeven_trigger_atr)
+        trail_trigger = self.dynamic_trailing.get(regime_upper, self.trailing_trigger_atr)
+        trail_mult = self.dynamic_trail_multipliers.get(regime_upper, self.default_trail_multiplier)
 
         # --- FEE PROTECTION ---
         # Ensure we don't trigger breakeven before we've even covered commissions

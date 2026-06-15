@@ -35,11 +35,28 @@ from src.dashboard.server import DashboardServer
 
 # India-specific imports
 from src.data.providers.angel_api import AngelApiProvider
+print("DEBUG: Importing HTFOracle...")
+from src.oracle.oracle import HTFOracle, OracleBootError
+print("DEBUG: Importing LiveSignalEngine...")
+from src.engine.signal_engine import LiveSignalEngine, TradingSignal
+print("DEBUG: Importing FeatureStore...")
+from src.features.store import FeatureStore
+print("DEBUG: Importing ApexXGBoostModel...")
+from src.models.xgboost_model import ApexXGBoostModel
+print("DEBUG: Importing RLMetaController...")
+from src.models.rl_agent import RLMetaController
+print("DEBUG: Importing ApexTransformerModel...")
+from src.models.transformer_model import ApexTransformerModel
+
 from src.execution.angel_broker import AngelBroker
 from src.execution.options_router import OptionsRouter
 from src.execution.premium_monitor import PremiumDecayMonitor
-from src.models.xgboost_model import ApexXGBoostModel
-from src.features.store import FeatureStore
+try:
+    print("DEBUG: Importing ApexTransformerModel...")
+    from src.models.transformer_model import ApexTransformerModel
+    HAS_TRANSFORMER = True
+except ImportError:
+    HAS_TRANSFORMER = False
 from src.oracle.oracle import HTFOracle, OracleBootError
 
 logger = get_logger("apex.engine.live_runner")
@@ -86,9 +103,13 @@ class LiveRunner:
         self._broker: PaperBroker | None = None
         self._position_mgr: PositionManager | None = None
         
+        # RL Meta Controller
+        self._rl_agent = RLMetaController(market_type=self.market_type, symbol=self.symbols[0] if self.symbols else "btcusdt")
+        self._rl_agent.load()
+        
         self.asymmetric_mode = asymmetric_mode
         self.scalp_mode = scalp_mode
-        self._initial_balance = 1000.0 if self.asymmetric_mode else (10000.0 if self.market_type == "crypto" else 100000.0)
+        self._initial_balance = 1000.0 if self.market_type == "crypto" else 100000.0
         self._max_positions = 3 if self.market_type == "crypto" else 1
         self._max_drawdown_pct = 15.0
         self._daily_loss_limit = self._initial_balance * 0.15
@@ -135,18 +156,40 @@ class LiveRunner:
             if self.paper_mode:
                 self._broker = PaperBroker(
                     initial_balance=self._initial_balance,
-                    commission_bps=2.0,  # Binance Futures maker fee
+                    maker_fee_bps=2.0,
+                    taker_fee_bps=5.0,
                     slippage_bps=0.5,
                 )
                 await self._broker.connect()
 
-            if self._broker:
+                import yaml
+                config_path = Path("configs/models.yaml")
+                dynamic_breakeven = {"TRENDING": 1.5, "RANGING": 1.5, "VOLATILE": 1.5, "QUIET": 1.5}
+                dynamic_trailing = {"TRENDING": 2.0, "RANGING": 2.0, "VOLATILE": 2.0, "QUIET": 2.0}
+                dynamic_mults = {"TRENDING": 1.5, "RANGING": 1.5, "VOLATILE": 1.5, "QUIET": 1.5}
+
+                if config_path.exists():
+                    with open(config_path, "r") as f:
+                        config = yaml.safe_load(f)
+                        tm = config.get("trade_management", {})
+                        be = tm.get("breakeven", 1.5)
+                        tt = tm.get("trail_trigger", 2.0)
+                        tm_mult = tm.get("trail_mult", 1.5)
+                        
+                        dynamic_breakeven = {k: be for k in dynamic_breakeven}
+                        dynamic_trailing = {k: tt for k in dynamic_trailing}
+                        dynamic_mults = {k: tm_mult for k in dynamic_mults}
+
                 self._position_mgr = PositionManager(
                     broker=self._broker,
                     max_positions=self._max_positions,
                     max_drawdown_pct=self._max_drawdown_pct,
                     daily_loss_limit=self._daily_loss_limit,
                     enable_scale_out=not self.asymmetric_mode,
+                    enable_trailing_stop=True,
+                    dynamic_breakeven_triggers=dynamic_breakeven,
+                    dynamic_trailing_triggers=dynamic_trailing,
+                    dynamic_trail_multipliers=dynamic_mults
                 )
                 await self._position_mgr.initialize()
 
@@ -189,7 +232,7 @@ class LiveRunner:
                 symbol=symbol,
                 market_type=market_feature_type,
                 models=models,
-                conviction_threshold=0.54,
+                conviction_threshold=0.58,
                 risk_per_trade=50.0,  # High-Leverage Futures: Flat $50 risk instead of % of equity
             )
             
@@ -234,27 +277,111 @@ class LiveRunner:
         print("[DIAGNOSTICS] Setup complete. Ready to receive real-time data.")
 
     def _load_models(self, symbol: str) -> dict[str, Any]:
-        """Load trained models for a symbol from disk."""
+        """Load trained models for a symbol from disk. Quality-gate enforced."""
         models: dict[str, Any] = {}
+        quarantined: list[str] = []
         market_feature_type = "india_equity" if self.market_type == "india_options" else "crypto"
         feature_store = FeatureStore(market_feature_type)
 
-        for regime in ["trending", "ranging"]:
-            model_name = f"{symbol}_{market_feature_type}_{regime}"
-            model_path = MODELS_DIR / f"{model_name}.json"
+        for regime in ["trending_high_vol", "trending_low_vol", "ranging_high_vol", "ranging_low_vol"]:
+            # Try loading bagged ensemble members first
+            bagged_found = False
+            for bag_idx in range(1, 4):
+                model_name = f"{symbol}_{market_feature_type}_{regime}_bag{bag_idx}"
+                model_path = MODELS_DIR / f"{model_name}.json"
 
-            if not model_path.exists():
-                continue
+                if model_path.exists():
+                    bagged_found = True
+                    model = ApexXGBoostModel(
+                        name=model_name,
+                        feature_columns=feature_store.feature_columns,
+                    )
+                    model.load(MODELS_DIR)
 
-            model = ApexXGBoostModel(
-                name=model_name,
-                feature_columns=feature_store.feature_columns,
-            )
-            model.load(MODELS_DIR)
-            models[regime] = model
-            logger.info("model_loaded", name=model_name, trained=model.is_trained)
+                    # ── QUALITY GATE: Validate model metadata ──
+                    if self._validate_model_quality(model, model_name):
+                        models[f"{regime}_bag{bag_idx}"] = model
+                        logger.info("model_loaded", name=model_name, trained=model.is_trained)
+                    else:
+                        quarantined.append(model_name)
+            
+            # Fallback to single model if no bags found
+            if not bagged_found:
+                model_name = f"{symbol}_{market_feature_type}_{regime}"
+                model_path = MODELS_DIR / f"{model_name}.json"
+
+                if not model_path.exists():
+                    continue
+
+                model = ApexXGBoostModel(
+                    name=model_name,
+                    feature_columns=feature_store.feature_columns,
+                )
+                model.load(MODELS_DIR)
+
+                # ── QUALITY GATE: Validate model metadata ──
+                if self._validate_model_quality(model, model_name):
+                    models[regime] = model
+                    logger.info("model_loaded", name=model_name, trained=model.is_trained)
+                else:
+                    quarantined.append(model_name)
+
+        # ── Load Transformer Model ──
+        if HAS_TRANSFORMER:
+            transformer_name = f"{symbol}_{market_feature_type}_transformer"
+            transformer_model = ApexTransformerModel.load(name=transformer_name, path=MODELS_DIR)
+            if transformer_model:
+                models["transformer"] = transformer_model
+                logger.info("transformer_model_loaded", name=transformer_name)
+                print(f"[DIAGNOSTICS] Transformer Model successfully loaded.")
+        else:
+            print("[DIAGNOSTICS] PyTorch not installed. Running with XGBoost-only ensemble.")
+
+        if quarantined:
+            print(f"[QUALITY GATE] {len(quarantined)} models quarantined for {symbol}: {quarantined}")
+            logger.warning("models_quarantined", symbol=symbol, count=len(quarantined), models=quarantined)
 
         return models
+
+    def _validate_model_quality(self, model: Any, model_name: str) -> bool:
+        """
+        Quality Gate: Validate a model's training metrics before deployment.
+        Returns True if the model passes minimum quality thresholds.
+        """
+        metadata = getattr(model, 'metadata', {})
+        metrics = metadata.get("metrics", {})
+        
+        if not metrics:
+            # No metadata available — allow (legacy models)
+            logger.debug("model_no_metadata", model=model_name)
+            return True
+        
+        accuracy = metrics.get("accuracy", 0.5)
+        log_loss_val = metrics.get("log_loss", 1.0)
+        
+        # Minimum accuracy: 52% (must be better than random)
+        if accuracy < 0.52:
+            logger.warning(
+                "model_quality_gate_failed",
+                model=model_name,
+                accuracy=f"{accuracy:.4f}",
+                reason="Below 52% accuracy threshold"
+            )
+            print(f"[QUARANTINE] {model_name}: accuracy={accuracy:.4f} < 0.52 — NOT deployed")
+            return False
+        
+        # Maximum log loss: 0.72 (worse than this means model is worse than random)
+        if log_loss_val > 0.72:
+            logger.warning(
+                "model_quality_gate_failed",
+                model=model_name,
+                log_loss=f"{log_loss_val:.4f}",
+                reason="Log loss exceeds 0.72 threshold"
+            )
+            print(f"[QUARANTINE] {model_name}: log_loss={log_loss_val:.4f} > 0.72 — NOT deployed")
+            return False
+        
+        return True
 
     async def _warm_up_engine(self, engine: LiveSignalEngine, symbol: str) -> None:
         """Fetch recent history and warm up the feature store."""
@@ -281,7 +408,7 @@ class LiveRunner:
         if cache_path.exists():
             logger.info("warming_from_cache", path=str(cache_path))
             df = pd.read_parquet(cache_path)
-            engine.warm_up(df.tail(200))
+            engine.warm_up(df.tail(300))
             return
 
         logger.info("warming_from_api", symbol=symbol)
@@ -289,7 +416,7 @@ class LiveRunner:
         try:
             await provider.connect()
             df = await provider.fetch_historical_candles(
-                symbol=symbol.upper(), interval="1m", limit=200,
+                symbol=symbol.upper(), interval="1m", limit=300,
             )
             if not df.empty:
                 engine.warm_up(df)
@@ -329,7 +456,7 @@ class LiveRunner:
         if self._dashboard:
             pos = self._position_mgr._positions.get(symbol)
             unrealized_pnl = pos.unrealized_pnl if pos and pos.quantity > 0 else 0.0
-            self._dashboard.broadcast_tick(current_price=price, unrealized_pnl=unrealized_pnl)
+            self._dashboard.broadcast_tick(symbol=symbol, current_price=price, unrealized_pnl=unrealized_pnl)
 
         # Feed risk state back to Council
         self._update_council_risk()
@@ -445,12 +572,31 @@ class LiveRunner:
         # ── Phase 4: Execute via position manager ─────────────────────────────
         if self._position_mgr and self._broker:
             self._broker.update_price(signal.symbol, signal.price)
+            
+            # Apply RL Meta-Controller Sizing
+            xgb_conviction = signal.member_predictions.get(f'{signal.symbol}_{self.market_type}_trending', 0.5)
+            transformer_conviction = signal.member_predictions.get('transformer', 0.5)
+            win_rate = self._position_mgr.get_win_rate() if hasattr(self._position_mgr, 'get_win_rate') else 0.5
+            
+            current_drawdown = getattr(self._position_mgr, '_max_drawdown_pct', 15.0) / 100.0
+            
+            position_mult = self._rl_agent.get_position_size(
+                xgb_conviction=float(xgb_conviction),
+                transformer_conviction=float(transformer_conviction),
+                regime=signal.regime.value if hasattr(signal.regime, 'value') else signal.regime,
+                win_rate=win_rate,
+                current_drawdown=current_drawdown,
+                margin_available=1.0 - current_drawdown,
+                atr_normalized=signal.atr / max(signal.price, 1.0)
+            )
+            
+            final_quantity = signal.quantity * position_mult
 
             order = await self._position_mgr.open_position(
                 signal_id=signal.signal_id,
                 symbol=signal.symbol,
                 direction=signal.direction,
-                quantity=signal.quantity,
+                quantity=final_quantity,
                 price=signal.price,
                 stop_loss=signal.stop_loss,
                 take_profit=signal.take_profit,
@@ -656,7 +802,10 @@ class LiveRunner:
 
         currency = "₹" if self.market_type == "india_options" else "$"
 
+        # Broadcast status with primary symbol for dashboard context
+        primary_symbol = self.symbols[0] if self.symbols else ""
         self._dashboard.broadcast_status(
+            symbol=primary_symbol,
             balance=balance,
             initial_balance=self._initial_balance,
             total_pnl=total_pnl,

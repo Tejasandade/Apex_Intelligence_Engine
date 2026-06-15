@@ -30,10 +30,10 @@ logger = get_logger("apex.models.regime")
 class MarketRegime(str, Enum):
     """Market regime classification."""
 
-    TRENDING = "TRENDING"
-    RANGING = "RANGING"
-    VOLATILE = "VOLATILE"
-    QUIET = "QUIET"
+    TRENDING_HIGH_VOL = "TRENDING_HIGH_VOL"
+    TRENDING_LOW_VOL = "TRENDING_LOW_VOL"
+    RANGING_HIGH_VOL = "RANGING_HIGH_VOL"
+    RANGING_LOW_VOL = "RANGING_LOW_VOL"
 
 
 def classify_regime(
@@ -67,19 +67,20 @@ def classify_regime(
     Returns:
         MarketRegime enum value.
     """
-    # Volatility override
+    # Volatility Quadrant Split
+    is_high_vol = False
     if atr_median > 0 and atr > 0:
         atr_ratio = atr / atr_median
-        if atr_ratio >= atr_volatile_multiplier:
-            return MarketRegime.VOLATILE
-        if atr_ratio <= atr_quiet_multiplier:
-            return MarketRegime.QUIET
-
-    # ADX + CHOP classification
-    if adx >= adx_threshold and chop < chop_threshold:
-        return MarketRegime.TRENDING
+        if atr_ratio >= 1.0:
+            is_high_vol = True
+            
+    # Trend Quadrant Split
+    is_trending = adx >= adx_threshold and chop < chop_threshold
+    
+    if is_trending:
+        return MarketRegime.TRENDING_HIGH_VOL if is_high_vol else MarketRegime.TRENDING_LOW_VOL
     else:
-        return MarketRegime.RANGING
+        return MarketRegime.RANGING_HIGH_VOL if is_high_vol else MarketRegime.RANGING_LOW_VOL
 
 
 def classify_regime_series(
@@ -152,7 +153,7 @@ class RegimeDetector:
         self.chop_threshold = chop_threshold
         self.atr_lookback = atr_lookback
         self._atr_history: list[float] = []
-        self._current_regime: MarketRegime = MarketRegime.RANGING
+        self._current_regime: MarketRegime = MarketRegime.RANGING_LOW_VOL
 
     @property
     def current_regime(self) -> MarketRegime:

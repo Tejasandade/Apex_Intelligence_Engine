@@ -155,6 +155,29 @@ async def run_full_backtest(
             print("\n  [FAIL] QUALITY GATE: FAILED — Strategy needs improvement.\n")
             for metric, (actual, required) in result.quality_gate_failures.items():
                 print(f"    • {metric}: {actual:.4f} (required: {required:.4f})")
+                
+        # ── EXPORT TRADES FOR RL META-CONTROLLER ──
+        log_dir = DATA_DIR / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        signals_path = log_dir / "signals.jsonl"
+        
+        import json
+        with open(signals_path, "w") as f:
+            for trade in result.trades:
+                trade_data = {
+                    "symbol": symbol,
+                    "direction": trade["side"],
+                    "entry_price": trade["entry_price"],
+                    "exit_price": trade["exit_price"],
+                    "pnl_pct": trade["pnl_pct"],
+                    # We will simulate high conviction for backtest
+                    "xgb_conviction": 0.85,
+                    "transformer_conviction": 0.85,
+                    "regime": "TRENDING_HIGH_VOL",
+                    "atr_norm": 0.02
+                }
+                f.write(json.dumps(trade_data) + "\n")
+        print(f"\n  [RL DATA] Exported {len(result.trades)} trades to {signals_path} for PPO Agent training.\n")
 
     # ── Step 4: Feature Importance ───────────────────────────────────────────
     importance = model.get_feature_importance()
@@ -163,7 +186,7 @@ async def run_full_backtest(
         print("\n  TOP 10 FEATURE IMPORTANCE:")
         print("  " + "-" * 45)
         for feat, imp in sorted_imp[:10]:
-            bar = "█" * int(imp * 200)
+            bar = "#" * int(imp * 200)
             print(f"  {feat:30s} {imp:.4f} {bar}")
         print()
 

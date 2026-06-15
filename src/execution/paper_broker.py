@@ -51,13 +51,15 @@ class PaperBroker(BaseBroker):
     def __init__(
         self,
         initial_balance: float = 10_000.0,
-        commission_bps: float = 10.0,  # 0.10% per trade
-        slippage_bps: float = 5.0,  # 0.05% slippage
+        maker_fee_bps: float = 2.0,   # Binance VIP0 Limit Order Fee (0.02%)
+        taker_fee_bps: float = 5.0,   # Binance VIP0 Market Order Fee (0.05%)
+        slippage_bps: float = 5.0,    # Default 0.05% slippage on market orders
         currency: str = "USD",
     ):
         self._initial_balance = initial_balance
         self._balance = initial_balance
-        self._commission_bps = commission_bps
+        self._maker_fee_bps = maker_fee_bps
+        self._taker_fee_bps = taker_fee_bps
         self._slippage_bps = slippage_bps
         self._currency = currency
 
@@ -89,7 +91,8 @@ class PaperBroker(BaseBroker):
         logger.info(
             "paper_broker_connected",
             balance=f"{self._currency}{self._balance:,.2f}",
-            commission=f"{self._commission_bps}bps",
+            maker_fee=f"{self._maker_fee_bps}bps",
+            taker_fee=f"{self._taker_fee_bps}bps",
             slippage=f"{self._slippage_bps}bps",
         )
         return True
@@ -119,8 +122,11 @@ class PaperBroker(BaseBroker):
             logger.warning("paper_order_rejected", reason="no price available", symbol=symbol)
             return order
 
-        # Apply slippage
-        slippage_mult = self._slippage_bps / 10000.0
+        # Distinguish between Maker (Limit) and Taker (Market/Stop) orders
+        is_maker = order.order_type == OrderType.LIMIT
+        
+        # Apply slippage only to Taker orders
+        slippage_mult = self._slippage_bps / 10000.0 if not is_maker else 0.0
         if order.side == OrderSide.BUY:
             fill_price = current_price * (1 + slippage_mult)
         else:
@@ -128,7 +134,8 @@ class PaperBroker(BaseBroker):
 
         # Calculate commission
         notional = order.quantity * fill_price
-        commission = notional * (self._commission_bps / 10000.0)
+        fee_bps = self._maker_fee_bps if is_maker else self._taker_fee_bps
+        commission = notional * (fee_bps / 10000.0)
 
         # Fill order
         order.filled_price = round(fill_price, 8)
@@ -318,8 +325,8 @@ class PaperBroker(BaseBroker):
             gross_pnl = (pos.entry_price - exit_price) * pos.quantity
 
         # Calculate Commissions
-        entry_commission = (pos.entry_price * pos.quantity) * (self._commission_bps / 10000.0)
-        exit_commission = (exit_price * pos.quantity) * (self._commission_bps / 10000.0)
+        entry_commission = (pos.entry_price * pos.quantity) * (self._taker_fee_bps / 10000.0)
+        exit_commission = (exit_price * pos.quantity) * (self._taker_fee_bps / 10000.0)
         total_commission = entry_commission + exit_commission
 
         # Calculate Net P&L
@@ -420,7 +427,7 @@ class PaperBroker(BaseBroker):
         # Apply slippage and commission
         slippage_mult = self._slippage_bps / 10000.0
         slippage_cost = price * close_qty * slippage_mult
-        commission = price * close_qty * (self._commission_bps / 10000.0)
+        commission = price * close_qty * (self._taker_fee_bps / 10000.0)
 
         pnl -= commission  # Net P&L after commission
         self._balance += pnl  # Add net P&L to balance (commission already included)

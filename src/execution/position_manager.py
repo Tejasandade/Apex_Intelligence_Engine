@@ -59,6 +59,9 @@ class PositionManager:
         enable_scale_out: bool = True,
         cooldown_candles: int = 5,
         max_daily_trades: int = 5,
+        dynamic_breakeven_triggers: dict[str, float] | None = None,
+        dynamic_trailing_triggers: dict[str, float] | None = None,
+        dynamic_trail_multipliers: dict[str, float] | None = None,
     ):
         """
         Args:
@@ -96,6 +99,9 @@ class PositionManager:
         self._enable_trailing = enable_trailing_stop
         self._trailing_stop = SmartTrailingStop(
             enable_scale_out=enable_scale_out,
+            dynamic_breakeven_triggers=dynamic_breakeven_triggers,
+            dynamic_trailing_triggers=dynamic_trailing_triggers,
+            dynamic_trail_multipliers=dynamic_trail_multipliers,
         ) if enable_trailing_stop else None
 
         # Post-loss cooldown

@@ -25,6 +25,7 @@ const state = {
     position: null,
     lastEnsemble: null,
     lastCouncil: null,
+    activeSymbol: '',  // Track which symbol this dashboard is monitoring
 };
 
 // ── DOM Elements ─────────────────────────────────────────────────────────────
@@ -127,6 +128,10 @@ function updateConnectionStatus(connected) {
 }
 
 function updateStatus(data) {
+    // Track symbol from status broadcast
+    if (data.symbol) {
+        state.activeSymbol = data.symbol.toUpperCase();
+    }
     state.balance = data.balance || state.balance;
     state.totalPnl = data.total_pnl || 0;
     state.totalTrades = data.total_trades || 0;
@@ -379,9 +384,15 @@ function updatePosition(data) {
 }
 
 function updateTick(data) {
+    // Only update if tick matches our active symbol (prevents multi-symbol confusion)
+    if (data.symbol && state.activeSymbol && data.symbol.toUpperCase() !== state.activeSymbol) {
+        return;
+    }
+
     const livePriceEl = $('livePrice');
     if (livePriceEl && data.current_price) {
-        livePriceEl.innerHTML = `LIVE PRICE: ${state.currency || '$'}${data.current_price.toLocaleString(undefined, {minimumFractionDigits: 2})}`;
+        const symbolLabel = state.activeSymbol || 'LIVE';
+        livePriceEl.innerHTML = `${symbolLabel} PRICE: ${state.currency || '$'}${data.current_price.toLocaleString(undefined, {minimumFractionDigits: 2})}`;
     }
 
     if (state.position) {

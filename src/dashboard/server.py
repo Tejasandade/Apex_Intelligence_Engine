@@ -141,6 +141,7 @@ class DashboardServer:
 
     def broadcast_status(
         self,
+        symbol: str = "",
         balance: float = 0,
         initial_balance: float = 0,
         total_pnl: float = 0,
@@ -160,6 +161,7 @@ class DashboardServer:
             trailing_stops = {}
             
         self._broadcast("status", {
+            "symbol": symbol,
             "balance": balance,
             "initial_balance": initial_balance,
             "total_pnl": total_pnl,
@@ -273,9 +275,10 @@ class DashboardServer:
             "duration_seconds": duration_seconds,
         })
 
-    def broadcast_tick(self, current_price: float, unrealized_pnl: float = 0.0) -> None:
+    def broadcast_tick(self, symbol: str, current_price: float, unrealized_pnl: float = 0.0) -> None:
         """Broadcast real-time price tick and unrealized P&L."""
         self._broadcast("tick", {
+            "symbol": symbol,
             "current_price": current_price,
             "unrealized_pnl": unrealized_pnl,
         })

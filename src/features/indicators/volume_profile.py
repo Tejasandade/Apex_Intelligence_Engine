@@ -99,5 +99,7 @@ def compute_volume_profile(
         out.iloc[i, out.columns.get_loc('VAL')] = val
 
     # Forward fill the remaining nans for first values if needed
-    out[['POC', 'VAH', 'VAL']] = out[['POC', 'VAH', 'VAL']].ffill().bfill()
+    out['POC'] = out['POC'].ffill().fillna(out['close'])
+    out['VAH'] = out['VAH'].ffill().fillna(out['high'])
+    out['VAL'] = out['VAL'].ffill().fillna(out['low'])
     return out

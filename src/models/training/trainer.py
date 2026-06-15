@@ -21,6 +21,7 @@ Usage:
 
 from __future__ import annotations
 
+import gc
 from pathlib import Path
 from typing import Any
 
@@ -115,6 +116,11 @@ class UnifiedTrainer:
                 rows=len(data) if data is not None else 0,
             )
             return {"error": "insufficient_data"}
+            
+        # ── MEMORY CONSTRAINT FIX ──
+        # Cap data to 10,000 rows to prevent extreme RAM OOM/Swapping
+        if len(data) > 10000:
+            data = data.iloc[-10000:].copy()
 
         logger.info("data_loaded", rows=len(data))
 
@@ -160,7 +166,7 @@ class UnifiedTrainer:
                 ),
             )
 
-            for regime_name in ["TRENDING", "RANGING"]:
+            for regime_name in ["TRENDING_HIGH_VOL", "TRENDING_LOW_VOL", "RANGING_HIGH_VOL", "RANGING_LOW_VOL"]:
                 regime_mask = regimes == regime_name
                 regime_df = labeled_df[regime_mask].copy()
 
@@ -202,7 +208,10 @@ class UnifiedTrainer:
             Training result dict.
         """
         model_name = f"{self.symbol}_{self.market_type}_{regime_suffix}"
-        hp = self.model_params.get("hyperparameters", {})
+        hp = self.model_params.get("hyperparameters", {}).copy()
+        
+        # MEMORY CONSTRAINT FIX: Limit XGBoost to 2 threads to prevent 8GB RAM OOM
+        hp["n_jobs"] = 2
 
         logger.info(
             "regime_training_started",
@@ -246,6 +255,10 @@ class UnifiedTrainer:
                 accuracy=f"{metrics['accuracy']:.4f}",
                 log_loss=f"{metrics['log_loss']:.4f}",
             )
+            
+            # Explicit garbage collection to prevent memory leaks during 12-model training
+            del X_train, y_train, X_val, y_val, fold_model
+            gc.collect()
 
         # Average CV metrics
         avg_metrics = {
@@ -261,43 +274,65 @@ class UnifiedTrainer:
             avg_precision=f"{avg_metrics['precision']:.4f}",
         )
 
-        # Train final model on ALL data (90/10 split for early stopping)
-        final_model = ApexXGBoostModel(
-            name=model_name,
-            feature_columns=self.feature_store.feature_columns,
-            hyperparams=hp,
-        )
-
+        # ── Train Bagged Ensemble on ALL data (90/10 split for early stopping) ──
         split_idx = int(len(X) * 0.90)
         X_train_final = X.iloc[:split_idx]
         y_train_final = y.iloc[:split_idx]
         X_cal = X.iloc[split_idx:]
         y_cal = y.iloc[split_idx:]
 
-        final_metrics = final_model.train(X_train_final, y_train_final, X_cal, y_cal)
+        bag_metrics_list = []
+        best_bag_features = {}
 
-        # Save model if quality check passes
-        if save_models:
-            # Enforce minimal viable quality gate (adjusted for 3:1 R:R)
-            if final_metrics.get("accuracy", 0) > 0.45 and final_metrics.get("log_loss", 1.0) < 0.700:
-                save_dir = WEIGHTS_DIR
-                final_model.save(save_dir)
-                self._models[regime_suffix] = final_model
-                logger.info("model_saved", model=model_name, metrics=final_metrics)
-            else:
-                logger.warning(
-                    "model_failed_quality_gates", 
-                    model=model_name, 
-                    accuracy=final_metrics.get("accuracy"),
-                    log_loss=final_metrics.get("log_loss")
-                )
+        for bag_idx in range(1, 4):
+            bag_name = f"{model_name}_bag{bag_idx}"
+            
+            # Inject a different random seed and subsample for bagging diversity
+            bag_hp = hp.copy()
+            bag_hp["random_state"] = 42 + (bag_idx * 1337)
+            bag_hp["subsample"] = max(0.5, bag_hp.get("subsample", 0.8) - 0.1)
+            
+            bag_model = ApexXGBoostModel(
+                name=bag_name,
+                feature_columns=self.feature_store.feature_columns,
+                hyperparams=bag_hp,
+            )
+
+            metrics = bag_model.train(X_train_final, y_train_final, X_cal, y_cal)
+            bag_metrics_list.append(metrics)
+
+            if save_models:
+                # Enforce minimal viable quality gate (adjusted for 3.0 ATR target)
+                if metrics.get("accuracy", 0) > 0.45 and metrics.get("log_loss", 1.0) < 0.700:
+                    bag_model.save(WEIGHTS_DIR)
+                    self._models[f"{regime_suffix}_bag{bag_idx}"] = bag_model
+                    logger.info("bag_model_saved", model=bag_name, metrics=metrics)
+                else:
+                    logger.warning(
+                        "bag_model_failed_quality_gates", 
+                        model=bag_name, 
+                        accuracy=metrics.get("accuracy"),
+                        log_loss=metrics.get("log_loss")
+                    )
+            
+            if bag_idx == 1:
+                best_bag_features = bag_model.get_feature_importance()
+                
+            del bag_model
+            gc.collect()
+
+        # Average the final metrics for reporting
+        final_metrics = {
+            k: float(np.mean([m[k] for m in bag_metrics_list]))
+            for k in bag_metrics_list[0]
+        }
 
         return {
             "model_name": model_name,
             "cv_metrics": avg_metrics,
             "final_metrics": final_metrics,
             "samples": len(df),
-            "feature_importance": final_model.get_feature_importance(),
+            "feature_importance": best_bag_features,
         }
 
     def _load_data(self) -> pd.DataFrame | None:
@@ -328,4 +363,9 @@ class UnifiedTrainer:
 
     def get_model(self, regime: str = "trend") -> ApexXGBoostModel | None:
         """Get a trained model for a specific regime."""
-        return self._models.get(regime)
+        for key, model in self._models.items():
+            if regime.lower() in key.lower():
+                return model
+        if self._models:
+            return list(self._models.values())[0]
+        return None

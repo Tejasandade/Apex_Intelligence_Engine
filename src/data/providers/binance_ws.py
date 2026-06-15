@@ -41,9 +41,9 @@ WS_BASE_URL = "wss://stream.binance.com:9443/ws"
 
 # Reconnection settings
 INITIAL_BACKOFF_S = 1.0
-MAX_BACKOFF_S = 60.0
+MAX_BACKOFF_S = 5.0  # Was 60.0s - Aggressive cap for high-frequency trading
 BACKOFF_MULTIPLIER = 2.0
-HEARTBEAT_TIMEOUT_S = 30.0  # If no message in 30s, reconnect
+HEARTBEAT_TIMEOUT_S = 10.0  # Was 30.0s - Faster stale connection detection
 
 
 CandleCallback = Callable[[str, dict[str, Any]], Coroutine[Any, Any, None]]
@@ -133,6 +133,7 @@ class BinanceWebSocket:
                     ping_interval=20,
                     ping_timeout=10,
                     close_timeout=5,
+                    open_timeout=5,
                 ) as ws:
                     self._ws = ws
                     self._connected = True

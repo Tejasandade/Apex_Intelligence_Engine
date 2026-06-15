@@ -47,29 +47,24 @@ class FeatureStore:
 
     FEATURE_SETS: dict[str, list[str]] = {
         "crypto": [
-            # Technical indicators (all scale-independent)
-            "price_vs_ema14",       # (close - EMA_14) / ATR — normalized
-            "price_vs_ema50",       # (close - EMA_50) / ATR — normalized
-            "ema_cross",            # (EMA_14 - EMA_50) / ATR — trend direction
-            "MACD_norm",            # MACD / ATR — scale-independent
-            "MACD_signal_norm",     # MACD_signal / ATR — scale-independent
+            "price_vs_ema14",
+            "price_vs_ema50",
+            "ema_cross",
+            "MACD_norm",
+            "MACD_signal_norm",
             "ATR",
             "ADX",
             "CHOP",
             "BB_width",
             "VWAP_zscore",
-            # Advanced Order Flow / VSA
             "vsa_absorption",
             "trend_exhaustion",
             "liquidity_sweep_signal",
-            # Volume & order flow
             "CVD",
             "order_flow_imbalance",
             "spread",
-            "volume_spike",         # volume / 20-bar avg volume
-            # MTF Macro Injection
+            "volume_spike",
             "MTF_ADX_15m",
-            # SMC structure
             "fvg_signal",
             "fvg_gap_pct",
             "structure_break_signal",
@@ -80,7 +75,6 @@ class FeatureStore:
             "structural_confluence",
             "OB_bull_dist",
             "OB_bear_dist",
-            # Advanced Phase 3 Features
             "ATR_Ratio",
             "Volume_Profile_POC_Dist",
             "AVWAP_distance",
@@ -88,12 +82,10 @@ class FeatureStore:
             "RSI_Trend",
             "OBV_Slope",
             "Volatility_Regime",
-            # Time encoding (cyclic)
             "hour_sin",
             "hour_cos",
-        ],  # 38 features — all normalized, no price leakage
+        ],
         "india_equity": [
-            # Technical indicators
             "RSI",
             "EMA_14",
             "EMA_50",
@@ -105,26 +97,19 @@ class FeatureStore:
             "ADX",
             "CHOP",
             "BB_width",
-            "VWAP_zscore",
-            # Volume & order flow
             "CVD",
             "order_flow_imbalance",
-            # Session-specific
             "session_elapsed_pct",
             "gap_from_open_pct",
-            # SMC structure
             "fvg_signal",
             "fvg_gap_pct",
             "structure_break_signal",
             "structure_break_strength",
             "liquidity_sweep_signal",
             "liquidity_reclaim_strength",
-            "dist_to_pivot_high",
-            "dist_to_pivot_low",
             "structural_confluence",
-            # Macro
             "macro_sentiment_score",
-        ],  # 23 features
+        ],
     }
 
     def __init__(self, market_type: str):

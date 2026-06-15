@@ -478,7 +478,7 @@ class RegimeAdvisor(BaseAdvisor):
 
         regime_upper = regime.upper()
 
-        if regime_upper == "TRENDING":
+        if regime_upper.startswith("TRENDING"):
             # Trending = good for directional trades, but ONLY if aligned with trend
             ema_14 = float(row.get("EMA_14", price))
             ema_50 = float(row.get("EMA_50", price))
@@ -528,7 +528,7 @@ class RegimeAdvisor(BaseAdvisor):
                     {"adx": adx, "chop": chop, "regime": regime},
                 )
 
-        elif regime_upper == "RANGING":
+        elif regime_upper.startswith("RANGING"):
             # Ranging = good for mean-reversion, bad for breakouts
             # But extremely choppy markets (CHOP > 70) kill everything
             if chop > 70:
@@ -785,4 +785,192 @@ class SessionAdvisor(BaseAdvisor):
                 f"London session (Hour {hour}). Good liquidity for {direction}.",
                 {"session": "London", "hour": hour}
             )
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  6. EXHAUSTION ADVISOR
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class ExhaustionAdvisor(BaseAdvisor):
+    """
+    Evaluates institutional exhaustion metrics to prevent buying tops or shorting bottoms.
+    
+    This is a VETO advisor — if the market is statistically exhausted, it will issue
+    a REJECT vote to penalize or entirely block the trade.
+    
+    Metrics:
+    1. VWAP Z-Score (Statistical Mean-Reversion)
+    2. Volume Capitulation (Climax Volume indicating weak-hand capitulation)
+    3. CVD Divergence / Absorption (Order flow imbalance against the trend)
+    """
+
+    def __init__(self, weight: float = 2.0):
+        # High weight to act as a strong veto like the RiskAdvisor
+        super().__init__(name="Exhaustion", weight=weight)
+
+    def evaluate(
+        self,
+        features: pd.DataFrame,
+        direction: str,
+        price: float,
+        regime: str,
+        atr: float,
+        **kwargs: Any,
+    ) -> AdvisorVote:
+        
+        # We need historical features (at least 20 periods) for SMAs
+        # If we don't have enough history or mtf buffers, we abstain.
+        df_5m = kwargs.get("df_5m")
+        df_1m = features  # For live inference, this might just be 1 row, but for backtest it's full DF
+        
+        # We need to rely on the MTF 5m DataFrame if the 1m features only contains 1 row.
+        # But wait, features passed to Council.evaluate usually has only 1 row during Live.
+        # We should use df_5m for volume / VWAP checks.
+        if df_5m is None or len(df_5m) < 20:
+            return self._make_vote(
+                Vote.ABSTAIN, 0.0,
+                "Insufficient data for exhaustion check",
+                {}
+            )
+            
+        # 1. Volume Climax (check current and previous 5m candle, as current might be incomplete)
+        vol_climax = False
+        vol_sma20 = float(df_5m['volume'].rolling(20, min_periods=5).mean().iloc[-1])
+        current_vol = float(df_5m['volume'].iloc[-1])
+        prev_vol = float(df_5m['volume'].iloc[-2]) if len(df_5m) >= 2 else 0.0
+        
+        if vol_sma20 > 0 and max(current_vol, prev_vol) > (vol_sma20 * 2.5):
+            vol_climax = True
+            
+        # 2. VWAP Z-Score
+        # Calculate approximate VWAP standard deviation (using close prices)
+        vwap = float(df_5m['VWAP'].iloc[-1]) if 'VWAP' in df_5m.columns else float(df_5m.close.rolling(20, min_periods=5).mean().iloc[-1])
+        std_dev = float(df_5m['close'].rolling(20, min_periods=5).std().iloc[-1])
+        
+        z_score = 0.0
+        if std_dev > 0:
+            z_score = (price - vwap) / std_dev
+            
+        # 3. CVD Divergence (Absorption)
+        # Check if price is far from EMA but order flow is pushing the opposite way
+        ema20 = float(df_5m['close'].ewm(span=20).mean().iloc[-1])
+        
+        # Retrieve OFI from the current 1m features row
+        row = features.iloc[-1] if hasattr(features, "iloc") else features
+        ofi = float(row.get("order_flow_imbalance", 0.0))
+        
+        reasons = []
+        veto = False
+        
+        if direction == "BUY":
+            # Exhaustion conditions for a LONG
+            if z_score > 2.5:
+                veto = True
+                reasons.append(f"VWAP Z-Score extreme (+{z_score:.2f})")
+            
+            if vol_climax and price > ema20:
+                veto = True
+                reasons.append(f"Climax volume ({current_vol:.1f} vs {vol_sma20:.1f}) at top")
+                
+            if price > ema20 and ofi < -0.6:
+                veto = True
+                reasons.append(f"Bearish absorption (OFI: {ofi:.2f} despite high price)")
+                
+        elif direction == "SELL":
+            # Exhaustion conditions for a SHORT
+            if z_score < -2.5:
+                veto = True
+                reasons.append(f"VWAP Z-Score extreme ({z_score:.2f})")
+                
+            if vol_climax and price < ema20:
+                veto = True
+                reasons.append(f"Climax volume ({current_vol:.1f} vs {vol_sma20:.1f}) at bottom")
+                
+            if price < ema20 and ofi > 0.6:
+                veto = True
+                reasons.append(f"Bullish absorption (OFI: {ofi:.2f} despite low price)")
+
+        if veto:
+            return self._make_vote(
+                Vote.REJECT, 1.0,
+                f"EXHAUSTION VETO: {' | '.join(reasons)}",
+                {"z_score": z_score, "vol_climax": vol_climax, "ofi": ofi}
+            )
+
+        return self._make_vote(
+            Vote.ABSTAIN, 0.0,
+            "No exhaustion detected",
+            {"z_score": z_score, "vol_climax": vol_climax}
+        )
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  8. VELOCITY ADVISOR (THE QUANT FIX)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+class VelocityAdvisor(BaseAdvisor):
+    """
+    Evaluates the 1st derivative (velocity) of the moving average to detect horizontal chop.
+    Prevents the engine from shorting the absolute bottom of a range.
+    """
+
+    def __init__(self, weight: float = 2.0):
+        # High weight to act as a strong veto
+        super().__init__(name="Velocity", weight=weight)
+
+    def evaluate(
+        self,
+        features: pd.DataFrame,
+        direction: str,
+        price: float,
+        regime: str,
+        atr: float,
+        **kwargs: Any,
+    ) -> AdvisorVote:
+        
+        df_5m = kwargs.get("df_5m")
+        if df_5m is None or len(df_5m) < 20:
+            return self._make_vote(
+                Vote.ABSTAIN, 0.0,
+                "Insufficient data for velocity check",
+                {}
+            )
+            
+        # Calculate 20-EMA
+        ema_20 = df_5m['close'].ewm(span=20).mean()
+        
+        # Calculate Slope over 10 periods
+        ema_current = float(ema_20.iloc[-1])
+        ema_past = float(ema_20.iloc[-10]) if len(ema_20) >= 10 else float(ema_20.iloc[0])
+        
+        slope_pct = (ema_current - ema_past) / ema_past
+        abs_slope = abs(slope_pct)
+        
+        # Define perfectly flat slope threshold (0.05% move over 10 candles)
+        FLAT_THRESHOLD = 0.0005
+        
+        is_flat = abs_slope < FLAT_THRESHOLD
+        
+        reasons = []
+        veto = False
+        
+        if is_flat:
+            if direction == "SELL" and price < ema_current:
+                veto = True
+                reasons.append(f"Selling channel bottom in flat range (Slope: {slope_pct:.5f})")
+            elif direction == "BUY" and price > ema_current:
+                veto = True
+                reasons.append(f"Buying channel top in flat range (Slope: {slope_pct:.5f})")
+                
+        if veto:
+            return self._make_vote(
+                Vote.REJECT, 1.0,
+                f"VELOCITY VETO: {' | '.join(reasons)}",
+                {"slope_pct": slope_pct, "ema_20": ema_current}
+            )
+
+        return self._make_vote(
+            Vote.ABSTAIN, 0.0,
+            f"Velocity is sufficient ({slope_pct:.5f})",
+            {"slope_pct": slope_pct}
+        )
 

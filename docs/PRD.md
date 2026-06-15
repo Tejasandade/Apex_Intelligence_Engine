@@ -102,15 +102,14 @@ Professional real-time monitoring dashboard.
 
 ---
 
-### Phase 6: The Proof (Live Validation) — COMPLETE
+### Phase 6: The Proof (Live Validation)
 
-#### Current Phase: ALL PHASES COMPLETE 🎉
-- Phase 0: Infrastructure & Research (✅ Done)
-- Phase 1: Spine - Market Connection & Pipeline (✅ Done)
-- Phase 2: Brain - AI Integration (✅ Done)
-- Phase 3: The Council - Consensus Filtering (✅ Done)
-- Phase 4: Execution Engine - Paper Trading (✅ Done)
-- Phase 5: Dashboard - Command Center UI (✅ Done)
+#### Objective
+Paper trade for 30+ days to validate the system in real market conditions.
+
+#### Requirements
+- **Paper Trading**: Full simulation with real-time data and model predictions
+- **Performance Tracking**: Compare paper results against backtest expectations
 - **Stability**: Zero crashes, auto-recovery from errors
 - **Go-Live Gate**: Paper Sharpe > 1.5, Max DD < 15%, Win Rate > 40%, 200+ trades
 

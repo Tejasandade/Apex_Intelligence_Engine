@@ -8,6 +8,7 @@ import asyncio
 import sys
 import time
 import argparse
+import yaml
 from pathlib import Path
 import pandas as pd
 from tqdm import tqdm
@@ -28,11 +29,11 @@ from tqdm import tqdm
 logger = get_logger("apex.scripts.event_backtest")
 
 async def main():
-    parser = argparse.ArgumentParser(description="Event-Driven Backtest Simulator")
+    parser = argparse.ArgumentParser(description="Apex V5 Event-Driven Backtest")
     parser.add_argument("--symbol", type=str, default="btcusdt")
-    parser.add_argument("--bars", type=int, default=10000, help="Number of bars to simulate")
+    parser.add_argument("--bars", type=int, default=1000, help="Number of recent 1m bars to simulate")
+    parser.add_argument("--capital", type=float, default=10000.0, help="Initial capital")
     parser.add_argument("--asymmetric", action="store_true", help="Enable Asymmetric Risk Mode")
-    parser.add_argument("--capital", type=float, default=1000.0, help="Initial Capital")
     parser.add_argument("--council-threshold", type=float, default=0.60,
                         help="Consensus threshold for council approval (0 to 1)")
     parser.add_argument("--scalp", action="store_true",
@@ -66,34 +67,54 @@ async def main():
     feature_store = FeatureStore(market_type)
     MODELS_DIR = DATA_DIR / "models"
     
-    for regime in ["trending", "ranging"]:
-        model_name = f"{symbol}_{market_type}_{regime}"
-        model_path = MODELS_DIR / f"{model_name}.json"
+    # NEW REGIMES + BAGGING
+    regimes = ["trending_high_vol", "trending_low_vol", "ranging_high_vol", "ranging_low_vol"]
+    for regime in regimes:
+        for bag in [1, 2, 3]:
+            model_name = f"{symbol}_{market_type}_{regime}_bag{bag}"
+            model_path = MODELS_DIR / f"{model_name}.json"
 
-        if model_path.exists():
-            model = ApexXGBoostModel(
-                name=model_name,
-                feature_columns=feature_store.feature_columns,
-            )
-            model.load(MODELS_DIR)
-            models[regime] = model
-            print(f"[SIMULATOR] Loaded {model_name}")
+            if model_path.exists():
+                model = ApexXGBoostModel(
+                    name=model_name,
+                    feature_columns=feature_store.feature_columns,
+                )
+                model.load(MODELS_DIR)
+                models[f"{regime}_bag{bag}"] = model
+                print(f"[SIMULATOR] Loaded {model_name}")
     
     if not models:
         print("[ERROR] No models found. Train models first.")
         return
 
     # ── 3. Setup Components ───────────────────────────────────────────────────
-    broker = PaperBroker(initial_balance=args.capital, commission_bps=0.0, slippage_bps=1.0)
+    broker = PaperBroker(initial_balance=args.capital, maker_fee_bps=0.0, taker_fee_bps=0.0, slippage_bps=1.0)
     await broker.connect()
+
+    config_path = Path("configs/models.yaml")
+    with open(config_path, "r") as f:
+        config = yaml.safe_load(f)
+        tm_config = config.get("trade_management", {})
+        
+    breakeven = tm_config.get("breakeven", 1.5)
+    trail_trigger = tm_config.get("trail_trigger", 2.0)
+    trail_mult = tm_config.get("trail_mult", 1.5)
+    
+    dynamic_breakeven = {"TRENDING": breakeven, "RANGING": breakeven, "VOLATILE": breakeven, "QUIET": breakeven}
+    dynamic_trailing = {"TRENDING": trail_trigger, "RANGING": trail_trigger, "VOLATILE": trail_trigger, "QUIET": trail_trigger}
+    dynamic_mults = {"TRENDING": trail_mult, "RANGING": trail_mult, "VOLATILE": trail_mult, "QUIET": trail_mult}
 
     position_mgr = PositionManager(
         broker=broker,
         max_positions=3,
-        max_drawdown_pct=15.0,
-        daily_loss_limit=args.capital * 0.05,
-        enable_scale_out=True,
-        max_daily_trades=5,
+        max_drawdown_pct=100.0,  # Prevent kill switch in backtest
+        daily_loss_limit=args.capital * 0.50,
+        enable_scale_out=False,
+        max_daily_trades=50,
+        enable_trailing_stop=True,
+        dynamic_breakeven_triggers=dynamic_breakeven,
+        dynamic_trailing_triggers=dynamic_trailing,
+        dynamic_trail_multipliers=dynamic_mults
     )
     await position_mgr.initialize()
 
@@ -101,8 +122,8 @@ async def main():
         symbol=symbol,
         market_type=market_type,
         models=models,
-        conviction_threshold=0.52,
-        risk_per_trade=args.capital * 0.005,
+        conviction_threshold=0.58,
+        risk_per_trade=50.0,  # Match live runner configuration
         enable_ensemble=True,
         enable_monitoring=True,
         enable_council=True,
@@ -185,12 +206,21 @@ async def main():
                 )
                 if order and order.status.value == "FILLED":
                     trades_taken += 1
+            else:
+                print(f"[{row_date}] Signal {signal.direction} blocked by Council. Score: {signal.council_score}. Reason: {signal.member_predictions.get('council_summary', 'N/A')}")
                 
     # ── 5. Output Report ──────────────────────────────────────────────────────
-    print("\n\n========================================================")
+    print("\n========================================================")
     print("  SIMULATION COMPLETE")
     print("========================================================")
     
+    # ── Close all open positions before printing stats ────────────────────────
+    print("[SIMULATOR] Closing any remaining open positions...")
+    positions = await broker.get_positions()
+    for pos in positions:
+        if pos.side.value != "FLAT":
+            await position_mgr.close_position(pos.symbol)
+
     final_balance = await broker.get_balance()
     final_equity = final_balance.total_equity
     pnl = final_equity - args.capital

@@ -6,62 +6,67 @@
   Symbol:         btcusdt
   Market Type:    crypto
   Cost Model:     expected
-  Quality Gate:   [OK] PASS
+  Quality Gate:   [FAIL] FAIL
 
 ============================================================
   RETURNS
 ============================================================
-  Total Return:              9066.33%
-  Annualized Return:        95458.03%
+  Total Return:             19112.99%
+  Annualized Return:       999999.00%
 
 ============================================================
   RISK-ADJUSTED METRICS
 ============================================================
-  Sharpe Ratio:                96.24
-  Sortino Ratio:               43.87
-  Calmar Ratio:             11651.16
+  Sharpe Ratio:                40.59
+  Sortino Ratio:               21.11
+  Calmar Ratio:             36551.31
 
 ============================================================
   DRAWDOWN
 ============================================================
-  Max Drawdown:                 8.19%
-  Max DD Duration:               105 bars
-  Avg Drawdown:                 0.10%
+  Max Drawdown:                27.36%
+  Max DD Duration:              2884 bars
+  Avg Drawdown:                 0.37%
 
 ============================================================
   TRADE STATISTICS
 ============================================================
-  Total Trades:                 8215
-  Winning Trades:               7619
-  Losing Trades:                 596
-  Win Rate:                    92.7%
-  Profit Factor:               12.10
-  Avg Win:                    0.0836%
-  Avg Loss:                  -0.0540%
-  Avg R:R Realized:             1.55
-  Expectancy ($/trade):        49.31
-  Largest Win:                484.70
-  Largest Loss:              -289.19
+  Total Trades:                23383
+  Winning Trades:              16398
+  Losing Trades:                6985
+  Win Rate:                    70.1%
+  Profit Factor:                1.88
+  Avg Win:                    0.1195%
+  Avg Loss:                  -0.0956%
+  Avg R:R Realized:             1.25
+  Expectancy ($/trade):        23.21
+  Largest Win:                488.92
+  Largest Loss:              -289.71
 
 ============================================================
   HOLDING PERIODS
 ============================================================
-  Avg Holding:                   6.1 bars
-  Avg Win Holding:               6.2 bars
-  Avg Loss Holding:              4.2 bars
+  Avg Holding:                   7.0 bars
+  Avg Win Holding:               7.6 bars
+  Avg Loss Holding:              5.6 bars
+
+============================================================
+  QUALITY GATE FAILURES
+============================================================
+  max_drawdown_pct          Actual:  27.3588  Required:  15.0000
 
 ============================================================
   EXIT REASON DISTRIBUTION
 ============================================================
-  stop_loss             5530 (67.3%)
-  take_profit           2294 (27.9%)
-  time_expiry            391 (4.8%)
+  stop_loss            16826 (72.0%)
+  take_profit           6434 (27.5%)
+  time_expiry            123 (0.5%)
 
 ============================================================
   WIN RATE BY EXIT REASON
 ============================================================
-  stop_loss            Win Rate: 89.6% (n=5530)
-  take_profit          Win Rate: 99.4% (n=2294)
-  time_expiry          Win Rate: 98.0% (n=391)
+  stop_loss            Win Rate: 62.8% (n=16826)
+  take_profit          Win Rate: 89.2% (n=6434)
+  time_expiry          Win Rate: 81.3% (n=123)
 
 ============================================================

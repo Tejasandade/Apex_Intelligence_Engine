@@ -103,8 +103,20 @@ class AngelWebSocket:
         self._ws_thread.start()
         
         # Block until cancelled
+        backoff = 1.0
         while self._running:
             await asyncio.sleep(1.0)
+            
+            # Check for disconnect
+            if not self._connected and not self._ws_thread.is_alive():
+                logger.warning("angel_ws_reconnecting", backoff=backoff)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2.0, 5.0)  # Aggressive 5s cap
+                if self._running:
+                    self._ws_thread = threading.Thread(target=run_ws, daemon=True)
+                    self._ws_thread.start()
+            elif self._connected:
+                backoff = 1.0
             
             # Check for closed candle in case no ticks arrive on the boundary
             if self._current_candle:

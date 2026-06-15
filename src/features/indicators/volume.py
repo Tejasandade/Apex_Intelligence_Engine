@@ -149,8 +149,7 @@ def build_volume_features(df: pd.DataFrame) -> pd.DataFrame:
     # Just compute price * volume, then rolling sum? No, POC is single price with max vol.
     # Let's just create a rolling max of volume, and take the close where volume == max_vol.
     roll_max_vol = out["volume"].rolling(window=50, min_periods=1).max()
-    # Where volume == rolling max, take close, else NaN, then forward fill
-    poc_series = out["close"].where(out["volume"] >= roll_max_vol).ffill().bfill()
+    poc_series = out["close"].where(out["volume"] >= roll_max_vol).ffill().fillna(out["close"])
     out["Volume_Profile_POC_Dist"] = (out["close"] - poc_series) / poc_series.replace(0, np.nan)
     out["Volume_Profile_POC_Dist"] = out["Volume_Profile_POC_Dist"].fillna(0.0)
 

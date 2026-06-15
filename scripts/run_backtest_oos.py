@@ -68,6 +68,8 @@ async def run_oos_backtest(
     if data_path.exists():
         logger.info("loading_cached_data", path=str(data_path))
         data = pd.read_parquet(data_path)
+        if len(data) > total_bars:
+            data = data.iloc[-total_bars:].reset_index(drop=True)
     else:
         logger.info("downloading_data", symbol=symbol, bars=total_bars)
         provider = BinanceHistoricalProvider()
@@ -138,6 +140,12 @@ async def run_oos_backtest(
 
     # ── Step 3: Backtest ONLY on test data ───────────────────────────────────
     print("  [3/4] Backtesting on UNSEEN test data...")
+
+    # Free memory from training before backtesting to prevent 8GB RAM OOM
+    import gc
+    del trainer
+    del train_data
+    gc.collect()
 
     feature_store = FeatureStore(market_type)
     model_params = get_model_params(market_type)

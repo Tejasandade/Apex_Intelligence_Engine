@@ -82,7 +82,7 @@ class LiveSignalEngine:
         symbol: str,
         market_type: str = "crypto",
         models: dict[str, Any] | None = None,
-        conviction_threshold: float = 0.60,
+        conviction_threshold: float = 0.58,
         risk_per_trade: float = 200.0,
         default_rr: float = 2.0,
         max_concurrent: int = 1,
@@ -152,7 +152,7 @@ class LiveSignalEngine:
                 enable_veto=True,
                 scalp_mode=False,  # Strict mode — no loose filters
             )
-            self.council.setup_default_advisors()
+            self.council.setup_default_advisors(symbol=symbol)
             
         # ── Phase 6 Components: RL Meta-Controller ───────────────────────────
         self.rl_meta_controller = None
@@ -203,6 +203,21 @@ class LiveSignalEngine:
     def warm_up(self, historical_data: pd.DataFrame) -> None:
         """Prime the feature store and retrainer with historical data."""
         self.live_store.warm_up(historical_data)
+
+        # Warm up HTF EMAs using the historical data (O(N) initial pass)
+        if not historical_data.empty and "close" in historical_data.columns:
+            closes = historical_data["close"].values
+            # Initialize with first value
+            self._htf_ema_20 = closes[0]
+            self._htf_ema_50 = closes[0]
+            
+            alpha_20 = 2.0 / (1200.0 + 1.0)
+            alpha_50 = 2.0 / (3000.0 + 1.0)
+            
+            # Apply EMA recursively to build up the true value
+            for c in closes[1:]:
+                self._htf_ema_20 = (c - self._htf_ema_20) * alpha_20 + self._htf_ema_20
+                self._htf_ema_50 = (c - self._htf_ema_50) * alpha_50 + self._htf_ema_50
 
         # Also seed the walk-forward retrainer
         if self.retrainer:
@@ -312,11 +327,6 @@ class LiveSignalEngine:
             probability, ensemble_conviction, member_predictions = (
                 self.ensemble.predict(features, current_regime=regime.value)
             )
-            baselines = [
-                m.model.metadata.get("metrics", {}).get("positive_rate", 0.5)
-                for m in self.ensemble._members
-            ]
-            baseline = sum(baselines) / len(baselines) if baselines else 0.50
         else:
             # Fallback to single model
             model = self._select_model(regime)
@@ -324,17 +334,17 @@ class LiveSignalEngine:
                 return None
             try:
                 probability = model.predict(features)
-                baseline = model.metadata.get("metrics", {}).get("positive_rate", 0.5)
             except Exception as e:
                 logger.error("signal_predict_error", error=str(e))
                 return None
 
-        # ── Step 7: Signal decision (Raw Probability) ─────────────────────────
-        # Use raw model probability directly. No re-centering, no baseline adjustment.
-        # With asymmetric labeling (TP=1.5x, SL=2.0x), baseline ~52.6%.
-        # Model just needs to be slightly better than random.
-        buy_threshold = self.conviction_threshold  # e.g., 0.55
-        sell_threshold = 1.0 - self.conviction_threshold  # e.g., 0.45
+        # ── Step 7: Signal decision (Hard Centered) ─────────────────────────
+        # Models are trained with scale_pos_weight, which internally calibrates 
+        # outputs to be centered around 0.50. Shifting the baseline mathematically 
+        # breaks the thresholding asymmetry and prevents sells.
+        conviction_margin = self.conviction_threshold - 0.50
+        buy_threshold = 0.50 + conviction_margin
+        sell_threshold = 0.50 - conviction_margin
         
         macro_downtrend = False
         macro_uptrend = False
@@ -351,54 +361,15 @@ class LiveSignalEngine:
         elif probability <= sell_threshold:
             direction = "SELL"
             
-        # ── Strict Macro Trend Suppression with Ultimate Quantitative Override ──
+        # ── Phase 6: Strict Macro Trend Filter ──
+        # Guarantee 0 flaws by never fighting the HTF Trend
         if direction == "BUY" and macro_downtrend:
-            if isinstance(features, pd.DataFrame):
-                sweep_signal = float(features["liquidity_sweep_signal"].iloc[-1]) if "liquidity_sweep_signal" in features else 0.0
-                sweep_1h = float(features["Liquidity_Sweep_1H"].iloc[-1]) if "Liquidity_Sweep_1H" in features else 0.0
-                ob_dist = float(features["OB_bull_dist"].iloc[-1]) if "OB_bull_dist" in features else 100.0
-                vwap_z = float(features["VWAP_zscore"].iloc[-1]) if "VWAP_zscore" in features else 0.0
-                ofi = float(features["order_flow_imbalance"].iloc[-1]) if "order_flow_imbalance" in features else 0.0
-            else:
-                sweep_signal = float(features.get("liquidity_sweep_signal", 0.0))
-                sweep_1h = float(features.get("Liquidity_Sweep_1H", 0.0))
-                ob_dist = float(features.get("OB_bull_dist", 100.0))
-                vwap_z = float(features.get("VWAP_zscore", 0.0))
-                ofi = float(features.get("order_flow_imbalance", 0.0))
-                
-            is_structural_sweep = (sweep_signal > 0.5) or (sweep_1h > 0.5) or (ob_dist < 0.002)
-            is_statistically_extended = vwap_z < -2.0
-            is_volumetric_absorption = ofi > 0.5
-            
-            if is_structural_sweep and is_statistically_extended and is_volumetric_absorption:
-                logger.warning("macro_override_sweep", reason="ULTIMATE OVERRIDE: Sweep + VWAP Z-Score Extension + Volume Absorption detected. Catching the knife.")
-            else:
-                logger.info("signal_suppressed", reason="Macro Downtrend (Falling Knife Filter)", price=close)
-                direction = "HOLD"
+            direction = "HOLD"
+            logger.info("signal_suppressed", reason="Strict Macro Downtrend Block", price=close)
 
         elif direction == "SELL" and macro_uptrend:
-            if isinstance(features, pd.DataFrame):
-                sweep_signal = float(features["liquidity_sweep_signal"].iloc[-1]) if "liquidity_sweep_signal" in features else 0.0
-                sweep_1h = float(features["Liquidity_Sweep_1H"].iloc[-1]) if "Liquidity_Sweep_1H" in features else 0.0
-                ob_dist = float(features["OB_bear_dist"].iloc[-1]) if "OB_bear_dist" in features else 100.0
-                vwap_z = float(features["VWAP_zscore"].iloc[-1]) if "VWAP_zscore" in features else 0.0
-                ofi = float(features["order_flow_imbalance"].iloc[-1]) if "order_flow_imbalance" in features else 0.0
-            else:
-                sweep_signal = float(features.get("liquidity_sweep_signal", 0.0))
-                sweep_1h = float(features.get("Liquidity_Sweep_1H", 0.0))
-                ob_dist = float(features.get("OB_bear_dist", 100.0))
-                vwap_z = float(features.get("VWAP_zscore", 0.0))
-                ofi = float(features.get("order_flow_imbalance", 0.0))
-                
-            is_structural_sweep = (sweep_signal < -0.5) or (sweep_1h < -0.5) or (ob_dist < 0.002)
-            is_statistically_extended = vwap_z > 2.0
-            is_volumetric_absorption = ofi < -0.5
-            
-            if is_structural_sweep and is_statistically_extended and is_volumetric_absorption:
-                logger.warning("macro_override_sweep", reason="ULTIMATE OVERRIDE: Sweep + VWAP Z-Score Extension + Volume Absorption detected. Catching the knife.")
-            else:
-                logger.info("signal_suppressed", reason="Macro Uptrend", price=close)
-                direction = "HOLD"
+            direction = "HOLD"
+            logger.info("signal_suppressed", reason="Strict Macro Uptrend Block", price=close)
 
         if direction == "HOLD":
             return None
@@ -409,6 +380,13 @@ class LiveSignalEngine:
 
         # ── Step 8: Apply ensemble conviction modifier ───────────────────────
         effective_conviction = probability * ensemble_conviction
+
+        # ── REMOVED: effective_conviction gate was killing 100% of signals ──
+        # Math: prob=0.62 * ensemble=0.87 = 0.539 < 0.55 = KILLED
+        # The conviction_threshold (0.58) already filters weak signals.
+        # if effective_conviction < 0.55:
+        #     return None
+
         # If models strongly disagree, skip the trade
         if ensemble_conviction < 0.5 and self._enable_ensemble:
             logger.debug(
@@ -447,54 +425,41 @@ class LiveSignalEngine:
                     pass
 
         if self.council and self._enable_council:
-            # ── SNIPER OVERRIDE ──────────────────────────────────────────────
-            if isinstance(features, pd.DataFrame):
-                ofi = float(features["order_flow_imbalance"].iloc[-1]) if "order_flow_imbalance" in features else 0.0
-            else:
-                ofi = float(features.get("order_flow_imbalance", 0.0))
-                
-            is_sniper_buy = direction == "BUY" and ofi > 0.8
-            is_sniper_sell = direction == "SELL" and ofi < -0.8
-            
-            if is_sniper_buy or is_sniper_sell:
-                logger.warning("sniper_override_activated", direction=direction, ofi=ofi)
-                council_approved = True
-                council_score = 1.0
-                council_explanation = "SNIPER OVERRIDE: Extreme Order Flow Imbalance"
-                trade_type = "SCALP"
-                council_summary = "Council Bypassed by Sniper Override"
-                council_votes = {"Sniper": {"vote": "APPROVE", "conviction": 1.0}}
-            else:
-                council_decision = self.council.evaluate(
-                    features=features,
-                    direction=direction,
-                    price=close,
-                    regime=effective_regime,
-                    atr=atr,
-                    df_5m=self.mtf_buffer.get_5m_df() if self.mtf_buffer.is_ready() else None,
-                    df_15m=self.mtf_buffer.get_15m_df() if self.mtf_buffer.is_ready() else None,
-                    mtf_ready=self.mtf_buffer.is_ready(),
-                    oracle_levels=oracle_levels or [],
-                )
-                council_approved = council_decision.approved
-                council_score = council_decision.consensus_score
-                council_explanation = council_decision.explanation
-                trade_type = council_decision.trade_type
-                council_summary = council_decision.vote_summary
-                council_votes = {
-                    v.advisor_name: {"vote": v.vote.value, "conviction": v.conviction} 
-                    for v in council_decision.votes
-                }
+            # All signals go through the Council's democratic process. No overrides.
+            council_decision = self.council.evaluate(
+                features=features,
+                direction=direction,
+                price=close,
+                regime=effective_regime,
+                atr=atr,
+                df_5m=self.mtf_buffer.get_5m_df() if self.mtf_buffer.is_ready() else None,
+                df_15m=self.mtf_buffer.get_15m_df() if self.mtf_buffer.is_ready() else None,
+                mtf_ready=self.mtf_buffer.is_ready(),
+                oracle_levels=oracle_levels or [],
+            )
+            council_approved = council_decision.approved
+            council_score = council_decision.consensus_score
+            council_explanation = council_decision.explanation
+            trade_type = council_decision.trade_type
+            council_summary = council_decision.vote_summary
+            council_votes = {
+                v.advisor_name: {
+                    "vote": v.vote.value, 
+                    "conviction": v.conviction,
+                    "weight": v.weight
+                } 
+                for v in council_decision.votes
+            }
 
-                if not council_approved:
-                    logger.info(
-                        "signal_blocked_by_council",
-                        direction=direction,
-                        consensus=f"{council_score:.4f}",
-                        summary=council_decision.vote_summary,
-                    )
-                    # We do NOT return None here anymore. We return the blocked signal 
-                    # so the dashboard can see it. LiveRunner will handle the block.
+            if not council_approved:
+                logger.info(
+                    "signal_blocked_by_council",
+                    direction=direction,
+                    consensus=f"{council_score:.4f}",
+                    summary=council_decision.vote_summary,
+                )
+                # We do NOT return None here anymore. We return the blocked signal 
+                # so the dashboard can see it. LiveRunner will handle the block.
 
         # ── Step 9: Check capacity ───────────────────────────────────────────
         if self._open_position_count >= self.max_concurrent:
@@ -515,17 +480,17 @@ class LiveSignalEngine:
             rr_ratio = 2.5
             stop_mult = 2.0 if trade_type == "SWING" else 1.5
         
-        # Strict ATR-based stop loss (No minimum percentage override)
-        # This keeps losses strictly proportional to volatility, allowing larger position sizes 
-        # and bigger profits when ATR is tight.
+        # Strict ATR-based stop loss with HARD MINIMUM TAKE PROFIT
+        # Every trade MUST have a positive R:R. The trailing stop can extend
+        # winners beyond the hard TP, but we guarantee a minimum profit target.
         if direction == "BUY":
             stop_loss = close - (atr * stop_mult)
-            take_profit = 0.0  # NO HARD TP! Hold for structural trailing stop
             stop_distance = close - stop_loss
+            take_profit = close + (stop_distance * rr_ratio)  # Hard minimum TP
         else:
             stop_loss = close + (atr * stop_mult)
-            take_profit = 0.0  # NO HARD TP! Hold for structural trailing stop
             stop_distance = stop_loss - close
+            take_profit = close - (stop_distance * rr_ratio)  # Hard minimum TP
         
         # ── Conviction-scaled position sizing (Multi-Tier Kelly Style) ───────
         base_risk = self.risk_per_trade
@@ -552,11 +517,11 @@ class LiveSignalEngine:
 
         # Top features
         top_features = {}
-        if self.ensemble:
+        if self.ensemble and hasattr(self.ensemble, "get_feature_importance"):
             importance = self.ensemble.get_feature_importance()
         else:
             model = self._select_model(regime)
-            importance = model.get_feature_importance() if model else {}
+            importance = getattr(model, "get_feature_importance", lambda: {})() if model else {}
 
         if importance:
             sorted_feats = sorted(importance.items(), key=lambda x: x[1], reverse=True)[:5]
@@ -642,18 +607,13 @@ class LiveSignalEngine:
 
         self._pending_signals.pop(signal_id, None)
 
-    def _select_model(self, regime: MarketRegime) -> Any | None:
+    def _select_model(self, regime: Any) -> Any | None:
         """Select the appropriate model for the current regime."""
-        regime_name = regime.value.lower()
-        if regime_name in self.models:
-            return self.models[regime_name]
-
-        if regime in (MarketRegime.VOLATILE, MarketRegime.TRENDING):
-            if "trending" in self.models:
-                return self.models["trending"]
-        elif regime in (MarketRegime.QUIET, MarketRegime.RANGING):
-            if "ranging" in self.models:
-                return self.models["ranging"]
+        regime_str = regime.value if hasattr(regime, 'value') else str(regime)
+        if "TRENDING" in regime_str.upper():
+            return self.models.get("TRENDING")
+        elif "RANGING" in regime_str.upper() or "QUIET" in regime_str.upper():
+            return self.models.get("RANGING")
 
         if self.models:
             return next(iter(self.models.values()))

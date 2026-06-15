@@ -1,99 +1,62 @@
 """
-Apex Intelligence Engine V6 — RL Meta-Controller Training
-=========================================================
-Script to train the PPO RL agent on historical data.
+Apex Intelligence Engine V5 — RL Meta-Controller Trainer
+==========================================================
+Trains the PPO Agent using historical paper trading logs.
 """
 
 import argparse
-import pandas as pd
-import numpy as np
+import asyncio
+import json
+import sys
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from src.core.config import DATA_DIR
 from src.core.logging import get_logger
-from src.rl.gym_env import ApexMetaEnv
-from src.features.store import FeatureStore
-from src.models.xgboost_model import ApexXGBoostModel
-from src.core.config import DATA_DIR, get_market
+from src.models.rl_agent import RLMetaController
 
 logger = get_logger("apex.scripts.train_rl")
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--symbol", type=str, default="btcusdt")
-    parser.add_argument("--episodes", type=int, default=10)
-    parser.add_argument("--bars", type=int, default=20000)
-    args = parser.parse_args()
+
+def train_rl(symbol: str, market: str, steps: int):
+    # Load historical signal logs from paper trading
+    log_path = DATA_DIR / "logs" / "signals.jsonl"
     
-    logger.info(f"Starting RL Meta-Controller Training for {args.symbol}")
+    historical_trades = []
     
-    # 1. Load Data
-    data_file = DATA_DIR / "historical" / "crypto" / f"{args.symbol}.parquet"
-    if not data_file.exists():
-        logger.error(f"Historical data not found: {data_file}")
+    if log_path.exists():
+        with open(log_path, "r") as f:
+            for line in f:
+                try:
+                    data = json.loads(line)
+                    if data.get("symbol") == symbol:
+                        # pnl_pct is already inside data from backtester!
+                        historical_trades.append(data)
+                except Exception:
+                    pass
+                    
+    print(f"Loaded {len(historical_trades)} historical trades for RL Training.")
+    
+    if len(historical_trades) < 100:
+        print("Not enough historical trades to train RL! Need at least 100.")
+        print("Please run the Backtester or Live Paper Trader for longer.")
         return
-        
-    df = pd.read_parquet(data_file)
-    df = df.sort_values("timestamp").reset_index(drop=True)
-    if len(df) > args.bars:
-        df = df.iloc[-args.bars:].reset_index(drop=True)
-        
-    logger.info(f"Loaded {len(df)} bars of historical data.")
+
+    rl = RLMetaController(market_type=market, symbol=symbol)
     
-    # 2. Build Features
-    store = FeatureStore("crypto")
-    features = store.build_features(df)
+    print(f"Training PPO Meta-Controller for {steps} timesteps...")
+    rl.train(historical_trades=historical_trades, total_timesteps=steps)
     
-    # Forward return for reward calculation (assuming we trade at close and exit at next close)
-    # Using 3 bars ahead to allow trade to play out
-    df['forward_return'] = (df['close'].shift(-3) - df['close']) / df['close']
-    df['forward_return'] = df['forward_return'].fillna(0.0)
-    
-    # 3. Load Models & Generate Predictions
-    trending_model = ApexXGBoostModel("btcusdt_crypto_trending", store.feature_columns)
-    trending_model.load()
-    ranging_model = ApexXGBoostModel("btcusdt_crypto_ranging", store.feature_columns)
-    ranging_model.load()
-    
-    logger.info("Generating base model predictions...")
-    pred_trending = trending_model.predict(features)
-    pred_ranging = ranging_model.predict(features)
-    
-    # 4. Prepare RL Dataset
-    rl_data = pd.DataFrame()
-    rl_data['prob_trending'] = features['Volatility_Regime'].apply(lambda x: 1.0 if x > 0.5 else 0.0) # Simplified prob
-    rl_data['prob_ranging'] = 1.0 - rl_data['prob_trending']
-    rl_data['atr_ratio'] = features['ATR_Ratio']
-    rl_data['recent_accuracy'] = 0.5  # Static for training, dynamic in live
-    rl_data['ob_bull_dist'] = features['OB_bull_dist']
-    rl_data['ob_bear_dist'] = features['OB_bear_dist']
-    
-    rl_data['pred_trending'] = pred_trending
-    rl_data['pred_ranging'] = pred_ranging
-    rl_data['forward_return'] = df['forward_return']
-    
-    logger.info(f"RL dataset prepared with {len(rl_data)} rows.")
-    
-    # 5. Train RL Agent
-    env = ApexMetaEnv(data=rl_data)
-    
-    try:
-        from stable_baselines3 import PPO
-    except ImportError:
-        logger.error("stable-baselines3 not installed. Run `pip install stable-baselines3`.")
-        return
-        
-    model = PPO("MlpPolicy", env, verbose=1, learning_rate=0.0003, n_steps=2048, batch_size=64)
-    
-    logger.info("Training PPO Agent...")
-    total_timesteps = args.episodes * len(rl_data)
-    model.learn(total_timesteps=total_timesteps)
-    
-    # 6. Save Model
-    model_dir = DATA_DIR / "models"
-    model_dir.mkdir(exist_ok=True)
-    model_path = model_dir / "rl_meta_controller"
-    model.save(str(model_path))
-    logger.info(f"Meta-Controller model saved to {model_path}.zip")
+    print("RL Agent trained and saved successfully!")
+
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--symbol", type=str, default="btcusdt")
+    parser.add_argument("--market", type=str, default="crypto")
+    parser.add_argument("--steps", type=int, default=100000)
+    args = parser.parse_args()
+    
+    train_rl(args.symbol, args.market, args.steps)

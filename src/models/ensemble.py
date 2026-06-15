@@ -226,7 +226,9 @@ class ModelEnsemble:
         elif self.weighting == WeightingMethod.REGIME:
             # Boost models trained for the current regime
             base_weight = max(member.recent_accuracy, self.min_weight)
-            if member.regime == current_regime.lower():
+            if member.regime == "lstm":
+                return base_weight * 3.0  # 3x boost for deep learning sequential brain
+            elif member.regime.startswith(current_regime.lower()):
                 return base_weight * 2.0  # 2x boost for matching regime
             elif member.regime == "all":
                 return base_weight * 1.0  # Neutral for general models
@@ -314,7 +316,7 @@ class ModelEnsemble:
         total_weight = 0.0
 
         for member in self._members:
-            importance = member.model.get_feature_importance()
+            importance = getattr(member.model, "get_feature_importance", lambda: {})()
             w = member.weight
             total_weight += w
 

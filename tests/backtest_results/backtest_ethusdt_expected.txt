@@ -11,63 +11,61 @@
 ============================================================
   RETURNS
 ============================================================
-  Total Return:               204.06%
-  Annualized Return:        27221.96%
+  Total Return:              -100.08%
+  Annualized Return:        -1053.66%
 
 ============================================================
   RISK-ADJUSTED METRICS
 ============================================================
-  Sharpe Ratio:                39.76
-  Sortino Ratio:               28.90
-  Calmar Ratio:              1341.56
+  Sharpe Ratio:                 3.14
+  Sortino Ratio:                5.64
+  Calmar Ratio:               -10.53
 
 ============================================================
   DRAWDOWN
 ============================================================
-  Max Drawdown:                20.29%
-  Max DD Duration:               373 bars
-  Avg Drawdown:                 3.28%
+  Max Drawdown:               100.08%
+  Max DD Duration:             49907 bars
+  Avg Drawdown:                96.14%
 
 ============================================================
   TRADE STATISTICS
 ============================================================
-  Total Trades:                  367
-  Winning Trades:                186
-  Losing Trades:                 181
-  Win Rate:                    50.7%
-  Profit Factor:                0.82
-  Avg Win:                    0.2616%
-  Avg Loss:                  -0.2069%
-  Avg R:R Realized:             1.26
-  Expectancy ($/trade):       -13.23
-  Largest Win:                368.39
-  Largest Loss:              -288.11
+  Total Trades:                  365
+  Winning Trades:                150
+  Losing Trades:                 215
+  Win Rate:                    41.1%
+  Profit Factor:                0.33
+  Avg Win:                    0.0981%
+  Avg Loss:                  -0.1169%
+  Avg R:R Realized:             0.84
+  Expectancy ($/trade):       -52.45
+  Largest Win:                449.62
+  Largest Loss:              -289.82
 
 ============================================================
   HOLDING PERIODS
 ============================================================
-  Avg Holding:                   8.7 bars
-  Avg Win Holding:              11.0 bars
-  Avg Loss Holding:              6.3 bars
+  Avg Holding:                   7.8 bars
+  Avg Win Holding:               8.6 bars
+  Avg Loss Holding:              7.3 bars
 
 ============================================================
   QUALITY GATE FAILURES
 ============================================================
-  max_drawdown_pct          Actual:  20.2913  Required:  15.0000
-  profit_factor             Actual:   0.8204  Required:   1.3000
+  max_drawdown_pct          Actual: 100.0828  Required:  15.0000
+  profit_factor             Actual:   0.3264  Required:   1.3000
 
 ============================================================
   EXIT REASON DISTRIBUTION
 ============================================================
-  stop_loss              271 (73.8%)
-  take_profit             93 (25.3%)
-  time_expiry              3 (0.8%)
+  stop_loss              250 (68.5%)
+  take_profit            115 (31.5%)
 
 ============================================================
   WIN RATE BY EXIT REASON
 ============================================================
-  stop_loss            Win Rate: 33.6% (n=271)
-  take_profit          Win Rate: 100.0% (n=93)
-  time_expiry          Win Rate: 66.7% (n=3)
+  take_profit          Win Rate: 71.3% (n=115)
+  stop_loss            Win Rate: 27.2% (n=250)
 
 ============================================================

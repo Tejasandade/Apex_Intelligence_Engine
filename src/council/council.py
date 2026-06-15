@@ -40,6 +40,8 @@ from src.council.advisors import (
     RegimeAdvisor,
     RiskAdvisor,
     SessionAdvisor,
+    ExhaustionAdvisor,
+    VelocityAdvisor,
 )
 from src.core.logging import get_logger
 
@@ -69,9 +71,9 @@ class Council:
             scalp_mode: If True, lowers thresholds and bypasses strict trend/volume constraints.
         """
         self.scalp_mode = scalp_mode
-        self.consensus_threshold = 0.40 if scalp_mode else consensus_threshold
+        self.consensus_threshold = consensus_threshold
         self.min_voting_advisors = 2 if scalp_mode else min_voting_advisors
-        self.enable_veto = enable_veto
+        self.enable_veto = False  # Phase 6: Remove strict vetoes in favor of weighted scoring
 
         # Advisors (initialized with default weights)
         self.advisors: list[BaseAdvisor] = []
@@ -82,16 +84,40 @@ class Council:
         self._approved = 0
         self._rejected = 0
 
-    def setup_default_advisors(self) -> None:
+    def setup_default_advisors(self, symbol: str = "default") -> None:
         """Initialize the standard 5-advisor council."""
+        from src.core.config import DATA_DIR
+        import yaml
+        from pathlib import Path
+        
+        # Load optimized weights
+        config_path = Path("configs/models.yaml")
+        council_weights = {}
+        if config_path.exists():
+            with open(config_path, "r") as f:
+                config = yaml.safe_load(f)
+                all_weights = config.get("council_weights", {})
+                
+                # Try to get symbol specific weights, fallback to default
+                if symbol in all_weights:
+                    council_weights = all_weights[symbol]
+                else:
+                    council_weights = all_weights.get("default", {})
+                
+        # Phase 6: Update threshold based on tuning
+        if "council_threshold" in council_weights:
+            self.consensus_threshold = council_weights["council_threshold"]
+
         self._risk_advisor = RiskAdvisor(weight=0.0)
 
         self.advisors = [
-            MomentumAdvisor(weight=1.5),
-            StructureAdvisor(weight=1.2),
-            VolumeAdvisor(weight=1.0),
-            RegimeAdvisor(weight=1.3),
-            SessionAdvisor(weight=1.0),
+            MomentumAdvisor(weight=council_weights.get("weight_momentum", 1.5)),
+            StructureAdvisor(weight=council_weights.get("weight_structure", 1.2)),
+            VolumeAdvisor(weight=council_weights.get("weight_volume", 1.0)),
+            RegimeAdvisor(weight=council_weights.get("weight_regime", 1.3)),
+            SessionAdvisor(weight=council_weights.get("weight_session", 1.0)),
+            ExhaustionAdvisor(weight=2.0),
+            VelocityAdvisor(weight=2.5),  # High weight for strict channel-bottom veto
             self._risk_advisor,
         ]
 
@@ -182,66 +208,36 @@ class Council:
                     reasoning=f"Error: {str(e)}",
                 ))
 
-        # ── Check for veto ───────────────────────────────────────────────────
-        if self.enable_veto:
-            for vote in votes:
-                # Risk advisor always has veto power
-                is_veto = (vote.advisor_name == "Risk" and vote.vote == Vote.REJECT)
-                    
-                # IndiaSessionAdvisor always has veto power
-                if vote.advisor_name == "IndiaSessionAdvisor" and vote.vote == Vote.REJECT:
-                    is_veto = True
-                
-                if is_veto:
-                    decision = CouncilDecision(
-                        approved=False,
-                        direction=direction,
-                        consensus_score=0.0,
-                        votes=votes,
-                        explanation=f"VETOED by {vote.advisor_name}: {vote.reasoning}",
-                    )
-                    self._record_decision(decision)
-                    return decision
-
-        # ── Tally weighted votes ─────────────────────────────────────────────
+        # ── Phase 6: Pure Weighted Consensus Score ───────────────────────────
+        total_possible_weight = sum(a.weight for a in self.advisors if a.name != "Risk")
+        
+        # Risk is a penalty modifier, not a strict veto
+        risk_penalty = 0.0
+        
         weight_approve = 0.0
         weight_reject = 0.0
         weight_abstain = 0.0
-        voting_count = 0
 
         for vote in votes:
-            weighted = vote.weight * vote.conviction
+            if vote.advisor_name == "Risk" and vote.vote == Vote.REJECT:
+                risk_penalty = vote.conviction * 0.5  # Max 50% penalty for bad risk
 
+            weighted = vote.weight * vote.conviction
             if vote.vote == Vote.APPROVE:
                 weight_approve += weighted
-                voting_count += 1
             elif vote.vote == Vote.REJECT:
                 weight_reject += weighted
-                voting_count += 1
-            else:  # ABSTAIN
+            else:
                 weight_abstain += vote.weight
 
-        # ── Check minimum voting requirement ─────────────────────────────────
-        if voting_count < self.min_voting_advisors:
-            decision = CouncilDecision(
-                approved=False,
-                direction=direction,
-                consensus_score=0.0,
-                votes=votes,
-                total_weight_approve=weight_approve,
-                total_weight_reject=weight_reject,
-                total_weight_abstain=weight_abstain,
-                explanation=(
-                    f"Insufficient votes: {voting_count}/{self.min_voting_advisors} "
-                    f"advisors voted (too many abstentions)"
-                ),
-            )
-            self._record_decision(decision)
-            return decision
-
-        # ── Compute consensus ────────────────────────────────────────────────
-        total_effective_weight = weight_approve + weight_reject + (weight_abstain * 0.5)
-        consensus = weight_approve / total_effective_weight if total_effective_weight > 0 else 0.0
+        # Calculate pure mathematical score (0.0 to 1.0)
+        if total_possible_weight > 0:
+            raw_score = (weight_approve - weight_reject + total_possible_weight) / (2 * total_possible_weight)
+        else:
+            raw_score = 0.5
+            
+        # Apply risk penalty
+        consensus = max(0.0, raw_score - risk_penalty)
         approved = consensus >= self.consensus_threshold
 
         # ── Build explanation ────────────────────────────────────────────────
