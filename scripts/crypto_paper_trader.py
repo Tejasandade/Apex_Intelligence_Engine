@@ -117,6 +117,57 @@ recent_trades = deque(maxlen=100)
 minute_candles = deque(maxlen=60)
 live_candle = {"open": 0, "high": 0, "low": 0, "close": 0, "volume": 0}
 
+# 5-Minute Candle Buffer (for FVG & OB detection)
+five_min_candles = deque(maxlen=50)
+five_min_accumulator = []  # Collects 1-min candles to aggregate
+
+# Dynamic Cooldown State
+cooldown = {
+    "active": False,
+    "buckets_remaining": 0,
+    "base_buckets": 15,
+    "elevated_vpin": 98,     # Cooldown lifts if VPIN >= 98th
+    "elevated_cofi": 4.0     # AND COFI Z > 4.0
+}
+
+# Session Awareness (UTC hours)
+SESSION_MAP = {
+    "DEAD_ZONE": (21, 0),    # UTC 21:00-00:00 | IST 2:30-5:30 AM
+    "ASIAN":     (0, 7),     # UTC 00:00-07:00 | IST 5:30 AM-12:30 PM
+    "LONDON":    (7, 13),    # UTC 07:00-13:00 | IST 12:30-6:30 PM
+    "NEW_YORK":  (13, 21)    # UTC 13:00-21:00 | IST 6:30 PM-2:30 AM
+}
+session_state = {
+    "current": "UNKNOWN",
+    "execution_allowed": True,
+    "thresholds_elevated": False
+}
+
+# Live FVG State
+fvg_state = {
+    "bullish_fvgs": [],   # List of {"bottom": float, "top": float, "ts": str}
+    "bearish_fvgs": [],
+    "nearest_bullish": None,
+    "nearest_bearish": None
+}
+
+# ICT Order Block State
+ob_state = {
+    "bullish_obs": [],    # List of {"low": float, "high": float, "ts": str, "displacement": float}
+    "bearish_obs": [],
+    "active_count": 0
+}
+
+# CVD (Cumulative Volume Delta)
+cvd_state = {
+    "cvd": 0.0,
+    "cvd_history": deque(maxlen=50),   # CVD snapshot per 5-min candle
+    "price_history": deque(maxlen=50), # Price snapshot per 5-min candle
+    "divergence": "NONE",              # NONE, BULLISH, BEARISH
+    "5min_buy_vol": 0.0,
+    "5min_sell_vol": 0.0
+}
+
 # ---------------------------------------------------------
 # VOLATILITY & PRE-WARM LOGIC
 # ---------------------------------------------------------
@@ -232,6 +283,247 @@ def prewarm_engine():
         print(f"Pre-warm failed: {e}. Will rely on live ticks.")
 
 # ---------------------------------------------------------
+# SESSION AWARENESS
+# ---------------------------------------------------------
+def get_current_session():
+    utc_hour = datetime.datetime.utcnow().hour
+    if 7 <= utc_hour < 13:
+        session_state["current"] = "LONDON"
+        session_state["execution_allowed"] = True
+        session_state["thresholds_elevated"] = False
+    elif 13 <= utc_hour < 21:
+        session_state["current"] = "NEW_YORK"
+        session_state["execution_allowed"] = True
+        session_state["thresholds_elevated"] = False
+    elif 0 <= utc_hour < 7:
+        session_state["current"] = "ASIAN"
+        session_state["execution_allowed"] = True
+        session_state["thresholds_elevated"] = True  # Elevated thresholds
+    else:  # 21-24
+        session_state["current"] = "DEAD_ZONE"
+        session_state["execution_allowed"] = False
+        session_state["thresholds_elevated"] = True
+
+# ---------------------------------------------------------
+# DYNAMIC COOLDOWN
+# ---------------------------------------------------------
+def activate_cooldown():
+    cooldown["active"] = True
+    cooldown["buckets_remaining"] = cooldown["base_buckets"]
+
+def tick_cooldown():
+    """Called on each completed volume bucket."""
+    if cooldown["active"]:
+        cooldown["buckets_remaining"] -= 1
+        if cooldown["buckets_remaining"] <= 0:
+            cooldown["active"] = False
+            cooldown["buckets_remaining"] = 0
+
+def check_cooldown_override(vpin_pct, cofi_z):
+    """Returns True if the signal is strong enough to override cooldown."""
+    if not cooldown["active"]:
+        return True
+    if vpin_pct >= cooldown["elevated_vpin"] and abs(cofi_z) >= cooldown["elevated_cofi"]:
+        cooldown["active"] = False
+        cooldown["buckets_remaining"] = 0
+        print("⚡ COOLDOWN OVERRIDE: Exceptional signal detected, cooldown lifted!")
+        return True
+    return False
+
+# ---------------------------------------------------------
+# 5-MINUTE CANDLE AGGREGATOR
+# ---------------------------------------------------------
+def aggregate_5min_candle(one_min_candle):
+    """Collect 1-min candles and aggregate every 5 into a 5-min candle."""
+    five_min_accumulator.append(one_min_candle)
+    if len(five_min_accumulator) >= 5:
+        o = five_min_accumulator[0]["open"]
+        h = max(c["high"] for c in five_min_accumulator)
+        l = min(c["low"] for c in five_min_accumulator)
+        c = five_min_accumulator[-1]["close"]
+        v = sum(c_["volume"] for c_ in five_min_accumulator)
+        
+        candle_5m = {"open": o, "high": h, "low": l, "close": c, "volume": v}
+        five_min_candles.append(candle_5m)
+        five_min_accumulator.clear()
+        
+        # Snapshot CVD and price for divergence detection
+        cvd_state["cvd_history"].append(cvd_state["cvd"])
+        cvd_state["price_history"].append(c)
+        cvd_state["cvd"] = 0.0  # Reset per 5-min window
+        
+        # Run detection on new 5-min candle
+        detect_fvgs()
+        detect_order_blocks()
+        detect_cvd_divergence()
+
+# ---------------------------------------------------------
+# LIVE FVG DETECTION
+# ---------------------------------------------------------
+def detect_fvgs():
+    """Detect Fair Value Gaps on the 5-minute chart."""
+    if len(five_min_candles) < 3:
+        return
+    
+    candles = list(five_min_candles)
+    ltp = state["ltp"]
+    
+    # Purge mitigated FVGs (price closed inside the gap)
+    fvg_state["bullish_fvgs"] = [
+        f for f in fvg_state["bullish_fvgs"]
+        if not (ltp > f["bottom"] and ltp < f["top"])
+    ]
+    fvg_state["bearish_fvgs"] = [
+        f for f in fvg_state["bearish_fvgs"]
+        if not (ltp < f["top"] and ltp > f["bottom"])
+    ]
+    
+    # Check latest 3 candles for new FVG
+    c0 = candles[-3]  # Candle 1
+    c1 = candles[-2]  # Candle 2 (impulse)
+    c2 = candles[-1]  # Candle 3
+    
+    # Bullish FVG: candle 3's low > candle 1's high (gap up)
+    if c2["low"] > c0["high"]:
+        gap_bottom = c0["high"]
+        gap_top = c2["low"]
+        # Wick rule: candle 2's low must not go below candle 1's low
+        if c1["low"] >= c0["low"]:
+            fvg = {"bottom": gap_bottom, "top": gap_top, "ts": datetime.datetime.now().strftime("%H:%M")}
+            # Only add if not duplicate
+            if not any(abs(f["bottom"] - gap_bottom) < 1.0 for f in fvg_state["bullish_fvgs"]):
+                fvg_state["bullish_fvgs"].append(fvg)
+                print(f"📊 NEW BULLISH FVG DETECTED: [{gap_bottom:,.1f} - {gap_top:,.1f}]")
+    
+    # Bearish FVG: candle 3's high < candle 1's low (gap down)
+    if c2["high"] < c0["low"]:
+        gap_top = c0["low"]
+        gap_bottom = c2["high"]
+        # Wick rule: candle 2's high must not go above candle 1's high
+        if c1["high"] <= c0["high"]:
+            fvg = {"bottom": gap_bottom, "top": gap_top, "ts": datetime.datetime.now().strftime("%H:%M")}
+            if not any(abs(f["top"] - gap_top) < 1.0 for f in fvg_state["bearish_fvgs"]):
+                fvg_state["bearish_fvgs"].append(fvg)
+                print(f"📊 NEW BEARISH FVG DETECTED: [{gap_bottom:,.1f} - {gap_top:,.1f}]")
+    
+    # Find nearest FVGs to current price
+    all_bull = sorted(fvg_state["bullish_fvgs"], key=lambda f: abs(ltp - (f["bottom"] + f["top"]) / 2))
+    all_bear = sorted(fvg_state["bearish_fvgs"], key=lambda f: abs(ltp - (f["bottom"] + f["top"]) / 2))
+    fvg_state["nearest_bullish"] = all_bull[0] if all_bull else None
+    fvg_state["nearest_bearish"] = all_bear[0] if all_bear else None
+
+def is_price_in_fvg(ltp, is_long):
+    """Check if current price is inside any active FVG zone."""
+    fvgs = fvg_state["bullish_fvgs"] if is_long else fvg_state["bearish_fvgs"]
+    for fvg in fvgs:
+        if fvg["bottom"] <= ltp <= fvg["top"]:
+            return True, fvg
+    return False, None
+
+# ---------------------------------------------------------
+# ICT ORDER BLOCK DETECTION
+# ---------------------------------------------------------
+def detect_order_blocks():
+    """Detect ICT Order Blocks on the 5-minute chart."""
+    if len(five_min_candles) < 15:
+        return
+    
+    candles = list(five_min_candles)
+    ltp = state["ltp"]
+    
+    # Purge mitigated OBs (price closed through the OB zone)
+    ob_state["bullish_obs"] = [
+        ob for ob in ob_state["bullish_obs"]
+        if not (ltp < ob["low"])  # Only remove if price went completely below
+    ]
+    ob_state["bearish_obs"] = [
+        ob for ob in ob_state["bearish_obs"]
+        if not (ltp > ob["high"])  # Only remove if price went completely above
+    ]
+    
+    # Calculate body sizes
+    bodies = [abs(c["close"] - c["open"]) for c in candles]
+    is_bullish = [c["close"] > c["open"] for c in candles]
+    
+    n = len(candles)
+    
+    # Check last candle for displacement
+    if n < 12:
+        return
+    
+    i = n - 1  # Latest candle
+    avg_body = np.mean(bodies[max(0, i-10):i])
+    
+    if avg_body <= 0 or bodies[i] < 1.5 * avg_body:
+        return  # No displacement
+    
+    displacement_bullish = is_bullish[i]
+    
+    if displacement_bullish:
+        # Find last bearish candle before displacement
+        for j in range(i - 1, max(0, i - 6), -1):
+            if not is_bullish[j]:
+                ob = {
+                    "low": candles[j]["low"],
+                    "high": candles[j]["high"],
+                    "ts": datetime.datetime.now().strftime("%H:%M"),
+                    "displacement": bodies[i] / avg_body
+                }
+                if not any(abs(o["low"] - ob["low"]) < 1.0 for o in ob_state["bullish_obs"]):
+                    ob_state["bullish_obs"].append(ob)
+                    print(f"🏗️ BULLISH ORDER BLOCK: [{ob['low']:,.1f} - {ob['high']:,.1f}] (Displacement: {ob['displacement']:.1f}x)")
+                break
+    else:
+        # Find last bullish candle before displacement
+        for j in range(i - 1, max(0, i - 6), -1):
+            if is_bullish[j]:
+                ob = {
+                    "low": candles[j]["low"],
+                    "high": candles[j]["high"],
+                    "ts": datetime.datetime.now().strftime("%H:%M"),
+                    "displacement": bodies[i] / avg_body
+                }
+                if not any(abs(o["high"] - ob["high"]) < 1.0 for o in ob_state["bearish_obs"]):
+                    ob_state["bearish_obs"].append(ob)
+                    print(f"🏗️ BEARISH ORDER BLOCK: [{ob['low']:,.1f} - {ob['high']:,.1f}] (Displacement: {ob['displacement']:.1f}x)")
+                break
+    
+    ob_state["active_count"] = len(ob_state["bullish_obs"]) + len(ob_state["bearish_obs"])
+
+def is_price_in_ict_ob(ltp, is_long):
+    """Check if current price is inside any active ICT Order Block."""
+    obs = ob_state["bullish_obs"] if is_long else ob_state["bearish_obs"]
+    for ob in obs:
+        if ob["low"] <= ltp <= ob["high"]:
+            return True, ob
+    return False, None
+
+# ---------------------------------------------------------
+# CVD DIVERGENCE DETECTION
+# ---------------------------------------------------------
+def detect_cvd_divergence():
+    """Detect price vs CVD divergence across 5-min windows."""
+    if len(cvd_state["cvd_history"]) < 5 or len(cvd_state["price_history"]) < 5:
+        cvd_state["divergence"] = "NONE"
+        return
+    
+    prices = list(cvd_state["price_history"])
+    cvds = list(cvd_state["cvd_history"])
+    
+    # Compare last 3 snapshots
+    p1, p2, p3 = prices[-3], prices[-2], prices[-1]
+    c1, c2, c3 = cvds[-3], cvds[-2], cvds[-1]
+    
+    # Bullish divergence: price making lower lows but CVD making higher lows
+    if p3 < p1 and c3 > c1:
+        cvd_state["divergence"] = "BULLISH"
+    # Bearish divergence: price making higher highs but CVD making lower highs
+    elif p3 > p1 and c3 < c1:
+        cvd_state["divergence"] = "BEARISH"
+    else:
+        cvd_state["divergence"] = "NONE"
+
+# ---------------------------------------------------------
 # DATABASE & LOGGING
 # ---------------------------------------------------------
 def init_clickhouse():
@@ -283,7 +575,12 @@ def log_trade(action, price, pnl, reason):
 def execute_signal():
     if portfolio["position"] != "FLAT":
         return
-        
+    
+    # --- SESSION GATE ---
+    get_current_session()
+    if not session_state["execution_allowed"]:
+        return  # Dead zone: no trades
+    
     vpin_pct = state["vpin_percentile"]
     cofi = state["cofi_z"]
     acf = state["acf_lag1"]
@@ -291,16 +588,21 @@ def execute_signal():
     
     if velocity > 60.0:
         return # Block fake breakouts
-        
+    
+    # --- DYNAMIC COOLDOWN GATE ---
+    if cooldown["active"] and not check_cooldown_override(vpin_pct, cofi):
+        return  # In cooldown, signal not strong enough to override
+    
+    # --- SETUP B: LIQUIDATION SQUEEZE (unchanged, but with session gate) ---
     longs_wiped = liquidations["longs_usd"]
     shorts_wiped = liquidations["shorts_usd"]
     
     if longs_wiped > 500000.0 or shorts_wiped > 500000.0:
         is_long = longs_wiped > shorts_wiped
         sl_pct = DYNAMIC_PARAMS["STOP_LOSS_BPS"] / 10000.0
-        risk_dollars = portfolio["account_balance"] * 0.02 # 2% risk
+        risk_dollars = portfolio["account_balance"] * 0.02
         notional_size = risk_dollars / sl_pct
-        max_notional = portfolio["account_balance"] * 50.0 # Max 50x leverage
+        max_notional = portfolio["account_balance"] * 50.0
         portfolio["notional_size_usd"] = min(notional_size, max_notional)
         portfolio["leverage_used"] = portfolio["notional_size_usd"] / portfolio["account_balance"]
         
@@ -324,59 +626,104 @@ def execute_signal():
         liquidations["shorts_usd"] = 0.0
         liquidation_events.clear()
         return
-    cofi_threshold = 3.0 if ml_state["regime"] == "CHOP (LOW VOL)" else 2.0
     
-    if vpin_pct >= 95 and abs(cofi) > cofi_threshold:
-        is_long = cofi > 0
-        ltp = state["ltp"]
-        hvns = macro_structure["hvns"]
-        
-        # Institutional Liquidity Filter (Order Blocks & Absorption)
-        in_order_block = False
-        ob_price = 0.0
-        
-        for hvn in hvns:
-            if abs(ltp - hvn) / ltp <= 0.0030: # 0.30% Order Block Zone
-                in_order_block = True
-                ob_price = hvn
-                break
-                
-        if not in_order_block:
-            if abs(ltp - macro_structure["poc"]) / ltp <= 0.0030:
-                in_order_block = True
-                ob_price = macro_structure["poc"]
-                
-        if not in_order_block:
-            return # Ban trades in no-man's land
-            
-        obi = state["obi"]
-        if is_long and obi < 0.30:
-            print(f"Liquidity Engine: Blocked LONG at {ob_price:,.1f} OB. No Limit Buy Wall Absorption (OBI: {obi:.2f}).")
-            return
-        if not is_long and obi > -0.30:
-            print(f"Liquidity Engine: Blocked SHORT at {ob_price:,.1f} OB. No Limit Sell Wall Absorption (OBI: {obi:.2f}).")
-            return
-            
-        sl_pct = DYNAMIC_PARAMS["STOP_LOSS_BPS"] / 10000.0
-        risk_dollars = portfolio["account_balance"] * 0.02 # 2% risk
-        notional_size = risk_dollars / sl_pct
-        max_notional = portfolio["account_balance"] * 50.0 # Max 50x leverage
-        portfolio["notional_size_usd"] = min(notional_size, max_notional)
-        portfolio["leverage_used"] = portfolio["notional_size_usd"] / portfolio["account_balance"]
-        
-        portfolio["phase"] = 1
-        portfolio["post_entry_volume"] = 0.0
-        portfolio["post_entry_vwap_sum"] = 0.0
-        portfolio["vwap"] = 0.0
-        
-        if cofi > 0:
-            portfolio["position"] = "LONG"
-            portfolio["entry_price"] = state["ask"]
-            log_trade("BUY", state["ask"], 0.0, "SETUP A - LONG")
-        else:
-            portfolio["position"] = "SHORT"
-            portfolio["entry_price"] = state["bid"]
-            log_trade("SELL", state["bid"], 0.0, "SETUP A - SHORT")
+    # --- SETUP A: INSTITUTIONAL FLOW + ORDER BLOCK + ABSORPTION ---
+    # Adjust thresholds based on session and regime
+    if session_state["thresholds_elevated"]:
+        vpin_req = 98
+        cofi_threshold = 4.0
+    else:
+        cofi_threshold = 3.0 if ml_state["regime"] == "CHOP (LOW VOL)" else 2.0
+        vpin_req = 95
+    
+    if vpin_pct < vpin_req or abs(cofi) <= cofi_threshold:
+        return
+    
+    is_long = cofi > 0
+    ltp = state["ltp"]
+    hvns = macro_structure["hvns"]
+    
+    # --- MULTI-SOURCE ORDER BLOCK CHECK ---
+    # Source 1: Volume Profile HVNs
+    in_vp_ob = False
+    ob_price = 0.0
+    for hvn in hvns:
+        if abs(ltp - hvn) / ltp <= 0.0030:
+            in_vp_ob = True
+            ob_price = hvn
+            break
+    if not in_vp_ob:
+        if abs(ltp - macro_structure["poc"]) / ltp <= 0.0030:
+            in_vp_ob = True
+            ob_price = macro_structure["poc"]
+    
+    # Source 2: ICT Order Blocks (5-min structural)
+    in_ict_ob, ict_ob = is_price_in_ict_ob(ltp, is_long)
+    
+    # Must be in at least one Order Block source
+    if not in_vp_ob and not in_ict_ob:
+        return  # No-man's land: ban execution
+    
+    # --- LEVEL 2 ABSORPTION CHECK ---
+    obi = state["obi"]
+    if is_long and obi < 0.30:
+        return
+    if not is_long and obi > -0.30:
+        return
+    
+    # --- CVD DIVERGENCE CONFIRMATION ---
+    cvd_div = cvd_state["divergence"]
+    if is_long and cvd_div == "BEARISH":
+        print(f"CVD Filter: Blocked LONG — Bearish CVD divergence (buyers exhausting)")
+        return
+    if not is_long and cvd_div == "BULLISH":
+        print(f"CVD Filter: Blocked SHORT — Bullish CVD divergence (sellers exhausting)")
+        return
+    
+    # --- FVG CONFLUENCE CHECK ---
+    in_fvg, fvg = is_price_in_fvg(ltp, is_long)
+    
+    # --- DETERMINE SETUP GRADE ---
+    confluence_count = sum([in_vp_ob, in_ict_ob, in_fvg, cvd_div == ("BULLISH" if is_long else "BEARISH")])
+    
+    if confluence_count >= 3:
+        setup_grade = "S"   # S-tier: triple+ confluence
+    elif confluence_count >= 2:
+        setup_grade = "A+"  # A+ tier: double confluence
+    else:
+        setup_grade = "A"   # A tier: single OB source
+    
+    # --- POSITION SIZING ---
+    sl_pct = DYNAMIC_PARAMS["STOP_LOSS_BPS"] / 10000.0
+    risk_dollars = portfolio["account_balance"] * 0.02
+    notional_size = risk_dollars / sl_pct
+    max_notional = portfolio["account_balance"] * 50.0
+    portfolio["notional_size_usd"] = min(notional_size, max_notional)
+    portfolio["leverage_used"] = portfolio["notional_size_usd"] / portfolio["account_balance"]
+    
+    portfolio["phase"] = 1
+    portfolio["post_entry_volume"] = 0.0
+    portfolio["post_entry_vwap_sum"] = 0.0
+    portfolio["vwap"] = 0.0
+    
+    # Build reason string
+    sources = []
+    if in_vp_ob: sources.append(f"VP-OB:{ob_price:,.0f}")
+    if in_ict_ob: sources.append(f"ICT-OB:{ict_ob['low']:,.0f}-{ict_ob['high']:,.0f}")
+    if in_fvg: sources.append(f"FVG:{fvg['bottom']:,.0f}-{fvg['top']:,.0f}")
+    if cvd_div != "NONE": sources.append(f"CVD:{cvd_div}")
+    source_str = " | ".join(sources)
+    
+    if cofi > 0:
+        portfolio["position"] = "LONG"
+        portfolio["entry_price"] = state["ask"]
+        reason = f"SETUP {setup_grade} - LONG [{source_str}]"
+        log_trade("BUY", state["ask"], 0.0, reason)
+    else:
+        portfolio["position"] = "SHORT"
+        portfolio["entry_price"] = state["bid"]
+        reason = f"SETUP {setup_grade} - SHORT [{source_str}]"
+        log_trade("SELL", state["bid"], 0.0, reason)
 
 def check_exits():
     if portfolio["position"] == "FLAT":
@@ -403,6 +750,7 @@ def check_exits():
                 portfolio["position"] = "FLAT"
                 portfolio["phase"] = 0
                 portfolio["unrealized_pnl"] = 0.0
+                activate_cooldown()
             elif net_pnl_pct >= SCALE_BPS:
                 half_pnl = portfolio["unrealized_pnl"] / 2.0
                 portfolio["realized_pnl"] += half_pnl
@@ -442,6 +790,7 @@ def check_exits():
                 portfolio["position"] = "FLAT"
                 portfolio["phase"] = 0
                 portfolio["unrealized_pnl"] = 0.0
+                activate_cooldown()
             elif net_pnl_pct >= SCALE_BPS:
                 half_pnl = portfolio["unrealized_pnl"] / 2.0
                 portfolio["realized_pnl"] += half_pnl
@@ -485,8 +834,10 @@ def process_trade(price, qty, is_buyer_maker):
         live_candle["volume"] = 0.0
         
     if ts_now > state["current_minute_ts"] + 60:
-        minute_candles.append(dict(live_candle))
+        completed_candle = dict(live_candle)
+        minute_candles.append(completed_candle)
         update_dynamic_parameters()
+        aggregate_5min_candle(completed_candle)  # Feed into 5-min aggregator
         
         state["current_minute_ts"] = int(ts_now // 60) * 60
         live_candle["open"] = live_candle["high"] = live_candle["low"] = live_candle["close"] = price
@@ -505,7 +856,15 @@ def process_trade(price, qty, is_buyer_maker):
     
     direction = "SELL" if is_buyer_maker else "BUY"
     
-    # 3. Update COFI
+    # 3. CVD Tracking (cumulative per 5-min window)
+    if direction == "BUY":
+        cvd_state["cvd"] += qty
+        cvd_state["5min_buy_vol"] += qty
+    else:
+        cvd_state["cvd"] -= qty
+        cvd_state["5min_sell_vol"] += qty
+    
+    # 4. Update COFI
     signed_vol = qty if direction == "BUY" else -qty
     order_flow_imbalances.append(signed_vol)
     
@@ -537,6 +896,7 @@ def process_trade(price, qty, is_buyer_maker):
         state["bucket_velocity_sec"] = time.time() - current_bucket["start_time"]
         state["buckets_completed"] += 1
         current_bucket = {"buy_vol": 0.0, "sell_vol": 0.0, "total_vol": 0.0, "start_time": time.time()}
+        tick_cooldown()  # Decrement cooldown on each bucket
         
         vpin_arr = np.array(vpin_history)
         state["vpin"] = vpin_arr[-1]
@@ -603,9 +963,26 @@ def render_dashboard():
     print(f"COFI Z:    {cofi_z:+.2f}  |  ML Regime: {ml_regime} ({len(ml_state['features'])}/500)")
     print(f"L2 OBI:    {obi:+.2f}  |  Wall: {obi_color} {obi_status}")
     
-    vel_color = "🟢" if state["bucket_velocity_sec"] > 0 and state["bucket_velocity_sec"] < 60.0 else "🔴"
+    # CVD Display
+    cvd_val = cvd_state["cvd"]
+    cvd_div = cvd_state["divergence"]
+    cvd_div_color = "\U0001f7e2" if cvd_div == "BULLISH" else "\U0001f534" if cvd_div == "BEARISH" else "\u26aa"
+    print(f"CVD:       {cvd_val:+.1f}  |  Divergence: {cvd_div_color} {cvd_div}")
+    
+    vel_color = "\U0001f7e2" if state["bucket_velocity_sec"] > 0 and state["bucket_velocity_sec"] < 60.0 else "\U0001f534"
     print(f"Bucket Vel: {state['bucket_velocity_sec']:>5.1f}s {vel_color}  (Needs < 60s for Entry)")
-    print("─"*65)
+    print("\u2500"*65)
+    
+    # Session & Cooldown
+    get_current_session()
+    sess = session_state["current"]
+    sess_color = "\U0001f7e2" if sess in ("LONDON", "NEW_YORK") else "\U0001f7e1" if sess == "ASIAN" else "\U0001f534"
+    cd_str = f"ACTIVE ({cooldown['buckets_remaining']} buckets)" if cooldown["active"] else "CLEAR"
+    cd_color = "\U0001f534" if cooldown["active"] else "\U0001f7e2"
+    elevated = " (Elevated Thresholds)" if session_state["thresholds_elevated"] else ""
+    print(f"SESSION: {sess_color} {sess}{elevated}  |  Cooldown: {cd_color} {cd_str}")
+    print("\u2500"*65)
+    
     print(f"MACRO STRUCTURE (30-Day Volume Profile):")
     ltp = state["ltp"]
     hvns = macro_structure["hvns"]
@@ -616,27 +993,58 @@ def render_dashboard():
     print(f"Point of Control (POC): {macro_structure['poc']:,.1f}")
     print(f"Nearest Resistance:     {nearest_res:,.1f}")
     print(f"Nearest Support:        {nearest_sup:,.1f}")
-    in_ob = False
+    
+    # Order Block Status (VP + ICT combined)
+    in_vp_ob = False
     for h in hvns + [macro_structure["poc"]]:
         if abs(ltp - h) / ltp <= 0.0030:
-            in_ob = True
+            in_vp_ob = True
             break
-            
-    trend_str = "🟢 INSIDE ORDER BLOCK (Hunting Liquidity)" if in_ob else "⚪ NO-MAN'S LAND (Execution Banned)"
+    in_ict_bull, _ = is_price_in_ict_ob(ltp, True)
+    in_ict_bear, _ = is_price_in_ict_ob(ltp, False)
+    in_any_ob = in_vp_ob or in_ict_bull or in_ict_bear
+    
+    trend_str = "\U0001f7e2 INSIDE ORDER BLOCK (Hunting Liquidity)" if in_any_ob else "\u26aa NO-MAN'S LAND (Execution Banned)"
     print(f"Liquidity State:        {trend_str}")
-    print("─"*65)
+    
+    # ICT Order Blocks
+    bull_ob_count = len(ob_state["bullish_obs"])
+    bear_ob_count = len(ob_state["bearish_obs"])
+    ob_strs = []
+    for ob in ob_state["bullish_obs"][-2:]:
+        ob_strs.append(f"Bull:{ob['low']:,.0f}-{ob['high']:,.0f}")
+    for ob in ob_state["bearish_obs"][-2:]:
+        ob_strs.append(f"Bear:{ob['low']:,.0f}-{ob['high']:,.0f}")
+    ob_display = " | ".join(ob_strs) if ob_strs else "None"
+    print(f"ICT Order Blocks:       {bull_ob_count + bear_ob_count} Active ({ob_display})")
+    
+    # FVGs
+    bull_fvg_count = len(fvg_state["bullish_fvgs"])
+    bear_fvg_count = len(fvg_state["bearish_fvgs"])
+    fvg_strs = []
+    if fvg_state["nearest_bullish"]:
+        f = fvg_state["nearest_bullish"]
+        fvg_strs.append(f"Bull:{f['bottom']:,.0f}-{f['top']:,.0f}")
+    if fvg_state["nearest_bearish"]:
+        f = fvg_state["nearest_bearish"]
+        fvg_strs.append(f"Bear:{f['bottom']:,.0f}-{f['top']:,.0f}")
+    fvg_display = " | ".join(fvg_strs) if fvg_strs else "None"
+    print(f"Active FVGs:            {bull_fvg_count + bear_fvg_count} ({fvg_display})")
+    print("\u2500"*65)
+    
     print(f"LIQUIDATIONS (Rolling 60s):")
     longs_wiped = liquidations["longs_usd"]
     shorts_wiped = liquidations["shorts_usd"]
-    print(f"Longs Wiped:  ${longs_wiped:,.0f}  {'🔴 CAPITULATION DUMP' if longs_wiped > 500000 else ''}")
-    print(f"Shorts Wiped: ${shorts_wiped:,.0f}  {'🟢 SHORT SQUEEZE' if shorts_wiped > 500000 else ''}")
-    print("─"*65)
+    print(f"Longs Wiped:  ${longs_wiped:,.0f}  {'\U0001f534 CAPITULATION DUMP' if longs_wiped > 500000 else ''}")
+    print(f"Shorts Wiped: ${shorts_wiped:,.0f}  {'\U0001f7e2 SHORT SQUEEZE' if shorts_wiped > 500000 else ''}")
+    print("\u2500"*65)
     
     print("DYNAMIC ENGINE (Live Calibrated):")
     print(f"ATR (14m): {state['atr_14']:.1f}  |  Avg 1m Vol: {state['avg_1min_vol']:.1f} BTC")
     print(f"Bucket Size: {DYNAMIC_PARAMS['BUCKET_VOLUME_SIZE']:.1f} BTC  |  SL: {DYNAMIC_PARAMS['STOP_LOSS_BPS']:.1f} bps  |  Scale: {DYNAMIC_PARAMS['SCALE_OUT_BPS']:.1f} bps")
     print(f"Cost/Trade:  {TOTAL_ROUNDTRIP_COST_BPS:.1f} bps  (Taker + Slippage applied to Net PnL)")
-    print("─"*65)
+    print(f"5m Candles:  {len(five_min_candles)}  |  CVD History: {len(cvd_state['cvd_history'])}")
+    print("\u2500"*65)
     
     pos_color = "🟢" if portfolio["position"] == "LONG" else "🔴" if portfolio["position"] == "SHORT" else "⚪"
     pnl_color = "🟢" if portfolio["unrealized_pnl"] > 0 else "🔴" if portfolio["unrealized_pnl"] < 0 else "⚪"
