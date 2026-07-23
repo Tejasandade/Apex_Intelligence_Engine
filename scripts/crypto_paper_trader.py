@@ -261,6 +261,8 @@ def prewarm_engine():
     print("Pre-warming Dynamic Volatility Engine from Binance REST API...")
     try:
         build_volume_profile()
+        
+        # 1. Pre-warm 1-minute candles (60 candles = 1 hour)
         res = requests.get("https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=1m&limit=60")
         data = res.json()
         for kline in data:
@@ -273,12 +275,49 @@ def prewarm_engine():
             }
             minute_candles.append(candle)
             
-        state["ltp"] = float(data[-1][4]) # Last close price
+        state["ltp"] = float(data[-1][4])
         update_dynamic_parameters()
         state["current_minute_ts"] = int(time.time() // 60) * 60
         live_candle["open"] = live_candle["high"] = live_candle["low"] = live_candle["close"] = state["ltp"]
         live_candle["volume"] = 0.0
-        print(f"Pre-warm complete! Found {len(minute_candles)} candles. Starting Live Execution.")
+        print(f"  1m candles: {len(minute_candles)} loaded.")
+        
+        # 2. Pre-warm 5-minute candles (50 candles = ~4 hours)
+        res5 = requests.get("https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=5m&limit=50")
+        data5 = res5.json()
+        for kline in data5:
+            candle5 = {
+                "open": float(kline[1]),
+                "high": float(kline[2]),
+                "low": float(kline[3]),
+                "close": float(kline[4]),
+                "volume": float(kline[5])
+            }
+            five_min_candles.append(candle5)
+            
+            # Seed CVD history from 5m buy/sell volume
+            buy_vol = float(kline[9])  # Taker buy base asset volume
+            total_vol = float(kline[5])
+            sell_vol = total_vol - buy_vol
+            cvd_snapshot = buy_vol - sell_vol
+            cvd_state["cvd_history"].append(cvd_snapshot)
+            cvd_state["price_history"].append(float(kline[4]))
+        
+        print(f"  5m candles: {len(five_min_candles)} loaded.")
+        
+        # 3. Run FVG and OB detection on pre-warmed data
+        detect_fvgs()
+        detect_order_blocks()
+        detect_cvd_divergence()
+        
+        bull_fvgs = len(fvg_state["bullish_fvgs"])
+        bear_fvgs = len(fvg_state["bearish_fvgs"])
+        bull_obs = len(ob_state["bullish_obs"])
+        bear_obs = len(ob_state["bearish_obs"])
+        print(f"  FVGs detected: {bull_fvgs} bullish, {bear_fvgs} bearish")
+        print(f"  ICT Order Blocks: {bull_obs} bullish, {bear_obs} bearish")
+        print(f"  CVD Divergence: {cvd_state['divergence']}")
+        print(f"Pre-warm complete! Engine is combat-ready.")
     except Exception as e:
         print(f"Pre-warm failed: {e}. Will rely on live ticks.")
 
