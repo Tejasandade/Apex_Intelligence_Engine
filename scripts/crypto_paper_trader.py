@@ -168,6 +168,34 @@ cvd_state = {
     "5min_sell_vol": 0.0
 }
 
+# 15-Minute Candle Buffer (Multi-Timeframe Confirmation)
+fifteen_min_candles = deque(maxlen=30)
+fifteen_min_accumulator = []  # Collects 5-min candles
+mtf_state = {
+    "ema_20": 0.0,
+    "trend": "NEUTRAL",   # BULLISH, BEARISH, NEUTRAL
+    "strength": 0.0       # How far price is from EMA (in bps)
+}
+
+# Liquidity Sweep Detection
+sweep_state = {
+    "recent_highs": deque(maxlen=20),  # Rolling 5m candle highs
+    "recent_lows": deque(maxlen=20),   # Rolling 5m candle lows
+    "last_sweep": "NONE",             # NONE, BULLISH_SWEEP, BEARISH_SWEEP
+    "sweep_price": 0.0,
+    "sweep_ts": ""
+}
+
+# Trade Journal (for Supervised ML)
+trade_journal = []  # List of {features_at_entry, outcome, pnl, ...}
+TRADE_JOURNAL_FILE = "trade_journal.json"
+
+# Volume Profile Refresh Timer
+vp_refresh = {
+    "last_refresh_time": 0.0,
+    "refresh_interval_sec": 4 * 3600  # 4 hours
+}
+
 # ---------------------------------------------------------
 # VOLATILITY & PRE-WARM LOGIC
 # ---------------------------------------------------------
@@ -310,11 +338,39 @@ def prewarm_engine():
         detect_order_blocks()
         detect_cvd_divergence()
         
+        # 4. Pre-warm 15-minute candles from 5m data
+        candles_5m = list(five_min_candles)
+        for i in range(0, len(candles_5m) - 2, 3):
+            group = candles_5m[i:i+3]
+            if len(group) == 3:
+                c15 = {
+                    "open": group[0]["open"],
+                    "high": max(g["high"] for g in group),
+                    "low": min(g["low"] for g in group),
+                    "close": group[-1]["close"],
+                    "volume": sum(g["volume"] for g in group)
+                }
+                fifteen_min_candles.append(c15)
+        update_mtf_trend()
+        print(f"  15m candles: {len(fifteen_min_candles)} loaded. MTF Trend: {mtf_state['trend']}")
+        
+        # 5. Seed swing levels for liquidity sweep detection
+        for c5 in candles_5m:
+            track_swing_levels(c5)
+        print(f"  Swing levels: {len(sweep_state['recent_highs'])} highs, {len(sweep_state['recent_lows'])} lows tracked")
+        
+        # 6. Load trade journal
+        load_trade_journal()
+        print(f"  Trade journal: {len(trade_journal)} historical trades loaded")
+        
+        # 7. Init VP refresh timer
+        vp_refresh["last_refresh_time"] = time.time()
+        
         bull_fvgs = len(fvg_state["bullish_fvgs"])
         bear_fvgs = len(fvg_state["bearish_fvgs"])
         bull_obs = len(ob_state["bullish_obs"])
         bear_obs = len(ob_state["bearish_obs"])
-        print(f"  FVGs detected: {bull_fvgs} bullish, {bear_fvgs} bearish")
+        print(f"  FVGs: {bull_fvgs} bullish, {bear_fvgs} bearish")
         print(f"  ICT Order Blocks: {bull_obs} bullish, {bear_obs} bearish")
         print(f"  CVD Divergence: {cvd_state['divergence']}")
         print(f"Pre-warm complete! Engine is combat-ready.")
@@ -395,6 +451,16 @@ def aggregate_5min_candle(one_min_candle):
         detect_fvgs()
         detect_order_blocks()
         detect_cvd_divergence()
+        
+        # Tier 1: Feed into 15-min aggregator
+        aggregate_15min_candle(candle_5m)
+        
+        # Tier 1: Liquidity Sweep Detection
+        track_swing_levels(candle_5m)
+        detect_liquidity_sweep(candle_5m)
+        
+        # Tier 1: Auto-refresh Volume Profile every 4 hours
+        check_vp_refresh()
 
 # ---------------------------------------------------------
 # LIVE FVG DETECTION
@@ -563,6 +629,195 @@ def detect_cvd_divergence():
         cvd_state["divergence"] = "NONE"
 
 # ---------------------------------------------------------
+# MULTI-TIMEFRAME CONFIRMATION (15-MIN)
+# ---------------------------------------------------------
+def aggregate_15min_candle(five_min_candle):
+    """Collect 5-min candles and aggregate every 3 into a 15-min candle."""
+    fifteen_min_accumulator.append(five_min_candle)
+    if len(fifteen_min_accumulator) >= 3:
+        o = fifteen_min_accumulator[0]["open"]
+        h = max(c["high"] for c in fifteen_min_accumulator)
+        l = min(c["low"] for c in fifteen_min_accumulator)
+        c = fifteen_min_accumulator[-1]["close"]
+        v = sum(c_["volume"] for c_ in fifteen_min_accumulator)
+        
+        candle_15m = {"open": o, "high": h, "low": l, "close": c, "volume": v}
+        fifteen_min_candles.append(candle_15m)
+        fifteen_min_accumulator.clear()
+        
+        update_mtf_trend()
+
+def update_mtf_trend():
+    """Calculate 20-period EMA on 15-min closes and determine trend."""
+    if len(fifteen_min_candles) < 5:
+        mtf_state["trend"] = "NEUTRAL"
+        return
+    
+    closes = [c["close"] for c in fifteen_min_candles]
+    
+    # EMA-20 calculation
+    k = 2 / (min(20, len(closes)) + 1)
+    ema = closes[0]
+    for close in closes[1:]:
+        ema = close * k + ema * (1 - k)
+    
+    mtf_state["ema_20"] = ema
+    current_price = closes[-1]
+    
+    # Strength: how far price is from EMA in bps
+    strength_bps = ((current_price - ema) / ema) * 10000
+    mtf_state["strength"] = strength_bps
+    
+    if strength_bps > 15:
+        mtf_state["trend"] = "BULLISH"
+    elif strength_bps < -15:
+        mtf_state["trend"] = "BEARISH"
+    else:
+        mtf_state["trend"] = "NEUTRAL"
+
+# ---------------------------------------------------------
+# LIQUIDITY SWEEP DETECTION
+# ---------------------------------------------------------
+def track_swing_levels(five_min_candle):
+    """Track rolling highs and lows for sweep detection."""
+    sweep_state["recent_highs"].append(five_min_candle["high"])
+    sweep_state["recent_lows"].append(five_min_candle["low"])
+
+def detect_liquidity_sweep(five_min_candle):
+    """Detect if latest candle swept a previous high/low and reversed."""
+    if len(sweep_state["recent_highs"]) < 5:
+        return
+    
+    highs = list(sweep_state["recent_highs"])
+    lows = list(sweep_state["recent_lows"])
+    candle = five_min_candle
+    
+    # Find the highest high in the last 10-20 candles (excluding latest)
+    prev_highs = highs[:-1] if len(highs) > 1 else highs
+    prev_lows = lows[:-1] if len(lows) > 1 else lows
+    
+    swing_high = max(prev_highs[-10:]) if len(prev_highs) >= 3 else 0
+    swing_low = min(prev_lows[-10:]) if len(prev_lows) >= 3 else float('inf')
+    
+    # Bearish sweep: wick above swing high, close below it
+    if candle["high"] > swing_high and candle["close"] < swing_high:
+        sweep_state["last_sweep"] = "BEARISH_SWEEP"
+        sweep_state["sweep_price"] = swing_high
+        sweep_state["sweep_ts"] = datetime.datetime.now().strftime("%H:%M")
+        print(f"🎯 LIQUIDITY SWEEP: Bearish sweep above {swing_high:,.1f} — stop hunt reversal!")
+    
+    # Bullish sweep: wick below swing low, close above it
+    elif candle["low"] < swing_low and candle["close"] > swing_low:
+        sweep_state["last_sweep"] = "BULLISH_SWEEP"
+        sweep_state["sweep_price"] = swing_low
+        sweep_state["sweep_ts"] = datetime.datetime.now().strftime("%H:%M")
+        print(f"🎯 LIQUIDITY SWEEP: Bullish sweep below {swing_low:,.1f} — stop hunt reversal!")
+    else:
+        # Decay sweep signal after 3 candles
+        if sweep_state["last_sweep"] != "NONE":
+            if len(highs) > 3:
+                sweep_state["last_sweep"] = "NONE"
+
+# ---------------------------------------------------------
+# DISPLACEMENT SCORING (ICT OB QUALITY)
+# ---------------------------------------------------------
+def score_displacement(ob, candles_list):
+    """Score an order block by its displacement candle's strength.
+    Returns a score from 0-3: 0=weak, 1=normal, 2=strong, 3=extreme."""
+    disp = ob.get("displacement", 1.5)
+    if disp >= 3.0:
+        return 3  # Extreme
+    elif disp >= 2.0:
+        return 2  # Strong
+    elif disp >= 1.5:
+        return 1  # Normal
+    return 0
+
+def get_best_ob_score(is_long):
+    """Get the highest displacement score among active OBs near current price."""
+    obs = ob_state["bullish_obs"] if is_long else ob_state["bearish_obs"]
+    ltp = state["ltp"]
+    best_score = 0
+    for ob in obs:
+        if ob["low"] <= ltp <= ob["high"]:
+            score = score_displacement(ob, [])
+            best_score = max(best_score, score)
+    return best_score
+
+# ---------------------------------------------------------
+# TRADE JOURNAL (FOR SUPERVISED ML)
+# ---------------------------------------------------------
+def save_trade_journal():
+    try:
+        with open(TRADE_JOURNAL_FILE, "w") as f:
+            json.dump(trade_journal, f, indent=2)
+    except Exception:
+        pass
+
+def load_trade_journal():
+    global trade_journal
+    try:
+        if os.path.exists(TRADE_JOURNAL_FILE):
+            with open(TRADE_JOURNAL_FILE, "r") as f:
+                trade_journal = json.load(f)
+    except Exception:
+        trade_journal = []
+
+def journal_entry(action, entry_price, setup_grade, confluences):
+    """Record features at trade entry for later ML training."""
+    entry = {
+        "ts": datetime.datetime.now().isoformat(),
+        "action": action,
+        "entry_price": entry_price,
+        "setup_grade": setup_grade,
+        "session": session_state["current"],
+        "regime": ml_state["regime"],
+        "vpin_pct": state["vpin_percentile"],
+        "cofi_z": state["cofi_z"],
+        "obi": state["obi"],
+        "cvd_divergence": cvd_state["divergence"],
+        "mtf_trend": mtf_state["trend"],
+        "mtf_strength": mtf_state["strength"],
+        "atr": state["atr_14"],
+        "sweep": sweep_state["last_sweep"],
+        "confluences": confluences,
+        "ob_displacement_score": get_best_ob_score(action == "BUY"),
+        # Filled on exit:
+        "exit_price": 0.0,
+        "pnl": 0.0,
+        "outcome": "OPEN",
+        "exit_reason": ""
+    }
+    trade_journal.append(entry)
+    return len(trade_journal) - 1  # Return index for later update
+
+def journal_exit(pnl, exit_price, exit_reason):
+    """Update the last open journal entry with exit data."""
+    for entry in reversed(trade_journal):
+        if entry["outcome"] == "OPEN":
+            entry["exit_price"] = exit_price
+            entry["pnl"] = pnl
+            entry["outcome"] = "WIN" if pnl > 0 else "LOSS"
+            entry["exit_reason"] = exit_reason
+            break
+    save_trade_journal()
+
+# ---------------------------------------------------------
+# DYNAMIC VOLUME PROFILE REFRESH
+# ---------------------------------------------------------
+def check_vp_refresh():
+    """Refresh volume profile every 4 hours."""
+    now = time.time()
+    if vp_refresh["last_refresh_time"] == 0:
+        vp_refresh["last_refresh_time"] = now
+        return
+    
+    if now - vp_refresh["last_refresh_time"] >= vp_refresh["refresh_interval_sec"]:
+        print("🔄 Auto-refreshing 30-Day Volume Profile...")
+        build_volume_profile()
+        vp_refresh["last_refresh_time"] = now
+
+# ---------------------------------------------------------
 # DATABASE & LOGGING
 # ---------------------------------------------------------
 def init_clickhouse():
@@ -719,14 +974,40 @@ def execute_signal():
         print(f"CVD Filter: Blocked SHORT — Bullish CVD divergence (sellers exhausting)")
         return
     
+    # --- MULTI-TIMEFRAME CONFIRMATION (15-MIN) ---
+    mtf_trend = mtf_state["trend"]
+    if mtf_trend != "NEUTRAL":
+        if is_long and mtf_trend == "BEARISH":
+            print(f"MTF Filter: Blocked LONG — 15m trend is BEARISH (EMA strength: {mtf_state['strength']:+.0f} bps)")
+            return
+        if not is_long and mtf_trend == "BULLISH":
+            print(f"MTF Filter: Blocked SHORT — 15m trend is BULLISH (EMA strength: {mtf_state['strength']:+.0f} bps)")
+            return
+    
     # --- FVG CONFLUENCE CHECK ---
     in_fvg, fvg = is_price_in_fvg(ltp, is_long)
     
-    # --- DETERMINE SETUP GRADE ---
-    confluence_count = sum([in_vp_ob, in_ict_ob, in_fvg, cvd_div == ("BULLISH" if is_long else "BEARISH")])
+    # --- LIQUIDITY SWEEP CONFLUENCE ---
+    sweep = sweep_state["last_sweep"]
+    in_sweep = (is_long and sweep == "BULLISH_SWEEP") or (not is_long and sweep == "BEARISH_SWEEP")
     
-    if confluence_count >= 3:
-        setup_grade = "S"   # S-tier: triple+ confluence
+    # --- DISPLACEMENT SCORE ---
+    ob_disp_score = get_best_ob_score(is_long) if in_ict_ob else 0
+    
+    # --- DETERMINE SETUP GRADE ---
+    confluence_count = sum([
+        in_vp_ob, 
+        in_ict_ob, 
+        in_fvg, 
+        cvd_div == ("BULLISH" if is_long else "BEARISH"),
+        in_sweep,
+        ob_disp_score >= 2  # Strong/Extreme displacement counts as confluence
+    ])
+    
+    if confluence_count >= 4:
+        setup_grade = "S+"  # God-tier: quad+ confluence
+    elif confluence_count >= 3:
+        setup_grade = "S"   # S-tier: triple confluence
     elif confluence_count >= 2:
         setup_grade = "A+"  # A+ tier: double confluence
     else:
@@ -751,6 +1032,9 @@ def execute_signal():
     if in_ict_ob: sources.append(f"ICT-OB:{ict_ob['low']:,.0f}-{ict_ob['high']:,.0f}")
     if in_fvg: sources.append(f"FVG:{fvg['bottom']:,.0f}-{fvg['top']:,.0f}")
     if cvd_div != "NONE": sources.append(f"CVD:{cvd_div}")
+    if in_sweep: sources.append(f"SWEEP:{sweep_state['sweep_price']:,.0f}")
+    if ob_disp_score >= 2: sources.append(f"DISP:{ob_disp_score}")
+    if mtf_trend != "NEUTRAL": sources.append(f"15m:{mtf_trend}")
     source_str = " | ".join(sources)
     
     if cofi > 0:
@@ -758,11 +1042,13 @@ def execute_signal():
         portfolio["entry_price"] = state["ask"]
         reason = f"SETUP {setup_grade} - LONG [{source_str}]"
         log_trade("BUY", state["ask"], 0.0, reason)
+        journal_entry("BUY", state["ask"], setup_grade, source_str)
     else:
         portfolio["position"] = "SHORT"
         portfolio["entry_price"] = state["bid"]
         reason = f"SETUP {setup_grade} - SHORT [{source_str}]"
         log_trade("SELL", state["bid"], 0.0, reason)
+        journal_entry("SELL", state["bid"], setup_grade, source_str)
 
 def check_exits():
     if portfolio["position"] == "FLAT":
@@ -786,6 +1072,7 @@ def check_exits():
                 portfolio["realized_pnl"] += portfolio["unrealized_pnl"]
                 portfolio["account_balance"] += portfolio["unrealized_pnl"]
                 log_trade("SELL", state["bid"], portfolio["unrealized_pnl"], "STOP LOSS")
+                journal_exit(portfolio["unrealized_pnl"], state["bid"], "STOP LOSS")
                 portfolio["position"] = "FLAT"
                 portfolio["phase"] = 0
                 portfolio["unrealized_pnl"] = 0.0
@@ -804,6 +1091,7 @@ def check_exits():
                 portfolio["realized_pnl"] += portfolio["unrealized_pnl"]
                 portfolio["account_balance"] += portfolio["unrealized_pnl"]
                 log_trade("SELL", state["bid"], portfolio["unrealized_pnl"], "BREAKEVEN STOP")
+                journal_exit(portfolio["unrealized_pnl"], state["bid"], "BREAKEVEN STOP")
                 portfolio["position"] = "FLAT"
                 portfolio["phase"] = 0
                 portfolio["unrealized_pnl"] = 0.0
@@ -811,6 +1099,7 @@ def check_exits():
                 portfolio["realized_pnl"] += portfolio["unrealized_pnl"]
                 portfolio["account_balance"] += portfolio["unrealized_pnl"]
                 log_trade("SELL", state["bid"], portfolio["unrealized_pnl"], "VWAP EXIT")
+                journal_exit(portfolio["unrealized_pnl"], state["bid"], "VWAP EXIT")
                 portfolio["position"] = "FLAT"
                 portfolio["phase"] = 0
                 portfolio["unrealized_pnl"] = 0.0
@@ -826,6 +1115,7 @@ def check_exits():
                 portfolio["realized_pnl"] += portfolio["unrealized_pnl"]
                 portfolio["account_balance"] += portfolio["unrealized_pnl"]
                 log_trade("BUY", state["ask"], portfolio["unrealized_pnl"], "STOP LOSS")
+                journal_exit(portfolio["unrealized_pnl"], state["ask"], "STOP LOSS")
                 portfolio["position"] = "FLAT"
                 portfolio["phase"] = 0
                 portfolio["unrealized_pnl"] = 0.0
@@ -844,6 +1134,7 @@ def check_exits():
                 portfolio["realized_pnl"] += portfolio["unrealized_pnl"]
                 portfolio["account_balance"] += portfolio["unrealized_pnl"]
                 log_trade("BUY", state["ask"], portfolio["unrealized_pnl"], "BREAKEVEN STOP")
+                journal_exit(portfolio["unrealized_pnl"], state["ask"], "BREAKEVEN STOP")
                 portfolio["position"] = "FLAT"
                 portfolio["phase"] = 0
                 portfolio["unrealized_pnl"] = 0.0
@@ -851,6 +1142,7 @@ def check_exits():
                 portfolio["realized_pnl"] += portfolio["unrealized_pnl"]
                 portfolio["account_balance"] += portfolio["unrealized_pnl"]
                 log_trade("BUY", state["ask"], portfolio["unrealized_pnl"], "VWAP EXIT")
+                journal_exit(portfolio["unrealized_pnl"], state["ask"], "VWAP EXIT")
                 portfolio["position"] = "FLAT"
                 portfolio["phase"] = 0
                 portfolio["unrealized_pnl"] = 0.0
@@ -1020,6 +1312,18 @@ def render_dashboard():
     cd_color = "\U0001f534" if cooldown["active"] else "\U0001f7e2"
     elevated = " (Elevated Thresholds)" if session_state["thresholds_elevated"] else ""
     print(f"SESSION: {sess_color} {sess}{elevated}  |  Cooldown: {cd_color} {cd_str}")
+    
+    # MTF Trend
+    mtf_t = mtf_state["trend"]
+    mtf_color = "\U0001f7e2" if mtf_t == "BULLISH" else "\U0001f534" if mtf_t == "BEARISH" else "\u26aa"
+    mtf_ema = mtf_state["ema_20"]
+    print(f"15m Trend: {mtf_color} {mtf_t} (EMA-20: {mtf_ema:,.1f} | Strength: {mtf_state['strength']:+.0f} bps)")
+    
+    # Liquidity Sweep
+    sw = sweep_state["last_sweep"]
+    sw_color = "\U0001f3af" if sw != "NONE" else "\u26aa"
+    sw_display = f"{sw} @ {sweep_state['sweep_price']:,.0f}" if sw != "NONE" else "NONE"
+    print(f"Liq Sweep: {sw_color} {sw_display}")
     print("\u2500"*65)
     
     print(f"MACRO STRUCTURE (30-Day Volume Profile):")
@@ -1046,14 +1350,18 @@ def render_dashboard():
     trend_str = "\U0001f7e2 INSIDE ORDER BLOCK (Hunting Liquidity)" if in_any_ob else "\u26aa NO-MAN'S LAND (Execution Banned)"
     print(f"Liquidity State:        {trend_str}")
     
-    # ICT Order Blocks
+    # ICT Order Blocks with displacement scores
     bull_ob_count = len(ob_state["bullish_obs"])
     bear_ob_count = len(ob_state["bearish_obs"])
     ob_strs = []
     for ob in ob_state["bullish_obs"][-2:]:
-        ob_strs.append(f"Bull:{ob['low']:,.0f}-{ob['high']:,.0f}")
+        d_score = score_displacement(ob, [])
+        d_label = ["⚪", "🟡", "🟠", "🔴"][min(d_score, 3)]
+        ob_strs.append(f"Bull:{ob['low']:,.0f}-{ob['high']:,.0f}{d_label}")
     for ob in ob_state["bearish_obs"][-2:]:
-        ob_strs.append(f"Bear:{ob['low']:,.0f}-{ob['high']:,.0f}")
+        d_score = score_displacement(ob, [])
+        d_label = ["⚪", "🟡", "🟠", "🔴"][min(d_score, 3)]
+        ob_strs.append(f"Bear:{ob['low']:,.0f}-{ob['high']:,.0f}{d_label}")
     ob_display = " | ".join(ob_strs) if ob_strs else "None"
     print(f"ICT Order Blocks:       {bull_ob_count + bear_ob_count} Active ({ob_display})")
     
@@ -1082,7 +1390,12 @@ def render_dashboard():
     print(f"ATR (14m): {state['atr_14']:.1f}  |  Avg 1m Vol: {state['avg_1min_vol']:.1f} BTC")
     print(f"Bucket Size: {DYNAMIC_PARAMS['BUCKET_VOLUME_SIZE']:.1f} BTC  |  SL: {DYNAMIC_PARAMS['STOP_LOSS_BPS']:.1f} bps  |  Scale: {DYNAMIC_PARAMS['SCALE_OUT_BPS']:.1f} bps")
     print(f"Cost/Trade:  {TOTAL_ROUNDTRIP_COST_BPS:.1f} bps  (Taker + Slippage applied to Net PnL)")
-    print(f"5m Candles:  {len(five_min_candles)}  |  CVD History: {len(cvd_state['cvd_history'])}")
+    
+    # Journal stats
+    wins = sum(1 for t in trade_journal if t.get("outcome") == "WIN")
+    losses = sum(1 for t in trade_journal if t.get("outcome") == "LOSS")
+    wr = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0
+    print(f"5m: {len(five_min_candles)}  |  15m: {len(fifteen_min_candles)}  |  Journal: {len(trade_journal)} trades (WR: {wr:.0f}%)")
     print("\u2500"*65)
     
     pos_color = "🟢" if portfolio["position"] == "LONG" else "🔴" if portfolio["position"] == "SHORT" else "⚪"
