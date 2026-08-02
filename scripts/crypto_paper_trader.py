@@ -770,6 +770,7 @@ def journal_entry(action, entry_price, setup_grade, confluences):
         "action": action,
         "entry_price": entry_price,
         "setup_grade": setup_grade,
+        "risk_multiplier": portfolio.get("confidence_multiplier", 1.0),
         "session": session_state["current"],
         "regime": ml_state["regime"],
         "vpin_pct": state["vpin_percentile"],
@@ -922,13 +923,9 @@ def execute_signal():
         return
     
     # --- SETUP A: INSTITUTIONAL FLOW + ORDER BLOCK + ABSORPTION ---
-    # Adjust thresholds based on session and regime
-    if session_state["thresholds_elevated"]:
-        vpin_req = 98
-        cofi_threshold = 4.0
-    else:
-        cofi_threshold = 3.0 if ml_state["regime"] == "CHOP (LOW VOL)" else 2.0
-        vpin_req = 95
+    # Use pure ML-regime thresholds
+    cofi_threshold = 3.0 if ml_state["regime"] == "CHOP (LOW VOL)" else 2.0
+    vpin_req = 95
     
     if vpin_pct < vpin_req or abs(cofi) <= cofi_threshold:
         return
@@ -972,52 +969,43 @@ def execute_signal():
     if not is_long and obi > -0.30:
         return
     
-    # --- CVD DIVERGENCE CONFIRMATION ---
+    # --- CONFLUENCE SCORING ---
+    struct_pts = sum([in_vp_ob, in_ict_ob, in_fvg, in_sweep])
+    
     cvd_div = cvd_state["divergence"]
-    if is_long and cvd_div == "BEARISH":
-        print(f"CVD Filter: Blocked LONG — Bearish CVD divergence (buyers exhausting)")
-        return
-    if not is_long and cvd_div == "BULLISH":
-        print(f"CVD Filter: Blocked SHORT — Bullish CVD divergence (sellers exhausting)")
-        return
-    
-    # --- MULTI-TIMEFRAME CONFIRMATION (15-MIN) ---
     mtf_trend = mtf_state["trend"]
-    if mtf_trend != "NEUTRAL":
-        if is_long and mtf_trend == "BEARISH":
-            print(f"MTF Filter: Blocked LONG — 15m trend is BEARISH (EMA strength: {mtf_state['strength']:+.0f} bps)")
-            return
-        if not is_long and mtf_trend == "BULLISH":
-            print(f"MTF Filter: Blocked SHORT — 15m trend is BULLISH (EMA strength: {mtf_state['strength']:+.0f} bps)")
-            return
     
-    # --- DISPLACEMENT SCORE ---
-    ob_disp_score = get_best_ob_score(is_long) if in_ict_ob else 0
+    cvd_aligned = (is_long and cvd_div == "BULLISH") or (not is_long and cvd_div == "BEARISH")
+    cvd_opposing = (is_long and cvd_div == "BEARISH") or (not is_long and cvd_div == "BULLISH")
     
-    # --- DETERMINE SETUP GRADE ---
-    confluence_count = sum([
-        in_vp_ob, 
-        in_ict_ob, 
-        in_fvg, 
-        cvd_div == ("BULLISH" if is_long else "BEARISH"),
-        in_sweep,
-        ob_disp_score >= 2  # Strong/Extreme displacement counts as confluence
-    ])
+    mtf_aligned = (is_long and mtf_trend == "BULLISH") or (not is_long and mtf_trend == "BEARISH")
+    mtf_opposing = (is_long and mtf_trend == "BEARISH") or (not is_long and mtf_trend == "BULLISH")
     
-    if confluence_count >= 4:
-        setup_grade = "S+"  # God-tier: quad+ confluence
-    elif confluence_count >= 3:
-        setup_grade = "S"   # S-tier: triple confluence
-    elif confluence_count >= 2:
-        setup_grade = "A+"  # A+ tier: double confluence
+    # Base points from structure, plus/minus confluence
+    total_pts = struct_pts + (1 if cvd_aligned else 0) + (1 if mtf_aligned else 0) - (1 if cvd_opposing else 0) - (1 if mtf_opposing else 0)
+    
+    # --- DETERMINE SETUP GRADE & MULTIPLIER ---
+    if total_pts >= 3:
+        setup_grade = "S"
+        risk_mult = 2.0
+    elif total_pts == 2:
+        setup_grade = "A"
+        risk_mult = 1.5
+    elif total_pts == 1:
+        setup_grade = "B"
+        risk_mult = 1.0
     else:
-        setup_grade = "A"   # A tier: single OB source
+        setup_grade = "C"
+        risk_mult = 0.5
+        
+    portfolio["confidence_multiplier"] = risk_mult
     
-    # --- POSITION SIZING ---
+    # --- DYNAMIC POSITION SIZING ---
     sl_pct = DYNAMIC_PARAMS["STOP_LOSS_BPS"] / 10000.0
-    risk_dollars = portfolio["account_balance"] * 0.02
+    # Base risk is 2%, scaled by the confidence multiplier
+    risk_dollars = portfolio["account_balance"] * 0.02 * risk_mult
     notional_size = risk_dollars / sl_pct
-    max_notional = portfolio["account_balance"] * 50.0
+    max_notional = portfolio["account_balance"] * (50.0 if risk_mult > 0.5 else 20.0)
     portfolio["notional_size_usd"] = min(notional_size, max_notional)
     portfolio["leverage_used"] = portfolio["notional_size_usd"] / portfolio["account_balance"]
     
@@ -1033,6 +1021,7 @@ def execute_signal():
     if in_fvg: sources.append(f"FVG:{fvg['bottom']:,.0f}-{fvg['top']:,.0f}")
     if cvd_div != "NONE": sources.append(f"CVD:{cvd_div}")
     if in_sweep: sources.append(f"SWEEP:{sweep_state['sweep_price']:,.0f}")
+    ob_disp_score = get_best_ob_score(is_long) if in_ict_ob else 0
     if ob_disp_score >= 2: sources.append(f"DISP:{ob_disp_score}")
     if mtf_trend != "NEUTRAL": sources.append(f"15m:{mtf_trend}")
     source_str = " | ".join(sources)
@@ -1310,14 +1299,13 @@ def render_dashboard():
     sess_color = "\U0001f7e2" if sess in ("LONDON", "NEW_YORK") else "\U0001f7e1" if sess == "ASIAN" else "\U0001f534"
     cd_str = f"ACTIVE ({cooldown['buckets_remaining']} buckets)" if cooldown["active"] else "CLEAR"
     cd_color = "\U0001f534" if cooldown["active"] else "\U0001f7e2"
-    elevated = " (Elevated Thresholds)" if session_state["thresholds_elevated"] else ""
-    print(f"SESSION: {sess_color} {sess}{elevated}  |  Cooldown: {cd_color} {cd_str}")
+    print(f"SESSION: {sess_color} {sess} (Sizing Modifier) | Cooldown: {cd_color} {cd_str}")
     
     # MTF Trend
     mtf_t = mtf_state["trend"]
     mtf_color = "\U0001f7e2" if mtf_t == "BULLISH" else "\U0001f534" if mtf_t == "BEARISH" else "\u26aa"
     mtf_ema = mtf_state["ema_20"]
-    print(f"15m Trend: {mtf_color} {mtf_t} (EMA-20: {mtf_ema:,.1f} | Strength: {mtf_state['strength']:+.0f} bps)")
+    print(f"15m Trend: {mtf_color} {mtf_t} (EMA-20: {mtf_ema:,.1f} | Sizing Modifier)")
     
     # Liquidity Sweep
     sw = sweep_state["last_sweep"]
