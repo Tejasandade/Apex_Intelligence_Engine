@@ -44,7 +44,8 @@ state = {
 # Macro Structure State
 macro_structure = {
     "hvns": [], # High Volume Nodes
-    "poc": 0.0  # Point of Control
+    "poc": 0.0,  # Point of Control
+    "micro_hvns": [] # Intraday Session HVNs
 }
 
 # Liquidation State (Rolling 60s)
@@ -285,10 +286,46 @@ def build_volume_profile():
     except Exception as e:
         print(f"Volume Profile failed: {e}")
 
+def build_session_volume_profile():
+    print("Building Session Volume Profile (24-Hour Lookback)...")
+    try:
+        res = requests.get("https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=15m&limit=96")
+        data = res.json()
+        highs = [float(k[2]) for k in data]
+        lows = [float(k[3]) for k in data]
+        min_price = min(lows)
+        max_price = max(highs)
+        num_bins = 30
+        bin_size = (max_price - min_price) / num_bins
+        profile = np.zeros(num_bins)
+        for kline in data:
+            c_low = float(kline[3])
+            c_high = float(kline[2])
+            c_vol = float(kline[5])
+            start_bin = int(max(0, min(num_bins-1, (c_low - min_price) / bin_size)))
+            end_bin = int(max(0, min(num_bins-1, (c_high - min_price) / bin_size)))
+            if start_bin == end_bin:
+                profile[start_bin] += c_vol
+            else:
+                vol_per_bin = c_vol / (end_bin - start_bin + 1)
+                for b in range(start_bin, end_bin + 1):
+                    profile[b] += vol_per_bin
+        top_indices = np.argsort(profile)[-3:]
+        micro_hvns = []
+        for idx in top_indices:
+            price_level = min_price + (idx * bin_size) + (bin_size / 2.0)
+            micro_hvns.append(price_level)
+        macro_structure["micro_hvns"] = sorted(micro_hvns)
+        print(f"Session Profile Complete. Micro-HVNs: {[round(x, 1) for x in macro_structure['micro_hvns']]}")
+    except Exception as e:
+        print(f"Session Volume Profile failed: {e}")
+
+
 def prewarm_engine():
     print("Pre-warming Dynamic Volatility Engine from Binance REST API...")
     try:
         build_volume_profile()
+        build_session_volume_profile()
         
         # 1. Pre-warm 1-minute candles (60 candles = 1 hour)
         res = requests.get("https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=1m&limit=60")
@@ -814,8 +851,9 @@ def check_vp_refresh():
         return
     
     if now - vp_refresh["last_refresh_time"] >= vp_refresh["refresh_interval_sec"]:
-        print("🔄 Auto-refreshing 30-Day Volume Profile...")
+        print("🔄 Auto-refreshing Volume Profiles...")
         build_volume_profile()
+        build_session_volume_profile()
         vp_refresh["last_refresh_time"] = now
 
 # ---------------------------------------------------------
@@ -935,10 +973,10 @@ def execute_signal():
     hvns = macro_structure["hvns"]
     
     # --- MULTI-SOURCE ORDER BLOCK CHECK ---
-    # Source 1: Volume Profile HVNs
+    # Source 1: Volume Profile HVNs (Macro & Micro)
     in_vp_ob = False
     ob_price = 0.0
-    for hvn in hvns:
+    for hvn in hvns + macro_structure["micro_hvns"]:
         if abs(ltp - hvn) / ltp <= 0.0030:
             in_vp_ob = True
             ob_price = hvn
@@ -962,11 +1000,17 @@ def execute_signal():
     if not any([in_vp_ob, in_ict_ob, in_fvg, in_sweep]):
         return  # No-man's land: ban execution
     
-    # --- LEVEL 2 ABSORPTION CHECK ---
-    obi = state["obi"]
-    if is_long and obi < 0.30:
+    # --- LEVEL 2 & TRUE OFI (ORDER FLOW IMBALANCE) CHECK ---
+    obi = state.get("obi", 0.0)
+    tb = current_bucket["buy_vol"]
+    ts = current_bucket["sell_vol"]
+    tv = current_bucket["total_vol"]
+    ofi = (tb - ts) / tv if tv > 0 else 0.0
+    
+    # Require either resting limit aggression (OBI) OR market taker aggression (OFI)
+    if is_long and (obi < 0.15 and ofi < 0.15):
         return
-    if not is_long and obi > -0.30:
+    if not is_long and (obi > -0.15 and ofi > -0.15):
         return
     
     # --- CONFLUENCE SCORING ---
@@ -1000,8 +1044,14 @@ def execute_signal():
         
     portfolio["confidence_multiplier"] = risk_mult
     
-    # --- DYNAMIC POSITION SIZING ---
-    sl_pct = DYNAMIC_PARAMS["STOP_LOSS_BPS"] / 10000.0
+    # --- DYNAMIC POSITION SIZING & VOLATILITY STOPS ---
+    atr_bps = (state["atr_14"] / state["ltp"]) * 10000 if state["ltp"] > 0 else 0
+    # Dynamic SL: base is 20 bps, scales up with ATR, cap at 60 bps
+    adjusted_sl_bps = max(20.0, min(60.0, atr_bps * 0.8))
+    DYNAMIC_PARAMS["STOP_LOSS_BPS"] = adjusted_sl_bps
+    DYNAMIC_PARAMS["SCALE_OUT_BPS"] = adjusted_sl_bps  # 1:1 risk-reward for first scale
+    
+    sl_pct = adjusted_sl_bps / 10000.0
     # Base risk is 2%, scaled by the confidence multiplier
     risk_dollars = portfolio["account_balance"] * 0.02 * risk_mult
     notional_size = risk_dollars / sl_pct
@@ -1029,12 +1079,14 @@ def execute_signal():
     if cofi > 0:
         portfolio["position"] = "LONG"
         portfolio["entry_price"] = state["ask"]
+        portfolio["trade_open_time"] = time.time()
         reason = f"SETUP {setup_grade} - LONG [{source_str}]"
         log_trade("BUY", state["ask"], 0.0, reason)
         journal_entry("BUY", state["ask"], setup_grade, source_str)
     else:
         portfolio["position"] = "SHORT"
         portfolio["entry_price"] = state["bid"]
+        portfolio["trade_open_time"] = time.time()
         reason = f"SETUP {setup_grade} - SHORT [{source_str}]"
         log_trade("SELL", state["bid"], 0.0, reason)
         journal_entry("SELL", state["bid"], setup_grade, source_str)
@@ -1042,6 +1094,9 @@ def execute_signal():
 def check_exits():
     if portfolio["position"] == "FLAT":
         return
+        
+    ts_now = time.time()
+    trade_duration_mins = (ts_now - portfolio.get("trade_open_time", ts_now)) / 60.0
         
     entry = portfolio["entry_price"]
     vwap = portfolio["vwap"]
@@ -1066,6 +1121,14 @@ def check_exits():
                 portfolio["phase"] = 0
                 portfolio["unrealized_pnl"] = 0.0
                 activate_cooldown()
+            elif trade_duration_mins > 45:
+                portfolio["realized_pnl"] += portfolio["unrealized_pnl"]
+                portfolio["account_balance"] += portfolio["unrealized_pnl"]
+                log_trade("SELL", state["bid"], portfolio["unrealized_pnl"], "TIME DECAY EXIT")
+                journal_exit(portfolio["unrealized_pnl"], state["bid"], "TIME DECAY EXIT")
+                portfolio["position"] = "FLAT"
+                portfolio["phase"] = 0
+                portfolio["unrealized_pnl"] = 0.0
             elif net_pnl_pct >= SCALE_BPS:
                 half_pnl = portfolio["unrealized_pnl"] / 2.0
                 portfolio["realized_pnl"] += half_pnl
@@ -1109,6 +1172,14 @@ def check_exits():
                 portfolio["phase"] = 0
                 portfolio["unrealized_pnl"] = 0.0
                 activate_cooldown()
+            elif trade_duration_mins > 45:
+                portfolio["realized_pnl"] += portfolio["unrealized_pnl"]
+                portfolio["account_balance"] += portfolio["unrealized_pnl"]
+                log_trade("BUY", state["ask"], portfolio["unrealized_pnl"], "TIME DECAY EXIT")
+                journal_exit(portfolio["unrealized_pnl"], state["ask"], "TIME DECAY EXIT")
+                portfolio["position"] = "FLAT"
+                portfolio["phase"] = 0
+                portfolio["unrealized_pnl"] = 0.0
             elif net_pnl_pct >= SCALE_BPS:
                 half_pnl = portfolio["unrealized_pnl"] / 2.0
                 portfolio["realized_pnl"] += half_pnl
