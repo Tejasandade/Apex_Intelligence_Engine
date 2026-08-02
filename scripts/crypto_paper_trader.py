@@ -954,8 +954,15 @@ def execute_signal():
     # Source 2: ICT Order Blocks (5-min structural)
     in_ict_ob, ict_ob = is_price_in_ict_ob(ltp, is_long)
     
-    # Must be in at least one Order Block source
-    if not in_vp_ob and not in_ict_ob:
+    # Source 3: FVG (Fair Value Gaps)
+    in_fvg, fvg = is_price_in_fvg(ltp, is_long)
+    
+    # Source 4: Liquidity Sweep
+    sweep = sweep_state["last_sweep"]
+    in_sweep = (is_long and sweep == "BULLISH_SWEEP") or (not is_long and sweep == "BEARISH_SWEEP")
+    
+    # Must be in at least one structural source
+    if not any([in_vp_ob, in_ict_ob, in_fvg, in_sweep]):
         return  # No-man's land: ban execution
     
     # --- LEVEL 2 ABSORPTION CHECK ---
@@ -983,13 +990,6 @@ def execute_signal():
         if not is_long and mtf_trend == "BULLISH":
             print(f"MTF Filter: Blocked SHORT — 15m trend is BULLISH (EMA strength: {mtf_state['strength']:+.0f} bps)")
             return
-    
-    # --- FVG CONFLUENCE CHECK ---
-    in_fvg, fvg = is_price_in_fvg(ltp, is_long)
-    
-    # --- LIQUIDITY SWEEP CONFLUENCE ---
-    sweep = sweep_state["last_sweep"]
-    in_sweep = (is_long and sweep == "BULLISH_SWEEP") or (not is_long and sweep == "BEARISH_SWEEP")
     
     # --- DISPLACEMENT SCORE ---
     ob_disp_score = get_best_ob_score(is_long) if in_ict_ob else 0
@@ -1345,9 +1345,14 @@ def render_dashboard():
             break
     in_ict_bull, _ = is_price_in_ict_ob(ltp, True)
     in_ict_bear, _ = is_price_in_ict_ob(ltp, False)
-    in_any_ob = in_vp_ob or in_ict_bull or in_ict_bear
     
-    trend_str = "\U0001f7e2 INSIDE ORDER BLOCK (Hunting Liquidity)" if in_any_ob else "\u26aa NO-MAN'S LAND (Execution Banned)"
+    in_fvg_bull, _ = is_price_in_fvg(ltp, True)
+    in_fvg_bear, _ = is_price_in_fvg(ltp, False)
+    in_sweep_act = sweep_state["last_sweep"] != "NONE"
+    
+    in_execution_zone = in_vp_ob or in_ict_bull or in_ict_bear or in_fvg_bull or in_fvg_bear or in_sweep_act
+    
+    trend_str = "\U0001f7e2 IN STRUCTURAL ZONE (Execution Allowed)" if in_execution_zone else "\u26aa NO-MAN'S LAND (Execution Banned)"
     print(f"Liquidity State:        {trend_str}")
     
     # ICT Order Blocks with displacement scores
