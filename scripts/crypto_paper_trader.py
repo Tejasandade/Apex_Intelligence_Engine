@@ -973,16 +973,21 @@ def execute_signal():
     hvns = macro_structure["hvns"]
     
     # --- MULTI-SOURCE ORDER BLOCK CHECK ---
+    # Calculate Dynamic Radius based on Volatility (Stop Loss)
+    atr_bps = (state["atr_14"] / state["ltp"]) * 10000 if state["ltp"] > 0 else 0
+    adjusted_sl_bps = max(20.0, min(60.0, atr_bps * 0.8))
+    dynamic_radius = (adjusted_sl_bps / 10000.0) * 0.5
+    
     # Source 1: Volume Profile HVNs (Macro & Micro)
     in_vp_ob = False
     ob_price = 0.0
     for hvn in hvns + macro_structure["micro_hvns"]:
-        if abs(ltp - hvn) / ltp <= 0.0030:
+        if abs(ltp - hvn) / ltp <= dynamic_radius:
             in_vp_ob = True
             ob_price = hvn
             break
     if not in_vp_ob:
-        if abs(ltp - macro_structure["poc"]) / ltp <= 0.0030:
+        if abs(ltp - macro_structure["poc"]) / ltp <= dynamic_radius:
             in_vp_ob = True
             ob_price = macro_structure["poc"]
     
@@ -1398,8 +1403,10 @@ def render_dashboard():
     
     # Order Block Status (VP + ICT combined)
     in_vp_ob = False
-    for h in hvns + [macro_structure["poc"]]:
-        if abs(ltp - h) / ltp <= 0.0030:
+    atr_bps_dash = (state["atr_14"] / state["ltp"]) * 10000 if state["ltp"] > 0 else 0
+    dynamic_radius_dash = (max(20.0, min(60.0, atr_bps_dash * 0.8)) / 10000.0) * 0.5
+    for h in hvns + macro_structure["micro_hvns"] + [macro_structure["poc"]]:
+        if abs(ltp - h) / ltp <= dynamic_radius_dash:
             in_vp_ob = True
             break
     in_ict_bull, _ = is_price_in_ict_ob(ltp, True)
