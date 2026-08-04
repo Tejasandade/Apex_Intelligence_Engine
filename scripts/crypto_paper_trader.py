@@ -1017,6 +1017,14 @@ def execute_signal():
         return
     if not is_long and (obi > -0.15 and ofi > -0.15):
         return
+        
+    # --- MICRO-REVERSAL CONFIRMATION (ANTI-KNIFE) ---
+    # Do not buy if the current 1-minute candle is dumping against us.
+    # Must wait for the tick to at least cross back above the open price.
+    if is_long and ltp < live_candle["open"]:
+        return
+    if not is_long and ltp > live_candle["open"]:
+        return
     
     # --- CONFLUENCE SCORING ---
     struct_pts = sum([in_vp_ob, in_ict_ob, in_fvg, in_sweep])
@@ -1126,7 +1134,7 @@ def check_exits():
                 portfolio["phase"] = 0
                 portfolio["unrealized_pnl"] = 0.0
                 activate_cooldown()
-            elif trade_duration_mins > 45:
+            elif trade_duration_mins > 45 and portfolio["unrealized_pnl"] <= 0:
                 portfolio["realized_pnl"] += portfolio["unrealized_pnl"]
                 portfolio["account_balance"] += portfolio["unrealized_pnl"]
                 log_trade("SELL", state["bid"], portfolio["unrealized_pnl"], "TIME DECAY EXIT")
@@ -1177,7 +1185,7 @@ def check_exits():
                 portfolio["phase"] = 0
                 portfolio["unrealized_pnl"] = 0.0
                 activate_cooldown()
-            elif trade_duration_mins > 45:
+            elif trade_duration_mins > 45 and portfolio["unrealized_pnl"] <= 0:
                 portfolio["realized_pnl"] += portfolio["unrealized_pnl"]
                 portfolio["account_balance"] += portfolio["unrealized_pnl"]
                 log_trade("BUY", state["ask"], portfolio["unrealized_pnl"], "TIME DECAY EXIT")
