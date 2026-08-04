@@ -1039,6 +1039,9 @@ def execute_signal():
     # Base points from structure, plus/minus confluence
     total_pts = struct_pts + (1 if cvd_aligned else 0) + (1 if mtf_aligned else 0) - (1 if cvd_opposing else 0) - (1 if mtf_opposing else 0)
     
+    if total_pts < 2:
+        return # QUALITY GATE: Ban C-tier mediocre trades entirely
+        
     # --- DETERMINE SETUP GRADE & MULTIPLIER ---
     if total_pts >= 4:
         setup_grade = "S"
@@ -1049,9 +1052,6 @@ def execute_signal():
     elif total_pts == 2:
         setup_grade = "B"
         risk_mult = 1.0
-    else:
-        setup_grade = "C"
-        risk_mult = 0.5
         
     portfolio["confidence_multiplier"] = risk_mult
     
