@@ -972,22 +972,34 @@ def execute_signal():
     ltp = state["ltp"]
     hvns = macro_structure["hvns"]
     
-    # --- MULTI-SOURCE ORDER BLOCK CHECK ---
+    # --- MULTI-SOURCE ORDER BLOCK CHECK (THE TRAP/SWEEP) ---
     # Calculate Dynamic Radius based on Volatility (Stop Loss)
     atr_bps = (state["atr_14"] / state["ltp"]) * 10000 if state["ltp"] > 0 else 0
     adjusted_sl_bps = max(20.0, min(60.0, atr_bps * 0.8))
     dynamic_radius = (adjusted_sl_bps / 10000.0) * 0.25
     
+    def did_sweep_level(level, radius):
+        radius_abs = level * radius
+        zone_upper = level + radius_abs
+        zone_lower = level - radius_abs
+        if zone_lower <= ltp <= zone_upper:
+            return True
+        lookback = min(10, len(recent_candles_1m))
+        for c in recent_candles_1m[-lookback:]:
+            if c["low"] <= zone_upper and c["high"] >= zone_lower:
+                return True
+        return False
+    
     # Source 1: Volume Profile HVNs (Macro & Micro)
     in_vp_ob = False
     ob_price = 0.0
     for hvn in hvns + macro_structure["micro_hvns"]:
-        if abs(ltp - hvn) / ltp <= dynamic_radius:
+        if did_sweep_level(hvn, dynamic_radius):
             in_vp_ob = True
             ob_price = hvn
             break
     if not in_vp_ob:
-        if abs(ltp - macro_structure["poc"]) / ltp <= dynamic_radius:
+        if did_sweep_level(macro_structure["poc"], dynamic_radius):
             in_vp_ob = True
             ob_price = macro_structure["poc"]
     
@@ -1411,8 +1423,20 @@ def render_dashboard():
     in_vp_ob = False
     atr_bps_dash = (state["atr_14"] / state["ltp"]) * 10000 if state["ltp"] > 0 else 0
     dynamic_radius_dash = (max(20.0, min(60.0, atr_bps_dash * 0.8)) / 10000.0) * 0.25
+    def did_sweep_level_dash(level, radius):
+        radius_abs = level * radius
+        zone_upper = level + radius_abs
+        zone_lower = level - radius_abs
+        if zone_lower <= ltp <= zone_upper:
+            return True
+        lookback = min(10, len(recent_candles_1m))
+        for c in recent_candles_1m[-lookback:]:
+            if c["low"] <= zone_upper and c["high"] >= zone_lower:
+                return True
+        return False
+
     for h in hvns + macro_structure["micro_hvns"] + [macro_structure["poc"]]:
-        if abs(ltp - h) / ltp <= dynamic_radius_dash:
+        if did_sweep_level_dash(h, dynamic_radius_dash):
             in_vp_ob = True
             break
     in_ict_bull, _ = is_price_in_ict_ob(ltp, True)
