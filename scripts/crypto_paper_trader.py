@@ -976,7 +976,7 @@ def execute_signal():
     # Calculate Dynamic Radius based on Volatility (Stop Loss)
     atr_bps = (state["atr_14"] / state["ltp"]) * 10000 if state["ltp"] > 0 else 0
     adjusted_sl_bps = max(20.0, min(60.0, atr_bps * 0.8))
-    dynamic_radius = (adjusted_sl_bps / 10000.0) * 0.5
+    dynamic_radius = (adjusted_sl_bps / 10000.0) * 0.25
     
     # Source 1: Volume Profile HVNs (Macro & Micro)
     in_vp_ob = False
@@ -1019,12 +1019,14 @@ def execute_signal():
         return
         
     # --- MICRO-REVERSAL CONFIRMATION (ANTI-KNIFE) ---
-    # Do not buy if the current 1-minute candle is dumping against us.
-    # Must wait for the tick to at least cross back above the open price.
-    if is_long and ltp < live_candle["open"]:
-        return
-    if not is_long and ltp > live_candle["open"]:
-        return
+    # Do not fire unless the PREVIOUS 1-minute candle shows momentum deceleration.
+    # If going long, the last completed minute must NOT be red.
+    if len(recent_candles_1m) > 0:
+        last_candle = recent_candles_1m[-1]
+        if is_long and last_candle["close"] < last_candle["open"]:
+            return
+        if not is_long and last_candle["close"] > last_candle["open"]:
+            return
     
     # --- CONFLUENCE SCORING ---
     struct_pts = sum([in_vp_ob, in_ict_ob, in_fvg, in_sweep])
@@ -1042,13 +1044,13 @@ def execute_signal():
     total_pts = struct_pts + (1 if cvd_aligned else 0) + (1 if mtf_aligned else 0) - (1 if cvd_opposing else 0) - (1 if mtf_opposing else 0)
     
     # --- DETERMINE SETUP GRADE & MULTIPLIER ---
-    if total_pts >= 3:
+    if total_pts >= 4:
         setup_grade = "S"
         risk_mult = 2.0
-    elif total_pts == 2:
+    elif total_pts == 3:
         setup_grade = "A"
         risk_mult = 1.5
-    elif total_pts == 1:
+    elif total_pts == 2:
         setup_grade = "B"
         risk_mult = 1.0
     else:
@@ -1412,7 +1414,7 @@ def render_dashboard():
     # Order Block Status (VP + ICT combined)
     in_vp_ob = False
     atr_bps_dash = (state["atr_14"] / state["ltp"]) * 10000 if state["ltp"] > 0 else 0
-    dynamic_radius_dash = (max(20.0, min(60.0, atr_bps_dash * 0.8)) / 10000.0) * 0.5
+    dynamic_radius_dash = (max(20.0, min(60.0, atr_bps_dash * 0.8)) / 10000.0) * 0.25
     for h in hvns + macro_structure["micro_hvns"] + [macro_structure["poc"]]:
         if abs(ltp - h) / ltp <= dynamic_radius_dash:
             in_vp_ob = True
