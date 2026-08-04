@@ -1019,14 +1019,10 @@ def execute_signal():
         return
         
     # --- MICRO-REVERSAL CONFIRMATION (ANTI-KNIFE) ---
-    # Do not fire unless the PREVIOUS 1-minute candle shows momentum deceleration.
-    # If going long, the last completed minute must NOT be red.
-    if len(recent_candles_1m) > 0:
-        last_candle = recent_candles_1m[-1]
-        if is_long and last_candle["close"] < last_candle["open"]:
-            return
-        if not is_long and last_candle["close"] > last_candle["open"]:
-            return
+    # Do not fire if the market is in a free-fall waterfall dump (velocity < 15s).
+    # Wait for velocity to slow down (sellers exhausted, limit buyers absorbing).
+    if state.get("bucket_velocity_sec", 999.0) < 15.0:
+        return
     
     # --- CONFLUENCE SCORING ---
     struct_pts = sum([in_vp_ob, in_ict_ob, in_fvg, in_sweep])
