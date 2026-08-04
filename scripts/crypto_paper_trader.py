@@ -984,8 +984,8 @@ def execute_signal():
         zone_lower = level - radius_abs
         if zone_lower <= ltp <= zone_upper:
             return True
-        lookback = min(10, len(recent_candles_1m))
-        for c in recent_candles_1m[-lookback:]:
+        lookback = min(10, len(minute_candles))
+        for c in list(minute_candles)[-lookback:]:
             if c["low"] <= zone_upper and c["high"] >= zone_lower:
                 return True
         return False
@@ -1429,8 +1429,8 @@ def render_dashboard():
         zone_lower = level - radius_abs
         if zone_lower <= ltp <= zone_upper:
             return True
-        lookback = min(10, len(recent_candles_1m))
-        for c in recent_candles_1m[-lookback:]:
+        lookback = min(10, len(minute_candles))
+        for c in list(minute_candles)[-lookback:]:
             if c["low"] <= zone_upper and c["high"] >= zone_lower:
                 return True
         return False
