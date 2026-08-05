@@ -961,13 +961,7 @@ def execute_signal():
         return
     
     # --- SETUP A: INSTITUTIONAL FLOW + ORDER BLOCK + ABSORPTION ---
-    # Use pure ML-regime thresholds
-    cofi_threshold = 3.0 if ml_state["regime"] == "CHOP (LOW VOL)" else 2.0
-    vpin_req = 95
-    
-    if vpin_pct < vpin_req or abs(cofi) <= cofi_threshold:
-        return
-    
+    # --- PROBABILISTIC SCORING ENGINE ---
     is_long = cofi > 0
     ltp = state["ltp"]
     hvns = macro_structure["hvns"]
@@ -1013,57 +1007,62 @@ def execute_signal():
     sweep = sweep_state["last_sweep"]
     in_sweep = (is_long and sweep == "BULLISH_SWEEP") or (not is_long and sweep == "BEARISH_SWEEP")
     
-    # Must be in at least one structural source
-    if not any([in_vp_ob, in_ict_ob, in_fvg, in_sweep]):
-        return  # No-man's land: ban execution
+    # --- PROBABILISTIC SCORING MODEL (12-Point System) ---
+    total_pts = 0
     
-    # --- LEVEL 2 & TRUE OFI (ORDER FLOW IMBALANCE) CHECK ---
-    obi = state.get("obi", 0.0)
-    tb = current_bucket["buy_vol"]
-    ts = current_bucket["sell_vol"]
-    tv = current_bucket["total_vol"]
-    ofi = (tb - ts) / tv if tv > 0 else 0.0
+    # 1. Structure Points (Max 3)
+    if in_vp_ob: total_pts += 3
+    elif in_ict_ob: total_pts += 2
+    elif in_fvg or in_sweep: total_pts += 1
     
-    # Require either resting limit aggression (OBI) OR market taker aggression (OFI)
-    if is_long and (obi < 0.15 and ofi < 0.15):
-        return
-    if not is_long and (obi > -0.15 and ofi > -0.15):
-        return
-        
-    # --- MICRO-REVERSAL CONFIRMATION (ANTI-KNIFE) ---
-    # Do not fire if the market is in a free-fall waterfall dump (velocity < 15s).
-    # Wait for velocity to slow down (sellers exhausted, limit buyers absorbing).
-    if state.get("bucket_velocity_sec", 999.0) < 15.0:
-        return
+    # 2. Order Flow / COFI Points (Max 3)
+    abs_cofi = abs(cofi)
+    if abs_cofi >= 3.0: total_pts += 3
+    elif abs_cofi >= 2.0: total_pts += 2
+    elif abs_cofi >= 1.0: total_pts += 1
     
-    # --- CONFLUENCE SCORING ---
-    struct_pts = sum([in_vp_ob, in_ict_ob, in_fvg, in_sweep])
+    # 3. Toxicity / VPIN Points (Max 3)
+    if vpin_pct >= 95: total_pts += 3
+    elif vpin_pct >= 85: total_pts += 2
+    elif vpin_pct >= 70: total_pts += 1
     
+    # 4. Confluence Points
     cvd_div = cvd_state["divergence"]
     mtf_trend = mtf_state["trend"]
     
     cvd_aligned = (is_long and cvd_div == "BULLISH") or (not is_long and cvd_div == "BEARISH")
     cvd_opposing = (is_long and cvd_div == "BEARISH") or (not is_long and cvd_div == "BULLISH")
-    
     mtf_aligned = (is_long and mtf_trend == "BULLISH") or (not is_long and mtf_trend == "BEARISH")
     mtf_opposing = (is_long and mtf_trend == "BEARISH") or (not is_long and mtf_trend == "BULLISH")
     
-    # Base points from structure, plus/minus confluence
-    total_pts = struct_pts + (1 if cvd_aligned else 0) + (1 if mtf_aligned else 0) - (1 if cvd_opposing else 0) - (1 if mtf_opposing else 0)
+    if cvd_aligned: total_pts += 1
+    elif cvd_opposing: total_pts -= 1
     
-    if total_pts < 2:
-        return # QUALITY GATE: Ban C-tier mediocre trades entirely
+    if mtf_aligned: total_pts += 1
+    elif mtf_opposing: total_pts -= 1
+    
+    # 5. Velocity Health (Anti-Knife)
+    vel = state.get("bucket_velocity_sec", 999.0)
+    if vel >= 30.0: total_pts += 1
+    elif vel < 15.0: total_pts -= 1 # Penalize waterfall, but don't hard ban if score is huge
+    
+    # --- FLUID QUALITY GATE ---
+    if total_pts < 4:
+        return # Need at least 4/12 points to execute
         
     # --- DETERMINE SETUP GRADE & MULTIPLIER ---
-    if total_pts >= 4:
+    if total_pts >= 9:
         setup_grade = "S"
         risk_mult = 2.0
-    elif total_pts == 3:
+    elif total_pts >= 7:
         setup_grade = "A"
         risk_mult = 1.5
-    elif total_pts == 2:
+    elif total_pts >= 5:
         setup_grade = "B"
         risk_mult = 1.0
+    else:
+        setup_grade = "C"
+        risk_mult = 0.5
         
     portfolio["confidence_multiplier"] = risk_mult
     
