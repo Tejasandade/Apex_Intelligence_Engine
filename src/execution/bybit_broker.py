@@ -246,21 +246,48 @@ class BybitBroker:
         side: str, 
         qty: float, 
         take_profit: float, 
-        stop_loss: float
+        stop_loss: float,
+        sl_distance: Optional[float] = None,
+        tp_distance: Optional[float] = None
     ) -> Optional[str]:
         """
-        Place a Market Entry Order with hardcoded Take-Profit and Stop-Loss orders attached.
-        This guarantees capital protection in the event of an internet disconnect or API lag.
+        Place a Market Entry Order with Take-Profit and Stop-Loss orders attached.
+        Automatically adapts to Bybit Testnet price drift if testnet sandbox diverges from live index.
         """
+        target_sl = float(stop_loss)
+        target_tp = float(take_profit)
+        side_clean = side.capitalize()
+
+        # Check Bybit's current execution price to ensure SL/TP brackets are valid
+        try:
+            ticker_res = await self._request("GET", "/v5/market/tickers", {"category": "linear", "symbol": symbol.upper()})
+            if ticker_res.get("retCode") == 0 and ticker_res.get("result", {}).get("list"):
+                bybit_ltp = float(ticker_res["result"]["list"][0].get("lastPrice", 0))
+                if bybit_ltp > 0:
+                    # Calculate distances
+                    sl_dist = float(sl_distance) if sl_distance else abs(bybit_ltp - target_sl)
+                    tp_dist = float(tp_distance) if tp_distance else abs(target_tp - bybit_ltp)
+                    
+                    if side_clean == "Buy":
+                        # For LONG: SL must be below entry, TP must be above entry
+                        target_sl = round(bybit_ltp - sl_dist, 1)
+                        target_tp = round(bybit_ltp + tp_dist, 1)
+                    else:
+                        # For SHORT: SL must be above entry, TP must be below entry
+                        target_sl = round(bybit_ltp + sl_dist, 1)
+                        target_tp = round(bybit_ltp - tp_dist, 1)
+        except Exception as _pe:
+            logger.debug("bybit_price_adapt_error", error=str(_pe))
+
         payload = {
             "category": "linear",
             "symbol": symbol.upper(),
-            "side": side.capitalize(),
+            "side": side_clean,
             "orderType": "Market",
             "qty": str(qty),
             "timeInForce": "IOC",
-            "takeProfit": str(take_profit),
-            "stopLoss": str(stop_loss),
+            "takeProfit": str(target_tp),
+            "stopLoss": str(target_sl),
             "tpslMode": "Full", # TP/SL covers the entire position
             "tpOrderType": "Market",
             "slOrderType": "Market"

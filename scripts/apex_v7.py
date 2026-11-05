@@ -534,7 +534,7 @@ def execute_signal(signal: TradingSignal):
         import asyncio as _aio
         async def _place():
             try:
-                qty = round(notional / entry, 3)   # BTC quantity
+                qty = max(round(notional / entry, 3), 0.001)   # BTC quantity (min 0.001 on Bybit)
                 side = "Buy" if direction == "LONG" else "Sell"
                 oid = await _bybit_broker.place_order_with_stops(
                     symbol=SYMBOL,
@@ -542,6 +542,8 @@ def execute_signal(signal: TradingSignal):
                     qty=qty,
                     stop_loss=round(sl_price, 1),
                     take_profit=round(tp2, 1),
+                    sl_distance=sl_dist,
+                    tp_distance=abs(tp2 - entry),
                 )
                 if oid:
                     trade_log.append(f"[BYBIT] Order placed: {oid}")
