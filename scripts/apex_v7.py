@@ -511,6 +511,7 @@ def execute_signal(signal: TradingSignal):
            f"SL:${sl_price:,.1f}(${sl_dist:.0f}) TP2:${tp2:,.1f}({rr:.1f}R) | "
            f"Prob:{prob:.3f} {council_str} Risk:${risk_usd:.2f}")
     trade_log.append(log)
+    if HEADLESS: print(f"\n🔥 TRADE EVENT: {log}", flush=True)
     telegram(f"APEX OPEN {action} @${entry:,.0f} | SL:${sl_price:,.0f} TP2:${tp2:,.0f} | p={prob:.3f} Council:{council:.2f} | Risk:${risk_usd:.2f}")
 
     trade_journal.append({
@@ -1150,18 +1151,19 @@ async def ui_loop():
     _log_file = open("logs/apex.log", "a", buffering=1) if HEADLESS else None
     while True:
         if HEADLESS:
-            # Server mode: write status line to log file every 30s
+            # Server mode: write status line to log file and stdout every 30s
             import time as _t
             if int(_t.time()) % 30 == 0:
                 ltp = market.get("ltp", 0)
                 bal = account.get("balance", 0)
                 pos = portfolio.get("position", "FLAT")
                 ticks = market.get("ticks", 0)
+                pnl = account.get("pnl", 0.0)
                 ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                line = f"[{ts}] BTC: ${ltp:,.1f} | Bal: ${bal:,.2f} | PnL: ${pnl:+,.2f} | Pos: {pos} | Ticks: {ticks}"
+                print(line, flush=True)
                 try:
-                    _log_file.write(
-                        f"[{ts}] BTC:{ltp:.1f} Bal:{bal:.2f} Pos:{pos} Ticks:{ticks}\n"
-                    )
+                    _log_file.write(line + "\n")
                 except Exception:
                     pass
         else:
