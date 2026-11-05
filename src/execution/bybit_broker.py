@@ -37,14 +37,25 @@ class BybitBroker:
         api_key: str,
         api_secret: str,
         use_testnet: bool = True,
-        recv_window: int = 5000
+        recv_window: int = 20000
     ):
         self.api_key = api_key
         self.api_secret = api_secret
         self.use_testnet = use_testnet
         self.recv_window = str(recv_window)
+        self._time_offset_ms: int = 0  # corrected via sync_time()
         
-        self.base_url = "https://api-testnet.bybit.com" if use_testnet else "https://api.bybit.com"
+        # Demo Trading (testnet.bybit.com orange badge) uses api.bytick.com
+        # Actual Testnet uses api-testnet.bybit.com
+        # We detect by checking env var BYBIT_USE_DEMO
+        import os as _os
+        _use_demo = _os.getenv("BYBIT_USE_DEMO", "true").lower() == "true"
+        if use_testnet and _use_demo:
+            self.base_url = "https://api-demo.bybit.com"
+        elif use_testnet:
+            self.base_url = "https://api-testnet.bybit.com"
+        else:
+            self.base_url = "https://api.bybit.com"
         
         # We use HTTPX AsyncClient for fast, non-blocking requests
         self._client = httpx.AsyncClient(base_url=self.base_url)
@@ -54,6 +65,21 @@ class BybitBroker:
             mode="TESTNET" if use_testnet else "MAINNET"
         )
     
+
+    async def sync_time(self) -> None:
+        """Fetch Bybit server time and calculate clock offset."""
+        try:
+            resp = await self._client.get(f"{self.base_url}/v5/market/time")
+            data = resp.json()
+            server_ms = int(data["result"]["timeNano"]) // 1_000_000
+            local_ms  = int(time.time() * 1000)
+            self._time_offset_ms = server_ms - local_ms
+            import structlog as _sl
+            _sl.get_logger().info("bybit_time_synced", offset_ms=self._time_offset_ms)
+        except Exception as e:
+            # fallback: ignore, recv_window=20000 is usually enough
+            pass
+
     async def close(self):
         """Close the underlying HTTP client."""
         await self._client.aclose()
@@ -72,7 +98,7 @@ class BybitBroker:
         
     def _get_headers(self, payload: str) -> Dict[str, str]:
         """Construct required headers for Bybit V5 private endpoints."""
-        timestamp = str(int(time.time() * 1000))
+        timestamp = str(int(time.time() * 1000) + self._time_offset_ms)
         signature = self._generate_signature(timestamp, payload)
         
         return {
