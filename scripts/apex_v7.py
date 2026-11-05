@@ -867,7 +867,7 @@ def prewarm():
     # 1. Load all XGBoost models
     print("  Loading XGBoost ensemble models...")
     models: dict[str, ApexXGBoostModel] = {}
-    regimes_dir = ["ranging_high_vol", "ranging_low_vol", "trending_low_vol"]
+    regimes_dir = ["ranging_high_vol", "ranging_low_vol", "trending_low_vol", "trending_high_vol"]
     for regime in regimes_dir:
         for direction in ["LONG", "SHORT"]:
             for bag_n in [1, 2, 3]:
@@ -1151,12 +1151,21 @@ def render():
 
 # ─── WEBSOCKET ────────────────────────────────────────────────────────────────
 async def binance_ws():
+    # Use depth20@500ms (instead of 100ms) to reduce event-loop congestion during massive dumps
     url = (f"wss://fstream.binance.com/stream?streams="
            f"{SYMBOL.lower()}@trade/{SYMBOL.lower()}@bookTicker"
-           f"/{SYMBOL.lower()}@depth20@100ms/{SYMBOL.lower()}@kline_5m")
+           f"/{SYMBOL.lower()}@depth20@500ms/{SYMBOL.lower()}@kline_5m")
     while True:
         try:
-            async with websockets.connect(url, ping_interval=20, ping_timeout=10) as ws:
+            # Resilient ping and buffer settings so rapid price spikes never drop connection
+            async with websockets.connect(
+                url,
+                ping_interval=30,
+                ping_timeout=30,
+                close_timeout=15,
+                max_queue=8192,
+                max_size=2**22,
+            ) as ws:
                 market["ws_connected"] = True
                 while True:
                     msg = await ws.recv()
