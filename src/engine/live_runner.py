@@ -89,6 +89,7 @@ class LiveRunner:
         enable_dashboard: bool = True,
         asymmetric_mode: bool = False,
         scalp_mode: bool = False,
+        enable_statistical: bool = True,
     ):
         self.symbols = [s.lower() for s in (symbols or ["btcusdt"])]
         self.market_type = market_type
@@ -109,6 +110,7 @@ class LiveRunner:
         
         self.asymmetric_mode = asymmetric_mode
         self.scalp_mode = scalp_mode
+        self.enable_statistical = enable_statistical
         self._initial_balance = 1000.0 if self.market_type == "crypto" else 100000.0
         self._max_positions = 3 if self.market_type == "crypto" else 1
         self._max_drawdown_pct = 15.0
@@ -219,7 +221,7 @@ class LiveRunner:
         # ── Load signal engines ───────────────────────────────────────────────
         for symbol in self.symbols:
             models = self._load_models(symbol)
-            if not models:
+            if not models and not self.enable_statistical:
                 logger.error("no_models_found", symbol=symbol)
                 print(f"[ERROR] No models found for {symbol}. Engine will not start for this symbol.")
                 continue
@@ -232,8 +234,11 @@ class LiveRunner:
                 symbol=symbol,
                 market_type=market_feature_type,
                 models=models,
-                conviction_threshold=0.58,
+                conviction_threshold=0.65 if self.enable_statistical else 0.58,
                 risk_per_trade=50.0,  # High-Leverage Futures: Flat $50 risk instead of % of equity
+                enable_ensemble=not self.enable_statistical,
+                enable_council=not self.enable_statistical,
+                enable_statistical_alpha=self.enable_statistical,
             )
             
             if self.market_type == "india_options":
@@ -262,7 +267,8 @@ class LiveRunner:
             # Live Phase 4 integration: Angel One streaming WS
             self._ws = AngelWebSocket(symbols=self.symbols) 
         else:
-            self._ws = BinanceWebSocket(symbols=self.symbols)
+            interval = "15m" if self.enable_statistical else "1m"
+            self._ws = BinanceWebSocket(symbols=self.symbols, interval=interval)
             
         self._ws.on_candle = self._on_candle
         self._ws.on_tick = self._on_tick
@@ -415,8 +421,9 @@ class LiveRunner:
         provider = BinanceHistoricalProvider()
         try:
             await provider.connect()
+            interval = "15m" if getattr(self, "enable_statistical", False) else "1m"
             df = await provider.fetch_historical_candles(
-                symbol=symbol.upper(), interval="1m", limit=300,
+                symbol=symbol.upper(), interval=interval, limit=300,
             )
             if not df.empty:
                 engine.warm_up(df)

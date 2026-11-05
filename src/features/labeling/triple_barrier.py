@@ -56,7 +56,8 @@ def apply_triple_barrier_labels(
 
     Returns:
         DataFrame with added columns:
-        - 'target': 1 if profit target hit first, 0 otherwise
+        - 'target_long': 1 if upper barrier hit first, 0 otherwise
+        - 'target_short': 1 if lower barrier hit first, 0 otherwise
         - 'barrier_type': 'upper', 'lower', or 'time' indicating which barrier was hit
         - 'bars_to_barrier': number of bars until barrier was hit
     """
@@ -70,7 +71,8 @@ def apply_triple_barrier_labels(
     
     n = len(df)
 
-    targets = np.full(n, np.nan)
+    targets_long = np.full(n, np.nan)
+    targets_short = np.full(n, np.nan)
     barrier_types = np.full(n, "", dtype=object)
     bars_to_barrier = np.full(n, np.nan)
 
@@ -79,7 +81,8 @@ def apply_triple_barrier_labels(
         entry_atr = atr[i]
         
         if entry_price <= 0 or entry_atr <= 0:
-            targets[i] = 0
+            targets_long[i] = 0
+            targets_short[i] = 0
             barrier_types[i] = "invalid"
             bars_to_barrier[i] = 0
             continue
@@ -111,49 +114,58 @@ def apply_triple_barrier_labels(
         # Determine the label
         if upper_hit_bar > 0 and lower_hit_bar > 0:
             if upper_hit_bar < lower_hit_bar:
-                # Profit target hit first
-                targets[i] = 1
+                # Upper hit first: Long Win, Short Loss
+                targets_long[i] = 1
+                targets_short[i] = 0
                 barrier_types[i] = "upper"
                 bars_to_barrier[i] = upper_hit_bar
             elif lower_hit_bar < upper_hit_bar:
-                # Stop loss hit first
-                targets[i] = 0
+                # Lower hit first: Short Win, Long Loss
+                targets_long[i] = 0
+                targets_short[i] = 1
                 barrier_types[i] = "lower"
                 bars_to_barrier[i] = lower_hit_bar
             else:
-                # Same bar — conservative: assume stop hit first
-                targets[i] = 0
+                # Same bar — conservative: assume both lost
+                targets_long[i] = 0
+                targets_short[i] = 0
                 barrier_types[i] = "lower"
                 bars_to_barrier[i] = lower_hit_bar
         elif upper_hit_bar > 0:
-            # Only profit target hit
-            targets[i] = 1
+            # Only upper hit
+            targets_long[i] = 1
+            targets_short[i] = 0
             barrier_types[i] = "upper"
             bars_to_barrier[i] = upper_hit_bar
         elif lower_hit_bar > 0:
-            # Only stop loss hit
-            targets[i] = 0
+            # Only lower hit
+            targets_long[i] = 0
+            targets_short[i] = 1
             barrier_types[i] = "lower"
             bars_to_barrier[i] = lower_hit_bar
         else:
-            # Time barrier — neither barrier hit within max_holding_bars
-            targets[i] = 0
+            # Time barrier — neither hit
+            targets_long[i] = 0
+            targets_short[i] = 0
             barrier_types[i] = "time"
             bars_to_barrier[i] = max_holding_bars
 
     result = df.copy()
-    result["target"] = targets
+    result["target_long"] = targets_long
+    result["target_short"] = targets_short
     result["barrier_type"] = barrier_types
     result["bars_to_barrier"] = bars_to_barrier
 
     # Drop rows where target is NaN (last max_holding_bars rows)
-    valid_mask = result["target"].notna()
+    valid_mask = result["target_long"].notna()
     result = result[valid_mask].copy()
-    result["target"] = result["target"].astype(int)
+    result["target_long"] = result["target_long"].astype(int)
+    result["target_short"] = result["target_short"].astype(int)
 
     # Log statistics
     if len(result) > 0:
-        pos_rate = result["target"].mean()
+        long_pos_rate = result["target_long"].mean()
+        short_pos_rate = result["target_short"].mean()
         upper_count = (result["barrier_type"] == "upper").sum()
         lower_count = (result["barrier_type"] == "lower").sum()
         time_count = (result["barrier_type"] == "time").sum()
@@ -162,7 +174,8 @@ def apply_triple_barrier_labels(
         logger.info(
             "triple_barrier_labels_applied",
             total_samples=len(result),
-            positive_rate=f"{pos_rate:.2%}",
+            long_positive_rate=f"{long_pos_rate:.2%}",
+            short_positive_rate=f"{short_pos_rate:.2%}",
             upper_barrier_hits=int(upper_count),
             lower_barrier_hits=int(lower_count),
             time_barrier_hits=int(time_count),

@@ -108,6 +108,7 @@ class BinanceWebSocket:
         for sym in self.symbols:
             streams.append(f"{sym}@kline_{self.interval}")
             streams.append(f"{sym}@bookTicker")
+            streams.append(f"{sym}@aggTrade")
         stream_path = "/".join(streams)
         return f"wss://stream.binance.com:9443/stream?streams={stream_path}"
 
@@ -207,6 +208,21 @@ class BinanceWebSocket:
                                 "best_ask": float(data["a"]),
                                 "best_ask_qty": float(data["A"]),
                             }
+                    continue
+
+                if data["e"] == "aggTrade":
+                    symbol = data["s"].lower()
+                    self._ticks_received += 1
+                    if self.on_tick:
+                        tick = {
+                            "type": "trade",
+                            "symbol": symbol,
+                            "price": float(data["p"]),
+                            "qty": float(data["q"]),
+                            "is_buyer_maker": data["m"],
+                            "timestamp": data["T"]
+                        }
+                        await self.on_tick(symbol, tick)
                     continue
 
                 if data["e"] != "kline":

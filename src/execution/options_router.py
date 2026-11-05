@@ -1,120 +1,129 @@
 """
-Apex Intelligence Engine V5 — Options Router
-=============================================
-Translates spot index signals into tradable option contracts.
+Apex Intelligence Engine V5 — Crypto Options Router
+===================================================
+Translates Momentum signals into cheap, high-convexity OTM Options.
 
-Key responsibilities:
-1. Strike Selection (ATM / OTM based on conviction)
-2. Expiry Management (Current week, rolling to next week on Wed PM)
-3. Liquidity Filtering (Avoid illiquid strikes)
+Strategy:
+When the Regime is TRENDING and Momentum fires a LONG signal:
+1. Don't buy Spot/Futures (risk of liquidation from noise).
+2. Instead, buy a Weekly OTM Call Option.
+3. Your downside is strictly capped to the premium (e.g., $10).
+4. Your upside is technically unlimited (1000%+ on big trends).
 """
 
-from datetime import datetime
-from typing import Any
+from datetime import datetime, timedelta
+from typing import Any, Optional
 from src.core.logging import get_logger
 
 logger = get_logger("apex.execution.options_router")
 
 
-class OptionsRouter:
+class CryptoOptionsRouter:
     """
-    Routes spot signals (e.g. BUY BANKNIFTY) to specific option contracts.
+    Routes directional signals to specific Bybit Option contracts.
     """
 
     def __init__(self, broker: Any):
         """
         Args:
-            broker: AngelBroker instance (provides access to option chain data)
+            broker: BybitBroker instance
         """
         self.broker = broker
-
-    def get_tradable_option(
+        
+    async def get_tradable_option(
         self,
-        symbol: str,
+        base_coin: str,
         direction: str,
         spot_price: float,
-        council_score: float = 0.0,
-    ) -> dict[str, Any] | None:
+        target_otm_pct: float = 0.015, # 1.5% OTM by default
+        max_dte: int = 7 # Target weekly options
+    ) -> Optional[dict]:
         """
-        Determine the best option contract for the given signal.
-
-        Args:
-            symbol: Spot symbol (e.g., BANKNIFTY)
-            direction: BUY or SELL
-            spot_price: Current spot index price
-            council_score: 0.0 to 1.0 (higher conviction = ATM, lower = OTM)
-
-        Returns:
-            Dict containing option details:
-            {
-                "symbol": "BANKNIFTY29MAY2448500CE",
-                "token": "12345",
-                "type": "CE" or "PE",
-                "strike": 48500,
-                "expiry": "2024-05-29"
-            }
-        """
-        # Step 1: Determine Option Type
-        # Direction BUY -> Call (CE). Direction SELL -> Put (PE)
-        option_type = "CE" if direction == "BUY" else "PE"
-
-        # Step 2: Determine Strike Price (BankNifty has 100-pt increments)
-        strike_increment = 100 if symbol == "BANKNIFTY" else 50
+        Find the optimal OTM option contract for maximum convexity.
         
-        # Find nearest ATM strike
-        atm_strike = round(spot_price / strike_increment) * strike_increment
-
-        if council_score >= 0.80:
-            # High conviction: use ATM for maximum delta exposure
-            target_strike = atm_strike
-            logger.debug(
-                "options_router_strike_atm",
-                reason="High conviction",
-                score=f"{council_score:.2f}",
-                strike=target_strike
-            )
+        Args:
+            base_coin: "BTC" or "ETH"
+            direction: "BUY" (Call) or "SELL" (Put)
+            spot_price: Current index price of the base coin
+            target_otm_pct: How far Out-Of-The-Money to target
+            
+        Returns:
+            Dict containing the option symbol and details.
+        """
+        option_type = "C" if direction in ["BUY", "LONG"] else "P"
+        
+        # Determine Target Strike
+        if option_type == "C":
+            target_strike_raw = spot_price * (1 + target_otm_pct)
         else:
-            # Normal conviction: use 1 strike OTM to limit premium risk
-            # For CE, OTM is higher strike. For PE, OTM is lower strike.
-            if option_type == "CE":
-                target_strike = atm_strike + strike_increment
-            else:
-                target_strike = atm_strike - strike_increment
-                
-            logger.debug(
-                "options_router_strike_otm",
-                reason="Normal conviction",
-                score=f"{council_score:.2f}",
-                strike=target_strike
-            )
-
-        # Step 3: Fetch expiry calendar & token from broker
-        if not hasattr(self.broker, "get_option_contract"):
-            logger.error("options_router_broker_missing_method")
-            return None
-
-        contract = self.broker.get_option_contract(
-            symbol=symbol,
-            option_type=option_type,
-            strike=target_strike,
-        )
-
-        if not contract:
-            logger.warning(
-                "options_router_contract_not_found",
-                symbol=symbol,
-                type=option_type,
-                strike=target_strike,
-            )
-            return None
-
+            target_strike_raw = spot_price * (1 - target_otm_pct)
+            
+        # Round to nearest standard strike increment (e.g. 500 for BTC, 50 for ETH)
+        increment = 500 if base_coin == "BTC" else 50
+        target_strike = round(target_strike_raw / increment) * increment
+        
         logger.info(
-            "options_router_selected",
-            spot=f"${spot_price:,.2f}",
-            direction=direction,
-            contract=contract["symbol"],
-            strike=contract["strike"],
-            type=contract["type"]
+            "options_router_target_strike",
+            base=base_coin, spot=spot_price, 
+            direction=direction, type=option_type, target=target_strike
         )
-
-        return contract
+        
+        # Fetch available chain
+        chain = await self.broker.get_option_chain(base_coin)
+        if not chain:
+            logger.error("options_router_no_chain_data", base=base_coin)
+            return None
+            
+        # Filter chain for matching type and strike
+        candidates = []
+        now = datetime.utcnow()
+        max_expiry_date = now + timedelta(days=max_dte)
+        
+        for contract in chain:
+            sym = contract["symbol"] # e.g. BTC-30JUN24-65000-C-USDT
+            parts = sym.split("-")
+            if len(parts) >= 4:
+                c_base = parts[0]
+                c_exp = parts[1]
+                c_strike = parts[2]
+                c_type = parts[3]
+            else:
+                continue
+            
+            if c_type != option_type:
+                continue
+                
+            try:
+                # Expiry format: DDMMMYY e.g. 30JUN24
+                exp_date = datetime.strptime(c_exp, "%d%b%y")
+            except ValueError:
+                continue
+                
+            if exp_date < now or exp_date > max_expiry_date:
+                continue
+                
+            if int(c_strike) == int(target_strike):
+                candidates.append({
+                    "symbol": sym,
+                    "strike": int(c_strike),
+                    "expiry": exp_date,
+                    "type": c_type
+                })
+                
+        if not candidates:
+            logger.warning("options_router_no_exact_strike", target=target_strike)
+            # If exact strike is not found, we could implement a nearest-strike fallback here.
+            # For strict mathematical convexity, we return None for now.
+            return None
+            
+        # Sort by closest expiry (Gamma explosion)
+        candidates.sort(key=lambda x: x["expiry"])
+        selected = candidates[0]
+        
+        logger.info(
+            "options_router_contract_selected",
+            contract=selected["symbol"],
+            expiry=selected["expiry"].strftime("%Y-%m-%d")
+        )
+        
+        return selected

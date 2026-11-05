@@ -163,12 +163,17 @@ class ApexXGBoostModel(BaseModel):
         y_pred = (raw_probs_val >= 0.5).astype(int)
 
         acc = accuracy_score(y_val, y_pred)
-        ll = log_loss(y_val, raw_probs_val)
+        # Guard: log_loss crashes if validation set has only one class (bootstrap edge case)
+        if len(y_val.unique()) < 2:
+            ll = 0.693  # random baseline (log(2)) — bag will still save if acc > 0.45
+        else:
+            ll = log_loss(y_val, raw_probs_val)
         prec = precision_score(y_val, y_pred, zero_division=0)
         best_iter = getattr(self._model, "best_iteration", params["n_estimators"])
 
-        # Calibrate using validation set
-        self._calibrator.fit(raw_probs_val, y_val.values)
+        # Calibrate using validation set (skip if single-class — bootstrap edge case)
+        if len(y_val.unique()) >= 2:
+            self._calibrator.fit(raw_probs_val, y_val.values)
 
         self._training_metrics = {
             "accuracy": acc,

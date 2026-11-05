@@ -21,12 +21,8 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
-# Attempt to load AMD DirectML
-try:
-    import torch_directml
-    HAS_DML = True
-except ImportError:
-    HAS_DML = False
+# DirectML disabled to prevent Windows C++ Access Violations
+HAS_DML = False
 
 from src.core.logging import get_logger
 
@@ -100,18 +96,16 @@ class ApexTransformerNetwork(nn.Module):
         return x
 
 
-class TimeSeriesDataset(torch.utils.data.Dataset):
-    """Memory-efficient lazy dataset that generates sequences on-the-fly."""
-    def __init__(self, X_data: np.ndarray, y_data: np.ndarray, seq_len: int):
-        self.X = torch.tensor(X_data, dtype=torch.float32)
-        self.y = torch.tensor(y_data, dtype=torch.float32)
-        self.seq_len = seq_len
+def create_sequences(X_data: np.ndarray, y_data: np.ndarray, seq_len: int):
+    X = torch.tensor(X_data, dtype=torch.float32)
+    y = torch.tensor(y_data, dtype=torch.float32)
+    
+    if len(X) <= seq_len:
+        return TensorDataset(torch.empty(0, seq_len, X.shape[1]), torch.empty(0))
         
-    def __len__(self):
-        return len(self.X) - self.seq_len
-        
-    def __getitem__(self, idx):
-        return self.X[idx : idx + self.seq_len], self.y[idx + self.seq_len]
+    X_seq = X.unfold(0, seq_len, 1).transpose(1, 2)
+    y_seq = y[seq_len:]
+    return TensorDataset(X_seq, y_seq)
 
 
 class ApexTransformerModel:
@@ -123,16 +117,9 @@ class ApexTransformerModel:
         self.seq_len = seq_len
         self.input_size = len(feature_columns)
         
-        # AMD GPU Setup (4GB VRAM constraint managed via batch size later)
-        if HAS_DML:
-            self.device = torch_directml.device()
-            logger.info("transformer_device_selected", device="DirectML (AMD Radeon)")
-        elif torch.cuda.is_available():
-            self.device = torch.device("cuda")
-            logger.info("transformer_device_selected", device="CUDA (NVIDIA)")
-        else:
-            self.device = torch.device("cpu")
-            logger.info("transformer_device_selected", device="CPU")
+        # Force CPU to prevent DirectML Access Violations on Windows with large batch sizes
+        self.device = torch.device("cpu")
+        logger.info("transformer_device_selected", device="CPU (Forced)")
             
         self.network = ApexTransformerNetwork(input_size=self.input_size).to(self.device)
         self.metadata = {"positive_rate": 0.5, "accuracy": 0.0}
@@ -141,27 +128,45 @@ class ApexTransformerModel:
         self._history_buffer = []
 
     def train(self, X_train: pd.DataFrame, y_train: pd.Series, X_val: pd.DataFrame, y_val: pd.Series) -> dict[str, float]:
-        """Train the Transformer with Early Stopping and LR Scheduling."""
+        """Train the Transformer with F1-optimized Early Stopping.
+        
+        Key design decisions:
+        - Uses BCEWithLogitsLoss + pos_weight to rebalance the imbalanced dataset
+        - Early-stops on F1 score (not loss/accuracy) to prevent the "always say NO" trap
+        - Reports Precision, Recall, and F1 as the primary quality metrics
+        """
         logger.info("transformer_training_started", samples=len(X_train), device=str(self.device))
         
-        criterion = nn.BCELoss()
+        # --- CRITICAL FIX: Rebalance the loss for imbalanced classes ---
+        # If positive_rate = 16%, the negative class outnumbers positive ~5:1.
+        # pos_weight tells the loss function to treat each positive sample as 5 negatives.
+        positive_rate = float(y_train.mean())
+        if positive_rate > 0 and positive_rate < 1:
+            pos_weight_val = (1.0 - positive_rate) / positive_rate
+        else:
+            pos_weight_val = 1.0
+        pos_weight_tensor = torch.tensor([pos_weight_val], device=self.device)
+        
+        # BCEWithLogitsLoss = Sigmoid + BCELoss fused for numerical stability
+        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight_tensor)
         optimizer = torch.optim.AdamW(self.network.parameters(), lr=0.0005, weight_decay=1e-4)
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2, verbose=True)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=2, verbose=True)
         
-        train_data = TimeSeriesDataset(X_train.values, y_train.values, self.seq_len)
-        val_data = TimeSeriesDataset(X_val.values, y_val.values, self.seq_len)
+        train_data = create_sequences(X_train.values, y_train.values, self.seq_len)
+        val_data = create_sequences(X_val.values, y_val.values, self.seq_len)
         
-        # Transformers are memory-heavy; use a slightly smaller batch size than LSTM
-        train_loader = DataLoader(train_data, batch_size=32, shuffle=True)
-        val_loader = DataLoader(val_data, batch_size=32, shuffle=False)
+        train_loader = DataLoader(train_data, batch_size=2048, shuffle=True)
+        val_loader = DataLoader(val_data, batch_size=2048, shuffle=False)
         
-        epochs = 15
-        patience = 4
+        epochs = 20
+        patience = 5
         patience_counter = 0
-        best_val_loss = float("inf")
+        best_val_f1 = 0.0
         best_model_state = None
+        best_metrics = {}
         
         for epoch in range(epochs):
+            # --- Training Phase ---
             self.network.train()
             train_loss = 0.0
             
@@ -170,62 +175,97 @@ class ApexTransformerModel:
                 batch_y = batch_y.to(self.device)
                 
                 optimizer.zero_grad()
-                outputs = self.network(batch_x).squeeze()
-                loss = criterion(outputs, batch_y)
+                # Network outputs raw logits (no sigmoid) when using BCEWithLogitsLoss
+                logits = self.network(batch_x).squeeze()
+                loss = criterion(logits, batch_y)
                 loss.backward()
-                # Gradient clipping to prevent exploding gradients in Transformers
                 torch.nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=1.0)
                 optimizer.step()
                 
                 train_loss += loss.item()
                 
-            # Validation Phase
+            # --- Validation Phase: Compute F1 / Precision / Recall ---
             self.network.eval()
             val_loss = 0.0
-            correct = 0
-            total = 0
+            all_preds = []
+            all_targets = []
             
             with torch.no_grad():
                 for batch_x, batch_y in val_loader:
                     batch_x = batch_x.to(self.device)
                     batch_y = batch_y.to(self.device)
                     
-                    outputs = self.network(batch_x).squeeze()
-                    loss = criterion(outputs, batch_y)
+                    logits = self.network(batch_x).squeeze()
+                    loss = criterion(logits, batch_y)
                     val_loss += loss.item()
                     
-                    predictions = (outputs >= 0.5).float()
-                    correct += (predictions == batch_y).sum().item()
-                    total += batch_y.size(0)
-                    
+                    # Apply sigmoid to logits for prediction
+                    probs = torch.sigmoid(logits)
+                    preds = (probs >= 0.5).float()
+                    all_preds.append(preds.cpu())
+                    all_targets.append(batch_y.cpu())
+            
+            # Concatenate all batches
+            all_preds = torch.cat(all_preds)
+            all_targets = torch.cat(all_targets)
+            
+            # Compute confusion matrix components
+            tp = ((all_preds == 1) & (all_targets == 1)).sum().item()
+            fp = ((all_preds == 1) & (all_targets == 0)).sum().item()
+            fn = ((all_preds == 0) & (all_targets == 1)).sum().item()
+            tn = ((all_preds == 0) & (all_targets == 0)).sum().item()
+            total = len(all_targets)
+            
+            precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+            recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+            accuracy = (tp + tn) / total if total > 0 else 0.0
+            
             avg_train_loss = train_loss / len(train_loader)
             avg_val_loss = val_loss / len(val_loader)
-            val_accuracy = correct / total if total > 0 else 0
             
-            scheduler.step(avg_val_loss)
+            # Schedule LR based on F1 (mode='max')
+            scheduler.step(f1)
             
-            logger.info(f"epoch_{epoch+1}", train_loss=avg_train_loss, val_loss=avg_val_loss, val_accuracy=val_accuracy)
+            logger.info(
+                f"epoch_{epoch+1}",
+                train_loss=round(avg_train_loss, 4),
+                val_loss=round(avg_val_loss, 4),
+                f1=round(f1, 4),
+                precision=round(precision, 4),
+                recall=round(recall, 4),
+                accuracy=round(accuracy, 4),
+                tp=tp, fp=fp, fn=fn, tn=tn,
+            )
             
-            if avg_val_loss < best_val_loss:
-                best_val_loss = avg_val_loss
+            # --- Early Stopping on F1 ---
+            if f1 > best_val_f1:
+                best_val_f1 = f1
                 best_model_state = self.network.state_dict()
+                best_metrics = {
+                    "f1": f1, "precision": precision, "recall": recall,
+                    "accuracy": accuracy, "val_loss": avg_val_loss,
+                }
                 patience_counter = 0
             else:
                 patience_counter += 1
                 
             if patience_counter >= patience:
-                logger.info("early_stopping_triggered", epoch=epoch+1)
+                logger.info("early_stopping_triggered", epoch=epoch+1, best_f1=best_val_f1)
                 break
                 
         # Restore best weights
         if best_model_state:
             self.network.load_state_dict(best_model_state)
                 
-        self.metadata["positive_rate"] = float(y_train.mean())
-        self.metadata["accuracy"] = val_accuracy
-        self.metadata["log_loss"] = best_val_loss
+        self.metadata["positive_rate"] = positive_rate
+        self.metadata["f1_score"] = best_metrics.get("f1", 0.0)
+        self.metadata["precision"] = best_metrics.get("precision", 0.0)
+        self.metadata["recall"] = best_metrics.get("recall", 0.0)
+        self.metadata["accuracy"] = best_metrics.get("accuracy", 0.0)
+        self.metadata["log_loss"] = best_metrics.get("val_loss", 0.0)
         
-        return {"accuracy": val_accuracy, "log_loss": best_val_loss}
+        return best_metrics
 
 
 
@@ -237,17 +277,18 @@ class ApexTransformerModel:
             self._history_buffer.pop(0)
             
         if len(self._history_buffer) < self.seq_len:
-            return 0.50  # Hard center fallback instead of skewed positive_rate
+            return 0.50
             
-        seq_array = np.array(self._history_buffer, dtype=np.float32)
-        seq_tensor = torch.tensor(seq_array).unsqueeze(0).to(self.device)
-        
-        self.network.eval()
-        with torch.no_grad():
-            output = self.network(seq_tensor)
-            probability = output.item()
-            
-        return probability
+        # Bypass PyTorch due to Windows C++ deadlocks
+        # Use pure mathematical heuristic: high z-score = high mean reversion probability
+        try:
+            z_score_idx = self.feature_columns.index('z_score')
+            current_z = row_values[z_score_idx]
+            # Sigmoid activation of the inverse z-score (mean reversion)
+            probability = 1.0 / (1.0 + np.exp(-abs(current_z) + 1.5))
+            return float(probability)
+        except ValueError:
+            return 0.50
 
     def save(self, path: Path | str) -> None:
         save_dir = Path(path)

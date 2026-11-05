@@ -149,7 +149,8 @@ class UnifiedTrainer:
         logger.info(
             "labels_applied",
             total=len(labeled_df),
-            positive_rate=f"{labeled_df['target'].mean():.2%}",
+            long_positive_rate=f"{labeled_df['target_long'].mean():.2%}",
+            short_positive_rate=f"{labeled_df['target_short'].mean():.2%}",
         )
 
         # Step 4: Regime classification
@@ -197,143 +198,122 @@ class UnifiedTrainer:
         save_models: bool,
     ) -> dict[str, Any]:
         """
-        Train a model for a specific regime subset.
-
-        Args:
-            df: Labeled DataFrame for this regime.
-            regime_suffix: e.g., "trend", "range", "all".
-            save_models: Whether to save on quality gate pass.
-
-        Returns:
-            Training result dict.
+        Train both LONG and SHORT models for a specific regime subset.
         """
-        model_name = f"{self.symbol}_{self.market_type}_{regime_suffix}"
-        hp = self.model_params.get("hyperparameters", {}).copy()
-        
-        # MEMORY CONSTRAINT FIX: Limit XGBoost to 2 threads to prevent 8GB RAM OOM
-        hp["n_jobs"] = 2
-
-        logger.info(
-            "regime_training_started",
-            model=model_name,
-            samples=len(df),
-            positive_rate=f"{df['target'].mean():.2%}",
-        )
-
-        # Get feature matrix
         X = df[self.feature_store.feature_columns].copy().fillna(0.0)
-        y = df["target"].copy()
+        y_long = df["target_long"].copy()
+        y_short = df["target_short"].copy()
 
-        # Purged walk-forward CV
+        hp = self.model_params.get("hyperparameters", {}).copy()
+        hp["n_jobs"] = 2  # Memory constraint fix
+
         cv_cfg = self.model_params.get("training", {})
-        folds = purged_walk_forward_splits(
-            n_samples=len(X),
-            n_folds=cv_cfg.get("cv_folds", 5),
-            purge_gap=cv_cfg.get("purge_gap", 15),
-        )
+        
+        regime_results = {}
 
-        fold_metrics: list[dict[str, float]] = []
+        for direction, y in [("LONG", y_long), ("SHORT", y_short)]:
+            model_name = f"{self.symbol}_{self.market_type}_{regime_suffix}_{direction}"
 
-        for fold in folds:
-            X_train = X.iloc[fold.train_indices]
-            y_train = y.iloc[fold.train_indices]
-            X_val = X.iloc[fold.val_indices]
-            y_val = y.iloc[fold.val_indices]
-
-            fold_model = ApexXGBoostModel(
-                name=f"{model_name}_fold{fold.fold_num}",
-                feature_columns=self.feature_store.feature_columns,
-                hyperparams=hp,
+            logger.info(
+                "regime_training_started",
+                model=model_name,
+                samples=len(df),
+                positive_rate=f"{y.mean():.2%}",
             )
 
-            metrics = fold_model.train(X_train, y_train, X_val, y_val)
-            fold_metrics.append(metrics)
-
-            logger.debug(
-                "cv_fold_complete",
-                fold=fold.fold_num,
-                accuracy=f"{metrics['accuracy']:.4f}",
-                log_loss=f"{metrics['log_loss']:.4f}",
-            )
-            
-            # Explicit garbage collection to prevent memory leaks during 12-model training
-            del X_train, y_train, X_val, y_val, fold_model
-            gc.collect()
-
-        # Average CV metrics
-        avg_metrics = {
-            k: float(np.mean([f[k] for f in fold_metrics]))
-            for k in fold_metrics[0]
-        }
-
-        logger.info(
-            "cv_complete",
-            model=model_name,
-            avg_accuracy=f"{avg_metrics['accuracy']:.4f}",
-            avg_log_loss=f"{avg_metrics['log_loss']:.4f}",
-            avg_precision=f"{avg_metrics['precision']:.4f}",
-        )
-
-        # ── Train Bagged Ensemble on ALL data (90/10 split for early stopping) ──
-        split_idx = int(len(X) * 0.90)
-        X_train_final = X.iloc[:split_idx]
-        y_train_final = y.iloc[:split_idx]
-        X_cal = X.iloc[split_idx:]
-        y_cal = y.iloc[split_idx:]
-
-        bag_metrics_list = []
-        best_bag_features = {}
-
-        for bag_idx in range(1, 4):
-            bag_name = f"{model_name}_bag{bag_idx}"
-            
-            # Inject a different random seed and subsample for bagging diversity
-            bag_hp = hp.copy()
-            bag_hp["random_state"] = 42 + (bag_idx * 1337)
-            bag_hp["subsample"] = max(0.5, bag_hp.get("subsample", 0.8) - 0.1)
-            
-            bag_model = ApexXGBoostModel(
-                name=bag_name,
-                feature_columns=self.feature_store.feature_columns,
-                hyperparams=bag_hp,
+            # Purged walk-forward CV
+            folds = purged_walk_forward_splits(
+                n_samples=len(X),
+                n_folds=cv_cfg.get("cv_folds", 5),
+                purge_gap=cv_cfg.get("purge_gap", 15),
             )
 
-            metrics = bag_model.train(X_train_final, y_train_final, X_cal, y_cal)
-            bag_metrics_list.append(metrics)
+            fold_metrics = []
+            for fold in folds:
+                X_train = X.iloc[fold.train_indices]
+                y_train = y.iloc[fold.train_indices]
+                X_val = X.iloc[fold.val_indices]
+                y_val = y.iloc[fold.val_indices]
 
-            if save_models:
-                # Enforce minimal viable quality gate (adjusted for 3.0 ATR target)
-                if metrics.get("accuracy", 0) > 0.45 and metrics.get("log_loss", 1.0) < 0.700:
-                    bag_model.save(WEIGHTS_DIR)
-                    self._models[f"{regime_suffix}_bag{bag_idx}"] = bag_model
-                    logger.info("bag_model_saved", model=bag_name, metrics=metrics)
-                else:
-                    logger.warning(
-                        "bag_model_failed_quality_gates", 
-                        model=bag_name, 
-                        accuracy=metrics.get("accuracy"),
-                        log_loss=metrics.get("log_loss")
-                    )
-            
-            if bag_idx == 1:
-                best_bag_features = bag_model.get_feature_importance()
+                fold_model = ApexXGBoostModel(
+                    name=f"{model_name}_fold{fold.fold_num}",
+                    feature_columns=self.feature_store.feature_columns,
+                    hyperparams=hp,
+                )
+
+                metrics = fold_model.train(X_train, y_train, X_val, y_val)
+                fold_metrics.append(metrics)
                 
-            del bag_model
+                del X_train, y_train, X_val, y_val, fold_model
+                gc.collect()
+
+            avg_metrics = {k: float(np.mean([f[k] for f in fold_metrics])) for k in fold_metrics[0]}
+
+            # ── Train Bagged Ensemble on ALL data (90/10 split for early stopping) ──
+            split_idx = int(len(X) * 0.90)
+            X_train_final, y_train_final = X.iloc[:split_idx], y.iloc[:split_idx]
+            X_cal, y_cal = X.iloc[split_idx:], y.iloc[split_idx:]
+
+            bag_metrics_list = []
+            best_bag_features = {}
+
+            for bag_idx in range(1, 4):
+                bag_name = f"{model_name}_bag{bag_idx}"
+                bag_hp = hp.copy()
+
+                # ── True Bootstrap Bagging ──────────────────────────────────────
+                # Each bag samples 80% of rows WITH REPLACEMENT (bootstrap),
+                # and uses a different random_state + hyperparameter jitter.
+                # This creates genuine model diversity — bags will disagree on
+                # hard examples, making the ensemble's disagreement_penalty work.
+                rng = np.random.default_rng(42 + bag_idx * 7919)   # prime seed per bag
+                n_train = len(X_train_final)
+                boot_idx = rng.choice(n_train, size=int(n_train * 0.80), replace=True)
+                X_boot = X_train_final.iloc[boot_idx].copy()
+                y_boot = y_train_final.iloc[boot_idx].copy()
+
+                # Per-bag hyperparameter jitter for additional diversity
+                bag_hp["random_state"]     = 42 + bag_idx * 1337
+                bag_hp["subsample"]        = round(min(0.95, 0.75 + bag_idx * 0.05), 2)   # 0.80, 0.85, 0.90
+                bag_hp["colsample_bytree"] = round(min(0.95, 0.70 + bag_idx * 0.05), 2)   # 0.75, 0.80, 0.85
+                bag_hp["learning_rate"]    = round(bag_hp.get("learning_rate", 0.05) * (1.0 + (bag_idx - 2) * 0.1), 4)  # -10%, 0%, +10%
+                bag_hp["min_child_weight"] = 1 + (bag_idx - 1)  # 1, 2, 3
+
+                bag_model = ApexXGBoostModel(
+                    name=bag_name,
+                    feature_columns=self.feature_store.feature_columns,
+                    hyperparams=bag_hp,
+                )
+
+                metrics = bag_model.train(X_boot, y_boot, X_cal, y_cal)
+                bag_metrics_list.append(metrics)
+
+                if save_models:
+                    if metrics.get("accuracy", 0) > 0.45 and metrics.get("log_loss", 1.0) < 0.700:
+                        bag_model.save(WEIGHTS_DIR)
+                        self._models[f"{regime_suffix}_{direction}_bag{bag_idx}"] = bag_model
+                    else:
+                        logger.warning(f"Failed quality gates: {bag_name}")
+
+                if bag_idx == 1:
+                    best_bag_features = bag_model.get_feature_importance()
+
+                del X_boot, y_boot, bag_model
+                gc.collect()
+
+            final_metrics = {k: float(np.mean([m[k] for m in bag_metrics_list])) for k in bag_metrics_list[0]}
+
+            regime_results[direction] = {
+                "model_name": model_name,
+                "cv_metrics": avg_metrics,
+                "final_metrics": final_metrics,
+                "feature_importance": best_bag_features,
+            }
+
+            del X_train_final, y_train_final, X_cal, y_cal
             gc.collect()
 
-        # Average the final metrics for reporting
-        final_metrics = {
-            k: float(np.mean([m[k] for m in bag_metrics_list]))
-            for k in bag_metrics_list[0]
-        }
-
-        return {
-            "model_name": model_name,
-            "cv_metrics": avg_metrics,
-            "final_metrics": final_metrics,
-            "samples": len(df),
-            "feature_importance": best_bag_features,
-        }
+        return regime_results
 
     def _load_data(self) -> pd.DataFrame | None:
         """Load historical data from disk (Parquet or CSV)."""

@@ -34,6 +34,7 @@ from src.models.ensemble import ModelEnsemble, WeightingMethod
 from src.models.monitor import PerformanceMonitor
 from src.models.regime import RegimeDetector, MarketRegime
 from src.models.walk_forward import WalkForwardRetrainer
+from src.models.statistical_alpha import StatisticalAlphaModel
 
 logger = get_logger("apex.engine.signal")
 
@@ -45,6 +46,7 @@ class TradingSignal:
     signal_id: str = ""  # Unique ID for tracking
     symbol: str = ""
     direction: str = ""  # "BUY", "SELL", or "HOLD"
+    strategy_type: str = "UNKNOWN" # "BREAKOUT" or "MEAN_REVERSION"
     conviction: float = 0.0  # Model probability [0, 1]
     ensemble_conviction: float = 0.0  # Agreement-based conviction modifier
     price: float = 0.0
@@ -90,6 +92,7 @@ class LiveSignalEngine:
         enable_monitoring: bool = True,
         enable_walk_forward: bool = True,
         enable_council: bool = True,
+        enable_statistical_alpha: bool = True,
         retrain_interval: int = 1000,
         consensus_threshold: float = 0.60,
     ):
@@ -114,16 +117,29 @@ class LiveSignalEngine:
         self._htf_ema_20: float | None = None
         self._htf_ema_50: float | None = None
 
-        # Model ensemble
-        self.ensemble: ModelEnsemble | None = None
+        self.ensemble_long: ModelEnsemble | None = None
+        self.ensemble_short: ModelEnsemble | None = None
         self._enable_ensemble = enable_ensemble
+        
         if enable_ensemble and models:
-            self.ensemble = ModelEnsemble(
-                weighting=WeightingMethod.REGIME,
-                disagreement_penalty=0.3,
-            )
+            self.ensemble_long = ModelEnsemble(weighting=WeightingMethod.REGIME, disagreement_penalty=0.3)
+            self.ensemble_short = ModelEnsemble(weighting=WeightingMethod.REGIME, disagreement_penalty=0.3)
+            
             for regime_name, model in models.items():
-                self.ensemble.add_member(model, regime=regime_name)
+                r_lower = regime_name.lower()
+                if "_long" in r_lower:
+                    self.ensemble_long.add_member(model, regime=r_lower.replace("_long", ""))
+                elif "_short" in r_lower:
+                    self.ensemble_short.add_member(model, regime=r_lower.replace("_short", ""))
+                else:
+                    self.ensemble_long.add_member(model, regime=r_lower)
+                    self.ensemble_short.add_member(model, regime=r_lower)
+
+        # Statistical Alpha Engine (Phase 7)
+        self.statistical_model: StatisticalAlphaModel | None = None
+        self._enable_statistical_alpha = enable_statistical_alpha
+        if enable_statistical_alpha:
+            self.statistical_model = StatisticalAlphaModel(name=f"{symbol}_statistical_alpha")
 
         # Performance monitor
         self.monitor: PerformanceMonitor | None = None
@@ -149,10 +165,13 @@ class LiveSignalEngine:
             self.council = Council(
                 consensus_threshold=consensus_threshold,
                 min_voting_advisors=3,
-                enable_veto=True,
-                scalp_mode=False,  # Strict mode — no loose filters
             )
-            self.council.setup_default_advisors(symbol=symbol)
+            if self._enable_statistical_alpha:
+                self.council.setup_statistical_advisors()
+            elif market_type == "crypto":
+                self.council.setup_default_advisors(symbol=symbol)
+            else:
+                self.council.setup_india_advisors()
             
         # ── Phase 6 Components: RL Meta-Controller ───────────────────────────
         self.rl_meta_controller = None
@@ -166,8 +185,10 @@ class LiveSignalEngine:
             model_path = DATA_DIR / "models" / "rl_meta_controller.zip"
             if model_path.exists():
                 self.rl_meta_controller = PPO.load(str(model_path))
-                if self.ensemble:
-                    self.ensemble.weighting = WeightingMethod.RL
+                if getattr(self, "ensemble_long", None):
+                    self.ensemble_long.weighting = WeightingMethod.RL
+                if getattr(self, "ensemble_short", None):
+                    self.ensemble_short.weighting = WeightingMethod.RL
                 logger.info("rl_meta_controller_loaded", path=str(model_path))
             else:
                 logger.debug("rl_meta_controller_not_found")
@@ -252,6 +273,11 @@ class LiveSignalEngine:
 
         # ── Step 1: Compute features ─────────────────────────────────────────
         features = self.live_store.update(candle)
+        
+        # Feed the statistical model raw candles
+        if self.statistical_model:
+            self.statistical_model.add_candle(candle)
+            
         if features is None:
             return None
 
@@ -296,7 +322,7 @@ class LiveSignalEngine:
                     new_models = self.retrainer.get_current_models()
                     if new_models:
                         self.models.update(new_models)
-                        self._rebuild_ensemble()
+                        self._rebuild_ensembles()
                         logger.info(
                             "models_hot_swapped",
                             updated=retrain_result.get("models_updated", []),
@@ -313,38 +339,44 @@ class LiveSignalEngine:
             return None
 
         # ── Step 6: Predict ──────────────────────────────────────────────────
-        probability: float
+        probability: float = 0.5
         ensemble_conviction: float = 1.0
         member_predictions: dict[str, float] = {}
         
-        # ── RL Meta-Controller DISABLED ──
-        # RL was trained on random model outputs — adjusts noise, not signal.
-        # Reintroduce only after base model proves profitable.
         rl_risk_multiplier = 1.0
+        
+        prob_long = 0.5
+        prob_short = 0.5
+        conv_long = 1.0
+        conv_short = 1.0
 
-        if self.ensemble and self._enable_ensemble:
-            # Use ensemble prediction
-            probability, ensemble_conviction, member_predictions = (
-                self.ensemble.predict(features, current_regime=regime.value)
-            )
+        if self._enable_statistical_alpha and self.statistical_model:
+            # Override ML predictions entirely with Pure Mathematics
+            prob_long, prob_short, strat_type = self.statistical_model.predict()
+            member_predictions["strategy_type"] = strat_type
+            conv_long = 1.0
+            conv_short = 1.0
+            ensemble_conviction = 1.0
+        elif self._enable_ensemble:
+            if self.ensemble_long and self.ensemble_long._members:
+                prob_long, conv_long, _ = self.ensemble_long.predict(features, current_regime=regime.value)
+            if self.ensemble_short and self.ensemble_short._members:
+                prob_short, conv_short, _ = self.ensemble_short.predict(features, current_regime=regime.value)
         else:
-            # Fallback to single model
+            # Fallback (Legacy)
             model = self._select_model(regime)
-            if model is None:
-                return None
-            try:
-                probability = model.predict(features)
-            except Exception as e:
-                logger.error("signal_predict_error", error=str(e))
-                return None
+            if model is not None:
+                try:
+                    prob = model.predict(features)
+                    prob_long = prob
+                    prob_short = 1.0 - prob
+                except Exception as e:
+                    logger.error("signal_predict_error", error=str(e))
+                    return None
 
-        # ── Step 7: Signal decision (Hard Centered) ─────────────────────────
-        # Models are trained with scale_pos_weight, which internally calibrates 
-        # outputs to be centered around 0.50. Shifting the baseline mathematically 
-        # breaks the thresholding asymmetry and prevents sells.
-        conviction_margin = self.conviction_threshold - 0.50
-        buy_threshold = 0.50 + conviction_margin
-        sell_threshold = 0.50 - conviction_margin
+        # ── Step 7: Signal decision (True Dual-Probability) ─────────────────
+        buy_threshold = self.conviction_threshold
+        sell_threshold = self.conviction_threshold
         
         macro_downtrend = False
         macro_uptrend = False
@@ -356,10 +388,15 @@ class LiveSignalEngine:
                 macro_uptrend = True
 
         direction = "HOLD"
-        if probability >= buy_threshold:
+        
+        if prob_long >= buy_threshold and prob_long > prob_short:
             direction = "BUY"
-        elif probability <= sell_threshold:
+            probability = prob_long
+            ensemble_conviction = conv_long
+        elif prob_short >= sell_threshold and prob_short > prob_long:
             direction = "SELL"
+            probability = prob_short
+            ensemble_conviction = conv_short
             
         # ── Phase 6: Strict Macro Trend Filter ──
         # Guarantee 0 flaws by never fighting the HTF Trend
@@ -426,6 +463,7 @@ class LiveSignalEngine:
 
         if self.council and self._enable_council:
             # All signals go through the Council's democratic process. No overrides.
+            strat_type = member_predictions.get("strategy_type", "UNKNOWN")
             council_decision = self.council.evaluate(
                 features=features,
                 direction=direction,
@@ -436,6 +474,7 @@ class LiveSignalEngine:
                 df_15m=self.mtf_buffer.get_15m_df() if self.mtf_buffer.is_ready() else None,
                 mtf_ready=self.mtf_buffer.is_ready(),
                 oracle_levels=oracle_levels or [],
+                strategy_type=strat_type,
             )
             council_approved = council_decision.approved
             council_score = council_decision.consensus_score
@@ -517,8 +556,9 @@ class LiveSignalEngine:
 
         # Top features
         top_features = {}
-        if self.ensemble and hasattr(self.ensemble, "get_feature_importance"):
-            importance = self.ensemble.get_feature_importance()
+        target_ensemble = self.ensemble_long if direction == "BUY" else self.ensemble_short
+        if target_ensemble and hasattr(target_ensemble, "get_feature_importance"):
+            importance = target_ensemble.get_feature_importance()
         else:
             model = self._select_model(regime)
             importance = getattr(model, "get_feature_importance", lambda: {})() if model else {}
@@ -532,6 +572,7 @@ class LiveSignalEngine:
             signal_id=signal_id,
             symbol=self.symbol,
             direction=direction,
+            strategy_type=member_predictions.get("strategy_type", "UNKNOWN"),
             conviction=probability,
             ensemble_conviction=ensemble_conviction,
             price=close,
@@ -569,11 +610,12 @@ class LiveSignalEngine:
         self._last_signal = signal
         self._last_signal_direction = direction
         
-        # Suppress duplicate signals
+        # Suppress duplicate signals — reduced from 5/2 to 3/1 (P2 improvement)
+        # 3 candles = 15min cooldown for approved; 1 candle = 5min for blocked
         if signal.council_approved:
-            self._suppression_counter = 5
+            self._suppression_counter = 3
         else:
-            self._suppression_counter = 2
+            self._suppression_counter = 1
 
         logger.info(
             "signal_generated",
@@ -619,19 +661,50 @@ class LiveSignalEngine:
             return next(iter(self.models.values()))
         return None
 
-    def _rebuild_ensemble(self) -> None:
-        """Rebuild the ensemble after model hot-swap."""
-        if not self._enable_ensemble:
+    def _rebuild_ensembles(self) -> None:
+        """Rebuild the ensembles after a model update."""
+        if not self._enable_ensemble or not self.models:
             return
 
-        self.ensemble = ModelEnsemble(
-            weighting=WeightingMethod.REGIME,
-            disagreement_penalty=0.3,
-        )
+        self.ensemble_long = ModelEnsemble(weighting=WeightingMethod.REGIME, disagreement_penalty=0.3)
+        self.ensemble_short = ModelEnsemble(weighting=WeightingMethod.REGIME, disagreement_penalty=0.3)
+        
         for regime_name, model in self.models.items():
-            self.ensemble.add_member(model, regime=regime_name)
+            r_lower = regime_name.lower()
+            if "_long" in r_lower:
+                self.ensemble_long.add_member(model, regime=r_lower.replace("_long", ""))
+            elif "_short" in r_lower:
+                self.ensemble_short.add_member(model, regime=r_lower.replace("_short", ""))
+            else:
+                self.ensemble_long.add_member(model, regime=r_lower)
+                self.ensemble_short.add_member(model, regime=r_lower)
 
-        logger.info("ensemble_rebuilt", members=self.ensemble.num_members)
+        logger.info("ensemble_rebuilt", members=max(self.ensemble_long.num_members, self.ensemble_short.num_members))
+
+    def hot_swap_models(self, new_models: dict) -> None:
+        """
+        Thread-safely replace ensemble members with freshly retrained models.
+        Called by RetrainScheduler.check_pending_swap() on the main thread.
+        """
+        import threading
+        if not hasattr(self, "_swap_lock"):
+            self._swap_lock = threading.Lock()
+
+        with self._swap_lock:
+            try:
+                # Merge new models into self.models dict
+                for name, model in new_models.items():
+                    self.models[name] = model
+
+                # Rebuild ensembles from updated model dict
+                self._rebuild_ensembles()
+                logger.info(
+                    "hot_swap_complete",
+                    new_models=list(new_models.keys()),
+                    total_models=len(self.models),
+                )
+            except Exception as exc:
+                logger.warning(f"hot_swap_models failed: {exc}")
 
     def get_stats(self) -> dict[str, Any]:
         """Return comprehensive engine statistics."""
