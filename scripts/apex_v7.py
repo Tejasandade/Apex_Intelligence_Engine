@@ -133,8 +133,10 @@ MAX_RISK_PCT   = _rc("sizing", "max_allocation_pct", 0.015)   # from risk.yaml
 MIN_RISK_PCT    = 0.005
 MAX_LEVERAGE    = 5.0
 MAX_TRADES_DAY  = _rc("sizing", "max_concurrent_trades", 3)   # from risk.yaml
-MIN_INTERVAL    = 1800      # 30min between trades
-LOSS_COOLDOWN   = 7200      # 2hr after loss
+MIN_INTERVAL    = 300       # 5min (1 candle) between trades (was 30m)
+LOSS_COOLDOWN_1 = 600       # 10min (2 candles) after 1 loss (was 2hr!)
+LOSS_COOLDOWN_2 = 1200      # 20min (4 candles) after 2 consecutive losses
+LOSS_COOLDOWN_3 = 3600      # 60min anti-spiral after 3 consecutive losses
 SESSION_LOSSES  = 3         # halt after N consecutive losses
 
 # ─── BROKER (Bybit Testnet — only active when DEMO_MODE=true) ─────────────────
@@ -353,8 +355,11 @@ def can_trade() -> tuple[bool, str]:
             return False, f"HALTED: {account['halt_reason']} ({rem//60}m left)"
     if account["trades_today"] >= MAX_TRADES_DAY:
         return False, f"DAY LIMIT ({MAX_TRADES_DAY} done)"
-    if account["last_loss_time"] > 0 and (now - account["last_loss_time"]) < LOSS_COOLDOWN:
-        rem = int(LOSS_COOLDOWN - (now - account["last_loss_time"]))
+    # Dynamic, non-rigid loss cooldown based on consecutive losses
+    consec = account.get("consecutive_losses", 0)
+    cooldown_secs = LOSS_COOLDOWN_1 if consec <= 1 else (LOSS_COOLDOWN_2 if consec == 2 else LOSS_COOLDOWN_3)
+    if account["last_loss_time"] > 0 and (now - account["last_loss_time"]) < cooldown_secs:
+        rem = int(cooldown_secs - (now - account["last_loss_time"]))
         return False, f"LOSS COOLDOWN {rem//60}m{rem%60:02d}s"
     if account["last_trade_time"] > 0 and (now - account["last_trade_time"]) < MIN_INTERVAL:
         rem = int(MIN_INTERVAL - (now - account["last_trade_time"]))
@@ -611,7 +616,7 @@ def check_exits():
             elif account["consecutive_losses"] >= 2:
                 account["halted"]     = True
                 account["halt_reason"] = "2 consecutive losses — cooling"
-                account["halt_until"] = time.time() + LOSS_COOLDOWN
+                account["halt_until"] = time.time() + LOSS_COOLDOWN_2
 
         if is_win and signal_engine and portfolio["signal_id"]:
             signal_engine.resolve_signal(portfolio["signal_id"], True, total)
