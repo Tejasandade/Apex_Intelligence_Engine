@@ -835,13 +835,13 @@ def fetch_klines(symbol: str, interval: str, limit: int = 210) -> list[dict]:
     except Exception:
         pass
 
-    # 3. Fallback to Bybit Linear (works globally without geo-restrictions)
+    # 3. Try Bybit Linear
     interval_map = {'1m': '1', '3m': '3', '5m': '5', '15m': '15', '30m': '30', '1h': '60', '2h': '120', '4h': '240', '1d': 'D'}
     bybit_interval = interval_map.get(interval, '5')
     try:
         r = requests.get(
             f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval={bybit_interval}&limit={limit}",
-            timeout=8
+            timeout=6
         )
         data = r.json()
         if data.get("retCode") == 0:
@@ -851,6 +851,27 @@ def fetch_klines(symbol: str, interval: str, limit: int = 210) -> list[dict]:
                 {"timestamp": int(x[0]), "open": float(x[1]), "high": float(x[2]),
                  "low": float(x[3]), "close": float(x[4]), "volume": float(x[5])}
                 for x in rows
+            ]
+    except Exception:
+        pass
+
+    # 4. Fallback to Kraken (US exchange, 100% unblocked on US cloud datacenters like Railway)
+    try:
+        pair_map = {'BTCUSDT': 'XBTUSDT', 'ETHUSDT': 'ETHUSDT', 'SOLUSDT': 'SOLUSDT'}
+        pair = pair_map.get(symbol, 'XBTUSDT')
+        k_map = {'1m': 1, '5m': 5, '15m': 15, '30m': 30, '1h': 60, '4h': 240, '1d': 1440}
+        k_intv = k_map.get(interval, 5)
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        r = requests.get(f'https://api.kraken.com/0/public/OHLC?pair={pair}&interval={k_intv}', headers=headers, timeout=6)
+        data = r.json()
+        if not data.get('error'):
+            result = data.get('result', {})
+            key = [k for k in result if k != 'last'][0]
+            raw = result[key][-limit:]
+            return [
+                {"timestamp": int(x[0]) * 1000, "open": float(x[1]), "high": float(x[2]),
+                 "low": float(x[3]), "close": float(x[4]), "volume": float(x[6])}
+                for x in raw
             ]
     except Exception:
         pass
@@ -1081,7 +1102,8 @@ def render():
                 age = int(time.time() - gr["ts"])
                 buf.append(row(f" {YLW}⚠  Approved {gr['signal']} NOT executed — {gr['reason']} ({age}s ago){R}"))
         else:
-            buf.append(row(f" {GRY}Waiting for first live 5m candle close...{R}"))
+            n_eval = len(candles_5m)
+            buf.append(row(f" {GRY}Scanning 5m candles ({n_eval} loaded) — Waiting for signal (p ≥ {MIN_PROB:.2f}){R}"))
 
         # Momentum engine
         mom_d = momentum_eng.get_diagnostics()
