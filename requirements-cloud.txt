@@ -1,0 +1,29 @@
+# ============================================================================
+# Apex Intelligence Engine — Cloud/Server Requirements
+# Minimal set needed to run apex_v7.py on a Linux VPS
+# ============================================================================
+
+# Core data
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Machine Learning
+xgboost>=2.0.0
+scikit-learn>=1.3.0
+
+# Async + WebSocket
+aiohttp>=3.9.0
+websockets>=12.0
+
+# HTTP (for Bybit broker)
+httpx>=0.27.0
+
+# Config + env
+python-dotenv>=1.0.0
+pyyaml>=6.0.0
+
+# Logging
+structlog>=24.1.0
+
+# Telegram alerts (built-in requests)
+requests>=2.31.0

@@ -1,27 +1,34 @@
-# Base image for Python
+# ============================================================================
+# Apex Intelligence Engine — Dockerfile
+# For cloud deployment (Oracle Cloud, Railway, Fly.io, etc.)
+# ============================================================================
+
 FROM python:3.11-slim
 
-# Set environment variables
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/app
-
-# Set work directory
+# Set working directory
 WORKDIR /app
 
-# Install system dependencies
+# Install system deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
     gcc \
-    libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Install python dependencies
-COPY requirements.txt .
-RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
+# Copy requirements first (for Docker layer cache)
+COPY requirements-cloud.txt .
+RUN pip install --no-cache-dir -r requirements-cloud.txt
 
-# Copy project
-COPY src/ ./src/
+# Copy the whole project
+COPY . .
 
-# Default command (can be overridden in docker-compose)
-CMD ["python", "-m", "src.main"]
+# Create log and state directories
+RUN mkdir -p logs data/apex_state configs
+
+# Default: headless server mode
+ENV APEX_HEADLESS=true
+ENV APEX_DEMO_MODE=false
+ENV APEX_SYMBOL=BTCUSDT
+ENV APEX_INITIAL_CAPITAL=1000.0
+ENV PYTHONUNBUFFERED=1
+
+# Run the bot
+CMD ["python", "scripts/apex_v7.py"]

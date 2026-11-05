@@ -90,6 +90,16 @@ def _rc(section, key, default):
 
 JOURNAL_FILE    = "trade_journal_v7.json"
 
+# ─── EXECUTION MODE ───────────────────────────────────────────────────────────
+# DEMO_MODE=true  → real orders on Bybit TESTNET (play money, real execution)
+# DEMO_MODE=false → paper-only (no broker, no orders placed)
+DEMO_MODE    = os.getenv("APEX_DEMO_MODE", "false").lower() == "true"
+HEADLESS     = os.getenv("APEX_HEADLESS", "false").lower() == "true"  # server/cloud mode
+
+# Bybit Testnet keys (only used when DEMO_MODE=true)
+BYBIT_API_KEY    = os.getenv("BYBIT_API_KEY", "")
+BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET", "")
+
 TAKER_FEE_BPS   = 5.0
 SLIPPAGE_BPS    = 2.0
 ROUNDTRIP_BPS   = (TAKER_FEE_BPS + SLIPPAGE_BPS) * 2   # 14 bps
@@ -126,6 +136,9 @@ MAX_TRADES_DAY  = _rc("sizing", "max_concurrent_trades", 3)   # from risk.yaml
 MIN_INTERVAL    = 1800      # 30min between trades
 LOSS_COOLDOWN   = 7200      # 2hr after loss
 SESSION_LOSSES  = 3         # halt after N consecutive losses
+
+# ─── BROKER (Bybit Testnet — only active when DEMO_MODE=true) ─────────────────
+_bybit_broker = None   # instantiated in prewarm() when DEMO_MODE=true
 
 # ─── GLOBALS ──────────────────────────────────────────────────────────────────
 market = {"ltp": 0.0, "bid": 0.0, "ask": 0.0,
@@ -515,6 +528,31 @@ def execute_signal(signal: TradingSignal):
     save_journal()
     state_manager.save_state(portfolio, account)   # APEX v7.2: crash-resume
 
+    # ── DEMO MODE: place real order on Bybit Testnet ──────────────────────────
+    if DEMO_MODE and _bybit_broker is not None:
+        import asyncio as _aio
+        async def _place():
+            try:
+                qty = round(notional / entry, 3)   # BTC quantity
+                side = "Buy" if direction == "LONG" else "Sell"
+                oid = await _bybit_broker.place_order_with_stops(
+                    symbol=SYMBOL,
+                    side=side,
+                    qty=qty,
+                    stop_loss=round(sl_price, 1),
+                    take_profit=round(tp2, 1),
+                )
+                if oid:
+                    trade_log.append(f"[BYBIT] Order placed: {oid}")
+                    telegram(f"BYBIT TESTNET ORDER {side} {qty} BTC | SL:{sl_price:.1f} TP:{tp2:.1f} | id:{oid}")
+            except Exception as _be:
+                trade_log.append(f"[BYBIT] Order error: {_be}")
+        try:
+            loop = _aio.get_event_loop()
+            loop.create_task(_place())
+        except Exception:
+            pass
+
 
 # ─── EXIT ENGINE ──────────────────────────────────────────────────────────────
 def check_exits():
@@ -884,6 +922,27 @@ def prewarm():
     print("  ALL SYSTEMS GO — FULL INTELLIGENCE STACK ACTIVE")
     print("=" * 72)
 
+    # ── Broker init (Bybit Testnet — DEMO_MODE only) ──────────────────────────
+    global _bybit_broker
+    if DEMO_MODE:
+        if BYBIT_API_KEY and BYBIT_API_SECRET:
+            from src.execution.bybit_broker import BybitBroker
+            _bybit_broker = BybitBroker(
+                api_key=BYBIT_API_KEY,
+                api_secret=BYBIT_API_SECRET,
+                use_testnet=True,
+            )
+            print(f"  ✓ Bybit TESTNET broker ready (key: ...{BYBIT_API_KEY[-6:]})")
+        else:
+            print("  ⚠  DEMO_MODE=true but BYBIT_API_KEY not set → paper-only")
+    else:
+        print("  ► PAPER TRADE MODE — no broker orders")
+
+    if HEADLESS:
+        import os as _os
+        _os.makedirs("logs", exist_ok=True)
+        print("  ► HEADLESS MODE — logs/apex.log")
+
 
 # ─── DASHBOARD ────────────────────────────────────────────────────────────────
 ANSI_RE = re.compile(r'\033\[[0-9;]*[mHJK]')
@@ -1088,12 +1147,29 @@ async def binance_ws():
 
 async def ui_loop():
     _boot_ts = __import__("time").time()
+    _log_file = open("logs/apex.log", "a", buffering=1) if HEADLESS else None
     while True:
-        # Render as soon as WS is live OR after 4s timeout (shows "Connecting..." state)
-        if market["ws_connected"] and market["ticks"] > 0:
-            render()
-        elif __import__("time").time() - _boot_ts > 4:
-            render()   # show dashboard even while connecting
+        if HEADLESS:
+            # Server mode: write status line to log file every 30s
+            import time as _t
+            if int(_t.time()) % 30 == 0:
+                ltp = market.get("ltp", 0)
+                bal = account.get("balance", 0)
+                pos = portfolio.get("position", "FLAT")
+                ticks = market.get("ticks", 0)
+                ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                try:
+                    _log_file.write(
+                        f"[{ts}] BTC:{ltp:.1f} Bal:{bal:.2f} Pos:{pos} Ticks:{ticks}\n"
+                    )
+                except Exception:
+                    pass
+        else:
+            # Terminal mode: render dashboard
+            if market["ws_connected"] and market["ticks"] > 0:
+                render()
+            elif __import__("time").time() - _boot_ts > 4:
+                render()
         await asyncio.sleep(1)
 
 # ─── MARKET INTELLIGENCE LOOP (APEX v7.2) ────────────────────────────────────

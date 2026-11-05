@@ -1,0 +1,11 @@
+# Railway deployment config
+# https://railway.app — connect GitHub repo, set env vars, deploy
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "python scripts/apex_v7.py"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
