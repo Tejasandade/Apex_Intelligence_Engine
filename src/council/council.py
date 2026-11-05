@@ -42,6 +42,7 @@ from src.council.advisors import (
     SessionAdvisor,
     ExhaustionAdvisor,
     VelocityAdvisor,
+    SentimentAdvisor,
 )
 from src.core.logging import get_logger
 
@@ -79,6 +80,9 @@ class Council:
         self.advisors: list[BaseAdvisor] = []
         self._risk_advisor: RiskAdvisor | None = None
 
+        # Also set reference for Sentiment advisor
+        self._sentiment_advisor: SentimentAdvisor | None = None
+
         # Stats
         self._decisions_made = 0
         self._approved = 0
@@ -109,6 +113,7 @@ class Council:
             self.consensus_threshold = council_weights["council_threshold"]
 
         self._risk_advisor = RiskAdvisor(weight=0.0)
+        self._sentiment_advisor = SentimentAdvisor(weight=1.0)
 
         self.advisors = [
             MomentumAdvisor(weight=council_weights.get("weight_momentum", 1.5)),
@@ -118,6 +123,7 @@ class Council:
             SessionAdvisor(weight=council_weights.get("weight_session", 1.0)),
             ExhaustionAdvisor(weight=2.0),
             VelocityAdvisor(weight=2.5),  # High weight for strict channel-bottom veto
+            self._sentiment_advisor,
             self._risk_advisor,
         ]
 
@@ -125,6 +131,25 @@ class Council:
             "council_initialized",
             advisors=[a.name for a in self.advisors],
             weights=[a.weight for a in self.advisors],
+            threshold=self.consensus_threshold,
+        )
+
+    def setup_statistical_advisors(self) -> None:
+        """Initialize council for the 15M Statistical Hybrid Engine.
+        Bypasses micro-structure indicators, using only macro AI Risk filters.
+        """
+        self.consensus_threshold = 0.40 # Lower threshold since fewer advisors
+        self._risk_advisor = RiskAdvisor(weight=0.0) # Veto power
+        
+        self.advisors = [
+            RegimeAdvisor(weight=2.0),
+            SessionAdvisor(weight=1.0),
+            self._risk_advisor,
+        ]
+
+        logger.info(
+            "council_statistical_initialized",
+            advisors=[a.name for a in self.advisors],
             threshold=self.consensus_threshold,
         )
 
@@ -327,6 +352,11 @@ class Council:
 
         # Log full explanation at debug level
         logger.debug("council_explanation", explanation=decision.explanation)
+
+    def update_sentiment(self, fg_value: int, funding_pct: float) -> None:
+        """Push fresh Fear & Greed + funding data to the SentimentAdvisor."""
+        if self._sentiment_advisor:
+            self._sentiment_advisor.update_market_data(fg_value, funding_pct)
 
     def update_risk_state(
         self,

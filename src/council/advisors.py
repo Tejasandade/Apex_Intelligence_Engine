@@ -1,13 +1,14 @@
 """
 Apex Intelligence Engine V5 — Council Advisors
 =================================================
-Five specialist advisors, each analyzing the market from a unique perspective.
+Specialist advisors, each analyzing the market from a unique perspective.
 
-1. MomentumAdvisor  — RSI, MACD, EMA alignment
-2. StructureAdvisor — FVG, BOS, liquidity, support/resistance
-3. VolumeAdvisor    — CVD, OBV, order flow imbalance
-4. RegimeAdvisor    — Is this trade aligned with the current regime?
-5. RiskAdvisor      — Drawdown, exposure, daily loss limits
+1. MomentumAdvisor   — RSI, MACD, EMA alignment
+2. StructureAdvisor  — FVG, BOS, liquidity, support/resistance
+3. VolumeAdvisor     — CVD, OBV, order flow imbalance
+4. RegimeAdvisor     — Is this trade aligned with the current regime?
+5. RiskAdvisor       — Drawdown, exposure, daily loss limits
+6. SentimentAdvisor  — Fear & Greed + Funding Rate market sentiment gate
 """
 
 from __future__ import annotations
@@ -430,9 +431,10 @@ class RegimeAdvisor(BaseAdvisor):
             ema14_15m = df_15m.close.ewm(span=14).mean().iloc[-1]
             ema50_15m = df_15m.close.ewm(span=50).mean().iloc[-1]
             macro_uptrend = ema14_15m > ema50_15m
+            strategy_type = kwargs.get("strategy_type", "UNKNOWN")
 
-            # Hard block: if 15m is a strong trend, reject counter-trend 1m signals
-            if not scalp_mode and adx_15m > 30 and macro_uptrend and direction == "SELL":
+            # Hard block: if 15m is a strong trend, reject counter-trend 1m signals (unless MEAN_REVERSION)
+            if strategy_type != "MEAN_REVERSION" and not scalp_mode and adx_15m > 30 and macro_uptrend and direction == "SELL":
                 # Check for 5m structural breakdown (ChoCh)
                 df_5m = kwargs.get("df_5m")
                 choch_detected = False
@@ -454,7 +456,7 @@ class RegimeAdvisor(BaseAdvisor):
                         {"adx_15m": float(adx_15m), "macro_uptrend": bool(macro_uptrend)}
                     )
 
-            if not scalp_mode and adx_15m > 30 and not macro_uptrend and direction == "BUY":
+            if strategy_type != "MEAN_REVERSION" and not scalp_mode and adx_15m > 30 and not macro_uptrend and direction == "BUY":
                 # Check for 5m structural breakout (ChoCh)
                 df_5m = kwargs.get("df_5m")
                 choch_detected = False
@@ -485,6 +487,14 @@ class RegimeAdvisor(BaseAdvisor):
             trend_is_up = ema_14 > ema_50
             
             aligned = (direction == "BUY" and trend_is_up) or (direction == "SELL" and not trend_is_up)
+            strategy_type = kwargs.get("strategy_type", "UNKNOWN")
+            
+            if strategy_type == "MEAN_REVERSION":
+                return self._make_vote(
+                    Vote.APPROVE, 0.8,
+                    f"Context: MEAN_REVERSION - Bypassing trend filters to allow statistical snap-back.",
+                    {"adx": adx, "strategy_type": strategy_type}
+                )
             
             if not aligned:
                 if scalp_mode:
@@ -972,5 +982,133 @@ class VelocityAdvisor(BaseAdvisor):
             Vote.ABSTAIN, 0.0,
             f"Velocity is sufficient ({slope_pct:.5f})",
             {"slope_pct": slope_pct}
+        )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  9. SENTIMENT ADVISOR  (Fear & Greed + Funding Rate gate)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+class SentimentAdvisor(BaseAdvisor):
+    """
+    Combines crypto Fear & Greed index with perpetual funding rate to bias
+    trade direction quality.
+
+    Rules:
+      - Extreme Fear  (F&G < 20):  REJECT LONG (capitulation risk), boost SHORT
+      - Extreme Greed (F&G > 80):  REJECT SHORT is loose, REJECT LONG (euphoria)
+      - Funding > +0.10%:          REJECT LONG (over-leveraged longs; squeeze risk)
+      - Funding < -0.10%:          REJECT SHORT (over-leveraged shorts; squeeze risk)
+      - Otherwise: ABSTAIN (do not block good setups)
+
+    Plugs into optional `sentiment_data` kwarg passed by apex_v7.py evaluate call.
+    Falls back gracefully when no data is provided.
+    """
+
+    # Thresholds
+    FEAR_THRESHOLD    = 20   # F&G ≤ this → Extreme Fear
+    GREED_THRESHOLD   = 80   # F&G ≥ this → Extreme Greed
+    FUNDING_LONG_MAX  = 0.10  # % — longs paying too much
+    FUNDING_SHORT_MAX = -0.10  # % — shorts paying too much
+
+    def __init__(self, weight: float = 1.0):
+        super().__init__(name="Sentiment", weight=weight)
+        self._fg_value: int = 50       # neutral default
+        self._funding_pct: float = 0.0
+        self._last_update: float = 0.0
+
+    def update_market_data(self, fg_value: int, funding_pct: float) -> None:
+        """Call this from the market intel background loop to keep data fresh."""
+        import time
+        self._fg_value = max(0, min(100, int(fg_value)))
+        self._funding_pct = float(funding_pct)
+        self._last_update = time.time()
+
+    def evaluate(
+        self,
+        features: pd.DataFrame,
+        direction: str,
+        price: float,
+        regime: str,
+        atr: float,
+        **kwargs: Any,
+    ) -> AdvisorVote:
+        import time
+
+        # Accept fresh data via kwargs (apex_v7.py passes these on each call)
+        sentiment_data = kwargs.get("sentiment_data")
+        if sentiment_data:
+            self._fg_value    = int(sentiment_data.get("fg_value", self._fg_value))
+            self._funding_pct = float(sentiment_data.get("funding_pct", self._funding_pct))
+
+        fg     = self._fg_value
+        fund   = self._funding_pct
+        is_long = direction in ("LONG", "BUY")
+        stale  = (time.time() - self._last_update) > 1800  # 30-min stale check
+
+        if stale and sentiment_data is None:
+            return self._make_vote(
+                Vote.ABSTAIN, 0.0,
+                "Sentiment data stale / unavailable — skipping filter",
+                {"fg": fg, "funding": fund}
+            )
+
+        reasons: list[str] = []
+        reject  = False
+        approve = False
+
+        # ── Fear & Greed gate ─────────────────────────────────────────────────
+        if fg <= self.FEAR_THRESHOLD:
+            if is_long:
+                reject = True
+                reasons.append(f"Extreme Fear (F&G={fg}) — blocking LONG (capitulation risk)")
+            else:
+                approve = True
+                reasons.append(f"Extreme Fear (F&G={fg}) — SHORT aligns with panic selling")
+
+        elif fg >= self.GREED_THRESHOLD:
+            if is_long:
+                reject = True
+                reasons.append(f"Extreme Greed (F&G={fg}) — LONG into euphoria (reversal risk)")
+            else:
+                approve = True
+                reasons.append(f"Extreme Greed (F&G={fg}) — SHORT aligns with overcrowded longs")
+
+        # ── Funding rate gate ─────────────────────────────────────────────────
+        if fund >= self.FUNDING_LONG_MAX:
+            if is_long:
+                reject = True
+                reasons.append(f"Funding +{fund:.3f}% — longs over-leveraged (squeeze risk)")
+            else:
+                approve = True
+                reasons.append(f"Funding +{fund:.3f}% — SHORT benefits from long squeeze")
+
+        elif fund <= self.FUNDING_SHORT_MAX:
+            if not is_long:
+                reject = True
+                reasons.append(f"Funding {fund:.3f}% — shorts over-leveraged (squeeze risk)")
+            else:
+                approve = True
+                reasons.append(f"Funding {fund:.3f}% — LONG benefits from short squeeze")
+
+        reason_str = " | ".join(reasons) if reasons else f"Sentiment neutral (F&G={fg}, fund={fund:.3f}%)"
+
+        if reject:
+            return self._make_vote(
+                Vote.REJECT, 0.75,
+                reason_str,
+                {"fg": fg, "funding_pct": fund}
+            )
+        if approve:
+            return self._make_vote(
+                Vote.APPROVE, 0.60,
+                reason_str,
+                {"fg": fg, "funding_pct": fund}
+            )
+
+        return self._make_vote(
+            Vote.ABSTAIN, 0.0,
+            reason_str,
+            {"fg": fg, "funding_pct": fund}
         )
 
