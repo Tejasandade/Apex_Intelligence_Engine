@@ -793,6 +793,70 @@ def process_tick(price: float, qty: float, is_buyer_maker: bool):
 
 
 # ─── PREWARM ──────────────────────────────────────────────────────────────────
+
+def fetch_klines(symbol: str, interval: str, limit: int = 210) -> list[dict]:
+    """
+    Fetch historical klines with multi-exchange fallback:
+    1. Try Binance Futures (fapi.binance.com)
+    2. Try Binance Spot (api.binance.com)
+    3. Fallback to Bybit Linear (api.bybit.com) - unblocked in US cloud datacenters
+    Returns list of dicts: [{'timestamp': int, 'open': float, 'high': float, 'low': float, 'close': float, 'volume': float}, ...]
+    sorted oldest to newest.
+    """
+    # 1. Try Binance Futures
+    try:
+        r = requests.get(
+            f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval={interval}&limit={limit}",
+            timeout=8
+        )
+        data = r.json()
+        if isinstance(data, list) and len(data) > 0 and isinstance(data[0], list):
+            return [
+                {"timestamp": int(x[0]), "open": float(x[1]), "high": float(x[2]),
+                 "low": float(x[3]), "close": float(x[4]), "volume": float(x[5])}
+                for x in data
+            ]
+    except Exception:
+        pass
+
+    # 2. Try Binance Spot
+    try:
+        r = requests.get(
+            f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}",
+            timeout=8
+        )
+        data = r.json()
+        if isinstance(data, list) and len(data) > 0 and isinstance(data[0], list):
+            return [
+                {"timestamp": int(x[0]), "open": float(x[1]), "high": float(x[2]),
+                 "low": float(x[3]), "close": float(x[4]), "volume": float(x[5])}
+                for x in data
+            ]
+    except Exception:
+        pass
+
+    # 3. Fallback to Bybit Linear (works globally without geo-restrictions)
+    interval_map = {'1m': '1', '3m': '3', '5m': '5', '15m': '15', '30m': '30', '1h': '60', '2h': '120', '4h': '240', '1d': 'D'}
+    bybit_interval = interval_map.get(interval, '5')
+    try:
+        r = requests.get(
+            f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval={bybit_interval}&limit={limit}",
+            timeout=8
+        )
+        data = r.json()
+        if data.get("retCode") == 0:
+            rows = data.get("result", {}).get("list", [])
+            rows = rows[::-1]  # Bybit is newest-first; reverse to oldest-first
+            return [
+                {"timestamp": int(x[0]), "open": float(x[1]), "high": float(x[2]),
+                 "low": float(x[3]), "close": float(x[4]), "volume": float(x[5])}
+                for x in rows
+            ]
+    except Exception:
+        pass
+
+    return []
+
 def prewarm():
     global signal_engine
 
@@ -853,41 +917,29 @@ def prewarm():
     )
     print(f"  ✓ LiveSignalEngine created (ensemble + council + monitor)")
 
-    # 3. Warm up with historical 5m data
+    # 3. Warm up with historical 5m data (robust multi-exchange fetch)
     print("  Fetching historical 5m candles (210 × 5m)...")
-    res = requests.get(
-        f"https://fapi.binance.com/fapi/v1/klines?symbol={SYMBOL}&interval=5m&limit=210",
-        timeout=15
-    )
-    raw5m = res.json()
-    hist = pd.DataFrame(raw5m, columns=["timestamp","open","high","low","close","volume",
-                                         "close_time","quote_vol","trades","taker_buy","tb_quote","ignore"])
-    for col in ["open","high","low","close","volume"]:
-        hist[col] = hist[col].astype(float)
-    hist["timestamp"] = hist["timestamp"].astype(int)
-
-    signal_engine.warm_up(hist[["timestamp","open","high","low","close","volume"]])
-    print(f"  ✓ Signal engine warmed up: {signal_engine.live_store.buffer_length} candles")
-
-    # Pre-populate 5m buffer + store last few candles for async replay
-    _prewarm_replay = []
-    for row in raw5m:
-        c = {"open": float(row[1]), "high": float(row[2]), "low": float(row[3]),
-             "close": float(row[4]), "volume": float(row[5]), "timestamp": int(row[0])}
-        candles_5m.append(c)
-        _prewarm_replay.append(c)
-    # Store last 3 completed candles for ML replay at startup
-    prewarm.replay_candles = _prewarm_replay[-3:]
+    raw5m = fetch_klines(SYMBOL, "5m", 210)
+    if not raw5m:
+        print("  ⚠️ Warning: Could not fetch 5m candles from any exchange, starting with empty buffer")
+        prewarm.replay_candles = []
+    else:
+        hist = pd.DataFrame(raw5m)
+        signal_engine.warm_up(hist[["timestamp","open","high","low","close","volume"]])
+        print(f"  ✓ Signal engine warmed up: {signal_engine.live_store.buffer_length} candles")
+        for c in raw5m:
+            candles_5m.append(c)
+        prewarm.replay_candles = raw5m[-3:]
 
     # 4. Load 1h for structural SL
-    res1h = requests.get(f"https://fapi.binance.com/fapi/v1/klines?symbol={SYMBOL}&interval=1h&limit=72", timeout=15)
-    for row in res1h.json():
-        candles_1h.append({"open": float(row[1]), "high": float(row[2]), "low": float(row[3]),
-                           "close": float(row[4]), "volume": float(row[5]), "timestamp": int(row[0])})
+    raw1h = fetch_klines(SYMBOL, "1h", 72)
+    for c in raw1h:
+        candles_1h.append(c)
     print(f"  ✓ 1H candles loaded: {len(candles_1h)}")
 
-    market["ltp"] = float(raw5m[-1][4])
-    market["bid"] = market["ltp"]; market["ask"] = market["ltp"]
+    if raw5m:
+        market["ltp"] = float(raw5m[-1]["close"])
+        market["bid"] = market["ltp"]; market["ask"] = market["ltp"]
     regime_info["atr"] = 200.0  # Default until first signal
 
     update_session()

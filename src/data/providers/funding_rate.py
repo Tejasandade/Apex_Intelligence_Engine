@@ -164,6 +164,8 @@ class FundingRateMonitor:
             await asyncio.to_thread(self._fetch_funding_sync, symbol)
         except Exception as exc:
             logger.debug(f"[FundingRateMonitor] _fetch_funding error: {exc}")
+            # Try sync fallback which checks Bybit
+            self._fetch_funding_sync(symbol)
 
     def _fetch_funding_sync(self, symbol: str) -> None:
         try:
@@ -172,8 +174,22 @@ class FundingRateMonitor:
             r = requests.get(url, timeout=5)
             if r.status_code == 200:
                 self._rates[symbol] = float(r.json().get("lastFundingRate", 0.0))
+                return
+        except Exception:
+            pass
+
+        # Fallback to Bybit linear ticker (unblocked in US/cloud)
+        try:
+            import requests
+            bybit_url = f"https://api.bybit.com/v5/market/tickers?category=linear&symbol={symbol}"
+            r = requests.get(bybit_url, timeout=5)
+            if r.status_code == 200:
+                data = r.json()
+                if data.get("retCode") == 0:
+                    item = data.get("result", {}).get("list", [{}])[0]
+                    self._rates[symbol] = float(item.get("fundingRate", 0.0))
         except Exception as exc:
-            logger.debug(f"[FundingRateMonitor] sync fetch error: {exc}")
+            logger.debug(f"[FundingRateMonitor] Bybit funding fetch error: {exc}")
 
     async def _fetch_oi(self, symbol: str) -> None:
         """Fetch open interest from Binance."""
