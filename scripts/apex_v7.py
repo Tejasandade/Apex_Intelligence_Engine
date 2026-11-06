@@ -1614,6 +1614,21 @@ async def _broker_sync_loop():
             except Exception:
                 pass
 
+        # ── Ghost position check: if local state says OPEN but has no broker ticket and broker is flat ──
+        elif portfolio.get("position") == "OPEN" and not ticket_str and DEMO_MODE and hasattr(_active_broker, "get_open_position"):
+            try:
+                active_pos = await _active_broker.get_open_position(symbol=SYMBOL)
+                if not active_pos:
+                    portfolio.update({
+                        "position": "FLAT", "direction": None, "entry_price": 0.0,
+                        "sl_price": 0.0, "tp1_price": 0.0, "tp2_price": 0.0,
+                        "unrealized_pnl": 0.0, "banked_pnl": 0.0, "phase": 0,
+                        "broker_ticket": "", "broker_pnl": 0.0
+                    })
+                    state_manager.save_state(portfolio, account)
+            except Exception:
+                pass
+
 async def main():
     global _candle_queue
     _candle_queue = asyncio.Queue(maxsize=50)  # Must be created inside running event loop
