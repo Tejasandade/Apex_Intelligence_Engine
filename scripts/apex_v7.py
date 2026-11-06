@@ -537,12 +537,13 @@ def execute_signal(signal: TradingSignal):
     save_journal()
     state_manager.save_state(portfolio, account)   # APEX v7.2: crash-resume
 
-    # ── DEMO MODE: place real order on Bybit Testnet ──────────────────────────
+    # ── DEMO MODE: place real order on Broker (Bybit / MT5) ──────────────────────────
     if DEMO_MODE and _active_broker is not None:
         import asyncio as _aio
         async def _place():
+            b_name = BROKER_TYPE.upper()
             try:
-                qty = max(round(notional / entry, 3), 0.001)   # BTC quantity (min 0.001 on Bybit)
+                qty = max(round(notional / entry, 3), 0.001)   # BTC quantity
                 side = "Buy" if direction == "LONG" else "Sell"
                 oid = await _active_broker.place_order_with_stops(
                     symbol=SYMBOL,
@@ -554,10 +555,10 @@ def execute_signal(signal: TradingSignal):
                     tp_distance=abs(tp2 - entry),
                 )
                 if oid:
-                    trade_log.append(f"[BYBIT] Order placed: {oid}")
-                    telegram(f"BYBIT TESTNET ORDER {side} {qty} BTC | SL:{sl_price:.1f} TP:{tp2:.1f} | id:{oid}")
+                    trade_log.append(f"[{b_name}] Order placed: {oid}")
+                    telegram(f"{b_name} ORDER {side} {qty} BTC | SL:{sl_price:.1f} TP:{tp2:.1f} | id:{oid}")
             except Exception as _be:
-                trade_log.append(f"[BYBIT] Order error: {_be}")
+                trade_log.append(f"[{b_name}] Order error: {_be}")
         try:
             loop = _aio.get_event_loop()
             loop.create_task(_place())
