@@ -209,7 +209,7 @@ class MT5Broker:
         return await loop.run_in_executor(
             None,
             self._place_order_sync,
-            symbol, side, qty, take_profit, stop_loss
+            symbol, side, qty, take_profit, stop_loss, sl_distance, tp_distance
         )
 
     def _place_order_sync(
@@ -218,7 +218,9 @@ class MT5Broker:
         side: str,
         qty: float,
         take_profit: float,
-        stop_loss: float
+        stop_loss: float,
+        sl_distance: Optional[float] = None,
+        tp_distance: Optional[float] = None
     ) -> Optional[str]:
         if not self._ensure_connected():
             return None
@@ -240,6 +242,18 @@ class MT5Broker:
         is_buy = side.upper() in ["BUY", "LONG"]
         order_type = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
         price = tick.ask if is_buy else tick.bid
+
+        # Adapt SL and TP to MT5 execution price using exact dollar distances
+        digits = getattr(sym_info, "digits", 2)
+        if sl_distance and float(sl_distance) > 0:
+            target_sl = round(price - float(sl_distance), digits) if is_buy else round(price + float(sl_distance), digits)
+        else:
+            target_sl = round(float(stop_loss), digits)
+
+        if tp_distance and float(tp_distance) > 0:
+            target_tp = round(price + float(tp_distance), digits) if is_buy else round(price - float(tp_distance), digits)
+        else:
+            target_tp = round(float(take_profit), digits)
 
         # Check volume constraints
         vol = max(sym_info.volume_min, min(float(qty), sym_info.volume_max))
@@ -265,8 +279,8 @@ class MT5Broker:
             "volume": vol,
             "type": order_type,
             "price": price,
-            "sl": float(stop_loss),
-            "tp": float(take_profit),
+            "sl": float(target_sl),
+            "tp": float(target_tp),
             "deviation": 20,
             "magic": self.magic,
             "comment": "Apex v7.1",

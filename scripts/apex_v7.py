@@ -684,9 +684,10 @@ def check_exits():
     tp2 = portfolio["tp2_price"]
     atr = max(regime_info["atr"], 80.0)
 
-    # 1. SL
-    if direction == "LONG" and cur <= sl: close(cur, "STOP LOSS"); return
-    if direction == "SHORT" and cur >= sl: close(cur, "STOP LOSS"); return
+    # 1. SL (Delegated to broker matching engine when active; otherwise managed in memory)
+    if not (DEMO_MODE and portfolio.get("broker_ticket")):
+        if direction == "LONG" and cur <= sl: close(cur, "STOP LOSS"); return
+        if direction == "SHORT" and cur >= sl: close(cur, "STOP LOSS"); return
 
     # 2. Partial TP at 2R
     if portfolio["phase"] == 1:
