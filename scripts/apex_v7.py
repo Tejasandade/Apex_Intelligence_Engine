@@ -94,6 +94,7 @@ JOURNAL_FILE    = "trade_journal_v7.json"
 # DEMO_MODE=true  → real orders on Bybit TESTNET (play money, real execution)
 # DEMO_MODE=false → paper-only (no broker, no orders placed)
 DEMO_MODE    = os.getenv("APEX_DEMO_MODE", "false").lower() == "true"
+BROKER_TYPE  = os.getenv("APEX_BROKER", "bybit").lower()  # "bybit" or "mt5"
 HEADLESS     = os.getenv("APEX_HEADLESS", "false").lower() == "true"  # server/cloud mode
 
 # Bybit Testnet keys (only used when DEMO_MODE=true)
@@ -141,6 +142,7 @@ SESSION_LOSSES  = 3         # halt after N consecutive losses
 
 # ─── BROKER (Bybit Testnet — only active when DEMO_MODE=true) ─────────────────
 _bybit_broker = None   # instantiated in prewarm() when DEMO_MODE=true
+_active_broker = None  # unified broker (BybitBroker or MT5Broker)
 
 # ─── GLOBALS ──────────────────────────────────────────────────────────────────
 market = {"ltp": 0.0, "bid": 0.0, "ask": 0.0,
@@ -536,13 +538,13 @@ def execute_signal(signal: TradingSignal):
     state_manager.save_state(portfolio, account)   # APEX v7.2: crash-resume
 
     # ── DEMO MODE: place real order on Bybit Testnet ──────────────────────────
-    if DEMO_MODE and _bybit_broker is not None:
+    if DEMO_MODE and _active_broker is not None:
         import asyncio as _aio
         async def _place():
             try:
                 qty = max(round(notional / entry, 3), 0.001)   # BTC quantity (min 0.001 on Bybit)
                 side = "Buy" if direction == "LONG" else "Sell"
-                oid = await _bybit_broker.place_order_with_stops(
+                oid = await _active_broker.place_order_with_stops(
                     symbol=SYMBOL,
                     side=side,
                     qty=qty,
@@ -1005,19 +1007,29 @@ def prewarm():
     print("  ALL SYSTEMS GO — FULL INTELLIGENCE STACK ACTIVE")
     print("=" * 72)
 
-    # ── Broker init (Bybit Testnet — DEMO_MODE only) ──────────────────────────
-    global _bybit_broker
+    # ── Broker init (Bybit / MT5 — DEMO_MODE only) ──────────────────────────
+    global _bybit_broker, _active_broker
     if DEMO_MODE:
-        if BYBIT_API_KEY and BYBIT_API_SECRET:
-            from src.execution.bybit_broker import BybitBroker
-            _bybit_broker = BybitBroker(
-                api_key=BYBIT_API_KEY,
-                api_secret=BYBIT_API_SECRET,
-                use_testnet=True,
-            )
-            print(f"  ✓ Bybit TESTNET broker ready (key: ...{BYBIT_API_KEY[-6:]})")
+        if BROKER_TYPE == "mt5":
+            try:
+                from src.execution.mt5_broker import MT5Broker
+                _active_broker = MT5Broker()
+                _bybit_broker = _active_broker
+                print(f"  ✓ XM / MetaTrader 5 broker ready (Server: {os.getenv('MT5_SERVER', 'Default')})")
+            except Exception as e:
+                print(f"  ⚠️ Could not load MT5Broker: {e} → falling back to paper")
         else:
-            print("  ⚠  DEMO_MODE=true but BYBIT_API_KEY not set → paper-only")
+            if BYBIT_API_KEY and BYBIT_API_SECRET:
+                from src.execution.bybit_broker import BybitBroker
+                _active_broker = BybitBroker(
+                    api_key=BYBIT_API_KEY,
+                    api_secret=BYBIT_API_SECRET,
+                    use_testnet=True,
+                )
+                _bybit_broker = _active_broker
+                print(f"  ✓ Bybit TESTNET broker ready (key: ...{BYBIT_API_KEY[-6:]})")
+            else:
+                print("  ⚠  DEMO_MODE=true but BYBIT_API_KEY not set → paper-only")
     else:
         print("  ► PAPER TRADE MODE — no broker orders")
 
@@ -1449,13 +1461,16 @@ async def main():
             pass
         print(f"  Replay complete — Regime: {regime_info['current']} | ATR: ${regime_info['atr']:,.0f} | Engine state cleared for live trading")
 
-    # ── Bybit Broker Connection Validation ────────────────────────────────────
-    if DEMO_MODE and _bybit_broker:
-        acc_info = await _bybit_broker.validate_account()
+    # ── Broker Connection Validation ──────────────────────────────────────────
+    if DEMO_MODE and _active_broker:
+        acc_info = await _active_broker.validate_account()
         if acc_info.get("valid"):
-            print(f"  ✓ Bybit TESTNET connected — Unified Balance: ${acc_info['balance']:,.2f} USDT")
+            bal = acc_info.get('balance', 0.0)
+            cur = acc_info.get('currency', 'USDT')
+            srv = acc_info.get('server', BROKER_TYPE.upper())
+            print(f"  ✓ {_active_broker.__class__.__name__} connected ({srv}) — Balance: ${bal:,.2f} {cur}")
         else:
-            print(f"  ⚠️  Bybit TESTNET warning: {acc_info.get('error')} (Order placement disabled until key is verified)")
+            print(f"  ⚠️  Broker warning: {acc_info.get('error')} (Order placement disabled until verified)")
 
     # ── Live Web Dashboard Server (Local & Cloud) ─────────────────────────────
     web_port = int(os.getenv("PORT", "8080"))
