@@ -1542,6 +1542,42 @@ async def _broker_sync_loop():
             except Exception:
                 pass
 
+        # ── Auto-adoption: if bot is FLAT but broker has an active trade, bind to it ──
+        elif portfolio.get("position") == "FLAT" and hasattr(_active_broker, "get_open_position"):
+            try:
+                active_pos = await _active_broker.get_open_position(symbol=SYMBOL)
+                if active_pos:
+                    p_dir = "LONG" if active_pos["type"] == "BUY" else "SHORT"
+                    p_entry = float(active_pos["price_open"])
+                    p_sl = float(active_pos["sl"])
+                    p_tp = float(active_pos["tp"])
+                    p_vol = float(active_pos["volume"])
+                    p_ticket = str(active_pos["ticket"])
+                    p_profit = float(active_pos["profit"])
+                    sl_dist_val = abs(p_entry - p_sl) if p_sl > 0 else 300.0
+
+                    portfolio.update({
+                        "position": "OPEN",
+                        "direction": p_dir,
+                        "entry_price": p_entry,
+                        "entry_time": time.time(),
+                        "sl_price": p_sl,
+                        "sl_distance": sl_dist_val,
+                        "tp1_price": p_entry + sl_dist_val if p_dir == "LONG" else p_entry - sl_dist_val,
+                        "tp2_price": p_tp,
+                        "notional": round(p_vol * p_entry, 2),
+                        "initial_notional": round(p_vol * p_entry, 2),
+                        "unrealized_pnl": p_profit,
+                        "broker_ticket": p_ticket,
+                        "broker_pnl": p_profit,
+                        "phase": 1,
+                    })
+                    trade_log.append(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] "
+                                     f"BROKER ADOPT: Linked active MT5 ticket {p_ticket} ({p_dir} {p_vol} BTC @ ${p_entry:,.1f})")
+                    state_manager.save_state(portfolio, account)
+            except Exception:
+                pass
+
 async def main():
     global _candle_queue
     _candle_queue = asyncio.Queue(maxsize=50)  # Must be created inside running event loop
