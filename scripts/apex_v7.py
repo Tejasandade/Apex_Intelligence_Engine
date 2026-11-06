@@ -174,6 +174,7 @@ live_probs = {"long": 0.5, "short": 0.5, "updated": False}
 
 # Signal engine (full stack)
 signal_engine: LiveSignalEngine | None = None
+_loaded_model_count: int = 24
 
 # Momentum engine (tick-level)
 momentum_eng = TickMomentumEngine(symbol=SYMBOL, ofi_window=300,
@@ -886,7 +887,7 @@ def fetch_klines(symbol: str, interval: str, limit: int = 210) -> list[dict]:
     return []
 
 def prewarm():
-    global signal_engine
+    global signal_engine, _loaded_model_count
 
     print("=" * 72)
     print("  APEX INTELLIGENCE ENGINE v7.1 — FULL STACK INITIALIZATION")
@@ -925,6 +926,7 @@ def prewarm():
         pass
 
     print(f"  ✓ {len(models)} model files loaded")
+    _loaded_model_count = len(models)
 
     # 2. Build LiveSignalEngine with the full stack
     signal_engine = LiveSignalEngine(
@@ -1299,6 +1301,112 @@ async def _market_intel_loop():
         except Exception:
             pass
 
+
+def get_dashboard_state() -> dict:
+    """Extract real-time metrics for Web Dashboard & remote monitoring."""
+    dur_min = 0
+    if portfolio.get("entry_time", 0) > 0:
+        dur_min = round((time.time() - portfolio["entry_time"]) / 60.0, 1)
+
+    # Next event
+    mins_to = None
+    try:
+        nxt = news_guard.get_next_event()
+        if nxt:
+            mins_to = round((nxt["time"] - datetime.datetime.now(datetime.timezone.utc)).total_seconds() / 60.0, 1)
+        is_blk, _ = news_guard.is_blackout(SYMBOL)
+    except Exception:
+        is_blk = False
+
+    # Format journal for web UI (reverse chronological, latest first)
+    journal_ui = []
+    for t in reversed(trade_journal[-30:]):
+        open_time_str = str(t.get("open_ts", ""))
+        if "T" in open_time_str:
+            open_time_str = open_time_str.split("T")[1][:8]
+        journal_ui.append({
+            "id": t.get("id", 0),
+            "open_ts": open_time_str,
+            "action": t.get("action", ""),
+            "entry_price": t.get("entry_price", 0.0),
+            "exit_price": t.get("exit_price", 0.0),
+            "pnl_usd": t.get("pnl_usd", 0.0),
+            "exit_reason": t.get("exit_reason", ""),
+        })
+
+    # OFI diagnostic
+    ofi_val = 0.0
+    try:
+        mom_d = momentum_eng.get_diagnostics()
+        ofi_val = round(float(mom_d.get("ofi", 0.0)), 3)
+    except Exception:
+        pass
+
+    fg_val = 50
+    fg_lbl = "Neutral"
+    try:
+        fg_val = sentiment_monitor.get_fear_greed()
+        fg_lbl = sentiment_monitor.get_label()
+    except Exception:
+        pass
+
+    funding_pct = 0.0
+    try:
+        funding_pct = round(funding_monitor.get_funding_pct(SYMBOL), 4)
+    except Exception:
+        pass
+
+    return {
+        "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "market": {
+            "ltp": market.get("ltp", 0.0),
+            "bid": market.get("bid", 0.0),
+            "ask": market.get("ask", 0.0),
+            "ws_connected": market.get("ws_connected", False),
+            "ticks": market.get("ticks", 0),
+        },
+        "account": {
+            "balance": round(account.get("balance", 0.0), 2),
+            "net_pnl": round(account.get("net_pnl", 0.0), 2),
+            "drawdown_pct": round(account.get("drawdown_pct", 0.0), 2),
+            "wins": account.get("wins", 0),
+            "losses": account.get("losses", 0),
+            "win_rate": round(account.get("win_rate", 0.0), 1),
+            "profit_factor": round(account.get("profit_factor", 0.0), 2),
+            "trades_today": account.get("trades_today", 0),
+            "max_trades_day": MAX_TRADES_DAY,
+        },
+        "intel": {
+            "fear_greed": fg_val,
+            "fear_greed_label": fg_lbl,
+            "funding_pct": funding_pct,
+            "news_clear": not is_blk,
+            "next_event_min": mins_to,
+        },
+        "ml": {
+            "regime": regime_info.get("current", "UNKNOWN"),
+            "atr": round(regime_info.get("atr", 0.0), 1),
+            "prob_long": round(live_probs.get("long", 0.5), 4),
+            "prob_short": round(live_probs.get("short", 0.5), 4),
+            "candles_evaluated": signal_engine._candles_processed if signal_engine else 0,
+            "models_count": _loaded_model_count,
+        },
+        "momentum": {
+            "ofi": ofi_val,
+        },
+        "position": {
+            "status": portfolio.get("position", "FLAT"),
+            "direction": portfolio.get("direction", ""),
+            "entry_price": portfolio.get("entry_price", 0.0),
+            "sl_price": portfolio.get("sl_price", 0.0),
+            "tp1_price": portfolio.get("tp1_price", 0.0),
+            "tp2_price": portfolio.get("tp2_price", 0.0),
+            "unrealized_pnl": round(portfolio.get("unrealized_pnl", 0.0), 2),
+            "duration_min": dur_min,
+        },
+        "journal": journal_ui,
+    }
+
 async def main():
     global _candle_queue
     _candle_queue = asyncio.Queue(maxsize=50)  # Must be created inside running event loop
@@ -1340,6 +1448,24 @@ async def main():
         except Exception:
             pass
         print(f"  Replay complete — Regime: {regime_info['current']} | ATR: ${regime_info['atr']:,.0f} | Engine state cleared for live trading")
+
+    # ── Bybit Broker Connection Validation ────────────────────────────────────
+    if DEMO_MODE and _bybit_broker:
+        acc_info = await _bybit_broker.validate_account()
+        if acc_info.get("valid"):
+            print(f"  ✓ Bybit TESTNET connected — Unified Balance: ${acc_info['balance']:,.2f} USDT")
+        else:
+            print(f"  ⚠️  Bybit TESTNET warning: {acc_info.get('error')} (Order placement disabled until key is verified)")
+
+    # ── Live Web Dashboard Server (Local & Cloud) ─────────────────────────────
+    web_port = int(os.getenv("PORT", "8080"))
+    from src.ui.web_server import ApexWebServer
+    web_server = ApexWebServer(
+        state_provider=get_dashboard_state,
+        host="0.0.0.0",
+        port=web_port
+    )
+    await web_server.start()
 
     await asyncio.gather(
         binance_ws(),

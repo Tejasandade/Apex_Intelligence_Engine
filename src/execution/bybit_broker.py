@@ -45,11 +45,10 @@ class BybitBroker:
         self.recv_window = str(recv_window)
         self._time_offset_ms: int = 0  # corrected via sync_time()
         
-        # Demo Trading (testnet.bybit.com orange badge) uses api.bytick.com
-        # Actual Testnet uses api-testnet.bybit.com
-        # We detect by checking env var BYBIT_USE_DEMO
+        # Bybit Testnet uses https://api-testnet.bybit.com (testnet.bybit.com)
+        # Bybit Mainnet Demo Trading uses https://api-demo.bybit.com
         import os as _os
-        _use_demo = _os.getenv("BYBIT_USE_DEMO", "true").lower() == "true"
+        _use_demo = _os.getenv("BYBIT_USE_DEMO", "false").lower() == "true"
         if use_testnet and _use_demo:
             self.base_url = "https://api-demo.bybit.com"
         elif use_testnet:
@@ -79,6 +78,23 @@ class BybitBroker:
         except Exception as e:
             # fallback: ignore, recv_window=20000 is usually enough
             pass
+
+    async def validate_account(self) -> dict:
+        """Fetch unified trading account balance to verify API key validity."""
+        try:
+            await self.sync_time()
+            res = await self._request("GET", "/v5/account/wallet-balance", {"accountType": "UNIFIED", "coin": "USDT"})
+            ret_code = res.get("retCode", 0)
+            ret_msg = res.get("retMsg", "")
+            if ret_code != 0:
+                return {"valid": False, "balance": 0.0, "error": f"Bybit error {ret_code}: {ret_msg}"}
+            try:
+                bal = float(res["result"]["list"][0]["coin"][0]["walletBalance"])
+                return {"valid": True, "balance": bal, "error": None}
+            except Exception:
+                return {"valid": True, "balance": 0.0, "error": None}
+        except Exception as e:
+            return {"valid": False, "balance": 0.0, "error": str(e)}
 
     async def close(self):
         """Close the underlying HTTP client."""
