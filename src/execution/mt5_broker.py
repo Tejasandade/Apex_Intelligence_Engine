@@ -243,6 +243,37 @@ class MT5Broker:
         order_type = mt5.ORDER_TYPE_BUY if is_buy else mt5.ORDER_TYPE_SELL
         price = tick.ask if is_buy else tick.bid
 
+        # ── Spread Optimizer & Fill Protection ──
+        # Measure real broker spread (Ask - Bid)
+        spread = tick.ask - tick.bid
+        max_spread_usd = 35.0 if "BTC" in actual_symbol else (sym_info.point * 300)
+        
+        wait_start = time.time()
+        max_wait_secs = 6.0
+        while spread > max_spread_usd and (time.time() - wait_start) < max_wait_secs:
+            logger.warn(
+                "mt5_spread_elevated_waiting",
+                symbol=actual_symbol,
+                spread=round(spread, 2),
+                limit=max_spread_usd,
+                wait_time=round(time.time() - wait_start, 1)
+            )
+            time.sleep(0.3)
+            tick = mt5.symbol_info_tick(actual_symbol)
+            if tick:
+                spread = tick.ask - tick.bid
+                price = tick.ask if is_buy else tick.bid
+
+        if spread > max_spread_usd:
+            logger.error(
+                "mt5_order_aborted_spread_too_wide",
+                symbol=actual_symbol,
+                spread=round(spread, 2),
+                limit=max_spread_usd
+            )
+            print(f"  ⚠️ [MT5] Entry Aborted: Spread elevated (${spread:.2f} > ${max_spread_usd:.2f} limit). Fill protection activated to prevent retail slippage.")
+            return None
+
         # Adapt SL and TP to MT5 execution price using exact dollar distances
         digits = getattr(sym_info, "digits", 2)
         if sl_distance and float(sl_distance) > 0:
@@ -300,15 +331,24 @@ class MT5Broker:
             return None
 
         order_id = str(result.order)
+        fill_price = float(result.price) if getattr(result, "price", 0) > 0 else price
+
+        # If fill price slipped from quoted price, recalibrate stops to exact fill price
+        if sl_distance and float(sl_distance) > 0 and abs(fill_price - price) >= 1.0:
+            exact_sl = round(fill_price - float(sl_distance), digits) if is_buy else round(fill_price + float(sl_distance), digits)
+            exact_tp = round(fill_price + float(tp_distance), digits) if (tp_distance and is_buy) else (round(fill_price - float(tp_distance), digits) if tp_distance else target_tp)
+            logger.info("mt5_fill_anchoring_stops", fill_price=fill_price, quote_price=price, exact_sl=exact_sl, exact_tp=exact_tp)
+            self._modify_position_stops_sync(result.order, exact_sl, exact_tp)
+
         logger.info(
             "mt5_order_placed_success",
             order_id=order_id,
             symbol=actual_symbol,
             side=side,
             volume=vol,
-            price=price,
-            sl=stop_loss,
-            tp=take_profit
+            price=fill_price,
+            sl=target_sl,
+            tp=target_tp
         )
         return order_id
 

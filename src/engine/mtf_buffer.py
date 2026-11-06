@@ -26,6 +26,7 @@ class MultiTimeframeBuffer:
         self._df_1m: pd.DataFrame = pd.DataFrame()
         self._df_5m: pd.DataFrame = pd.DataFrame()
         self._df_15m: pd.DataFrame = pd.DataFrame()
+        self._df_1h: pd.DataFrame = pd.DataFrame()
         self._ready = False
 
     def add_candle(self, candle: dict) -> None:
@@ -73,6 +74,64 @@ class MultiTimeframeBuffer:
     def get_15m_df(self) -> pd.DataFrame:
         """Get the current 15m DataFrame."""
         return self._df_15m
+
+    def get_1h_df(self) -> pd.DataFrame:
+        """Get the current 1h DataFrame."""
+        return self._df_1h
+
+    def seed_direct(
+        self,
+        df_5m: pd.DataFrame | None = None,
+        df_15m: pd.DataFrame | None = None,
+        df_1h: pd.DataFrame | None = None,
+    ) -> bool:
+        """
+        Directly populate 5m, 15m, and 1h buffers from pre-fetched historical klines.
+        Eliminates the multi-candle warmup wait at startup.
+        """
+        if df_5m is not None and not df_5m.empty:
+            d5 = df_5m.copy()
+            if "datetime" not in d5.columns and "timestamp" in d5.columns:
+                d5["datetime"] = pd.to_datetime(d5["timestamp"], unit="ms")
+                d5.set_index("datetime", inplace=True)
+            self._df_5m = d5
+
+        if df_15m is not None and not df_15m.empty:
+            d15 = df_15m.copy()
+            if "datetime" not in d15.columns and "timestamp" in d15.columns:
+                d15["datetime"] = pd.to_datetime(d15["timestamp"], unit="ms")
+                d15.set_index("datetime", inplace=True)
+            self._df_15m = d15
+        elif self._df_5m is not None and len(self._df_5m) >= 3:
+            agg_dict = {
+                "open": "first",
+                "high": "max",
+                "low": "min",
+                "close": "last",
+                "volume": "sum",
+                "timestamp": "last",
+            }
+            self._df_15m = self._df_5m.resample("15min").agg(agg_dict).dropna()
+
+        if df_1h is not None and not df_1h.empty:
+            d1h = df_1h.copy()
+            if "datetime" not in d1h.columns and "timestamp" in d1h.columns:
+                d1h["datetime"] = pd.to_datetime(d1h["timestamp"], unit="ms")
+                d1h.set_index("datetime", inplace=True)
+            self._df_1h = d1h
+        elif self._df_15m is not None and len(self._df_15m) >= 4:
+            agg_dict = {
+                "open": "first",
+                "high": "max",
+                "low": "min",
+                "close": "last",
+                "volume": "sum",
+                "timestamp": "last",
+            }
+            self._df_1h = self._df_15m.resample("1h").agg(agg_dict).dropna()
+
+        self._ready = len(self._df_5m) >= 10 or len(self._df_15m) >= 5
+        return self._ready
 
     def get_latest_15m_adx(self) -> float:
         """

@@ -43,6 +43,7 @@ from src.council.advisors import (
     ExhaustionAdvisor,
     VelocityAdvisor,
     SentimentAdvisor,
+    CrossMarketAdvisor,
 )
 from src.core.logging import get_logger
 
@@ -114,6 +115,7 @@ class Council:
 
         self._risk_advisor = RiskAdvisor(weight=0.0)
         self._sentiment_advisor = SentimentAdvisor(weight=1.0)
+        self._cross_market_advisor = CrossMarketAdvisor(weight=council_weights.get("weight_cross_market", 1.2))
 
         self.advisors = [
             MomentumAdvisor(weight=council_weights.get("weight_momentum", 1.5)),
@@ -123,6 +125,7 @@ class Council:
             SessionAdvisor(weight=council_weights.get("weight_session", 1.0)),
             ExhaustionAdvisor(weight=2.0),
             VelocityAdvisor(weight=2.5),  # High weight for strict channel-bottom veto
+            self._cross_market_advisor,
             self._sentiment_advisor,
             self._risk_advisor,
         ]
@@ -357,6 +360,11 @@ class Council:
         """Push fresh Fear & Greed + funding data to the SentimentAdvisor."""
         if self._sentiment_advisor:
             self._sentiment_advisor.update_market_data(fg_value, funding_pct)
+
+    def update_cross_market(self, state: dict[str, Any]) -> None:
+        """Push fresh DXY momentum + ETH relative strength data to the CrossMarketAdvisor."""
+        if hasattr(self, "_cross_market_advisor") and self._cross_market_advisor:
+            self._cross_market_advisor.update_cross_market_data(state)
 
     def update_risk_state(
         self,

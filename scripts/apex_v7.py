@@ -53,6 +53,7 @@ from src.engine.signal_engine import LiveSignalEngine, TradingSignal
 from src.data.providers.news_guard import NewsGuard
 from src.data.providers.funding_rate import FundingRateMonitor
 from src.data.providers.sentiment import SentimentMonitor
+from src.data.providers.cross_market import CrossMarketMonitor
 from src.core.state_manager import StateManager
 from src.models.training.retrain_scheduler import RetrainScheduler
 
@@ -149,15 +150,17 @@ market = {"ltp": 0.0, "bid": 0.0, "ask": 0.0,
           "spread_bps": 0.0, "obi": 0.0, "ws_connected": False, "ticks": 0}
 
 # ─── MARKET INTELLIGENCE (APEX v7.2) ─────────────────────────────────────────
-news_guard       = NewsGuard()
-funding_monitor  = FundingRateMonitor()
-sentiment_monitor = SentimentMonitor()
-state_manager    = StateManager()
+news_guard           = NewsGuard()
+funding_monitor      = FundingRateMonitor()
+sentiment_monitor    = SentimentMonitor()
+cross_market_monitor = CrossMarketMonitor()
+state_manager        = StateManager()
 retrain_scheduler: RetrainScheduler | None = None   # set in prewarm()
 
 # Candle buffers
-candles_5m  = deque(maxlen=210)
-candles_1h  = deque(maxlen=168)
+candles_5m   = deque(maxlen=210)
+candles_15m  = deque(maxlen=100)
+candles_1h   = deque(maxlen=168)
 live_candle = {"open": 0.0, "high": 0.0, "low": 0.0, "close": 0.0, "volume": 0.0, "timestamp": 0}
 cur_min_ts  = 0
 acc_1m      = []   # accumulate into 5m
@@ -562,6 +565,8 @@ def execute_signal(signal: TradingSignal):
                     telegram(f"{b_name} ORDER {side} {qty} BTC | SL:{sl_price:.1f} TP:{tp2:.1f} | id:{oid}")
                     save_journal()
                     state_manager.save_state(portfolio, account)
+                else:
+                    trade_log.append(f"[{b_name}] Fill protection: Spread elevated, order held")
             except Exception as _be:
                 trade_log.append(f"[{b_name}] Order error: {_be}")
         try:
@@ -818,6 +823,13 @@ def process_tick(price: float, qty: float, is_buyer_maker: bool):
                   "volume": sum(x["volume"] for x in acc_1m), "timestamp": int(now * 1000)}
             acc_1m.clear()
             candles_5m.append(dict(c5))
+            acc_5m_15m.append(dict(c5))
+            if len(acc_5m_15m) >= 3:
+                c15 = {"open": acc_5m_15m[0]["open"], "high": max(x["high"] for x in acc_5m_15m),
+                       "low": min(x["low"] for x in acc_5m_15m), "close": acc_5m_15m[-1]["close"],
+                       "volume": sum(x["volume"] for x in acc_5m_15m), "timestamp": int(now * 1000)}
+                acc_5m_15m.clear()
+                candles_15m.append(dict(c15))
             if _candle_queue is not None:
                 try:
                     _candle_queue.put_nowait(c5)
@@ -993,23 +1005,31 @@ def prewarm():
     )
     print(f"  ✓ LiveSignalEngine created (ensemble + council + monitor)")
 
-    # 3. Warm up with historical 5m data (robust multi-exchange fetch)
-    print("  Fetching historical 5m candles (210 × 5m)...")
+    # 3. Warm up with historical 5m, 15m, and 1h data (robust multi-exchange fetch)
+    print("  Fetching historical 5m, 15m, and 1h candles...")
     raw5m = fetch_klines(SYMBOL, "5m", 210)
+    raw15m = fetch_klines(SYMBOL, "15m", 100)
+    raw1h = fetch_klines(SYMBOL, "1h", 72)
+
     if not raw5m:
         print("  ⚠️ Warning: Could not fetch 5m candles from any exchange, starting with empty buffer")
         prewarm.replay_candles = []
     else:
         hist = pd.DataFrame(raw5m)
-        signal_engine.warm_up(hist[["timestamp","open","high","low","close","volume"]])
+        df_15 = pd.DataFrame(raw15m) if raw15m else None
+        df_1h = pd.DataFrame(raw1h) if raw1h else None
+        signal_engine.warm_up(hist[["timestamp","open","high","low","close","volume"]], df_15m=df_15, df_1h=df_1h)
         print(f"  ✓ Signal engine warmed up: {signal_engine.live_store.buffer_length} candles")
         for c in raw5m:
             candles_5m.append(c)
         prewarm.replay_candles = raw5m[-3:]
 
-    # 4. Load 1h for structural SL
-    raw1h = fetch_klines(SYMBOL, "1h", 72)
-    for c in raw1h:
+    # Populate 15m & 1h buffers
+    for c in (raw15m or []):
+        candles_15m.append(c)
+    print(f"  ✓ 15M candles loaded: {len(candles_15m)}")
+
+    for c in (raw1h or []):
         candles_1h.append(c)
     print(f"  ✓ 1H candles loaded: {len(candles_1h)}")
 
@@ -1201,6 +1221,11 @@ def render():
     is_blk, blk_rsn = news_guard.is_blackout(SYMBOL)
     news_str = f"{RED}⛔ BLACKOUT{R}" if is_blk else f"{GRN}✓ CLEAR{R}"
     buf.append(row(f" F&G: {fg_col}{fg_val} ({fg_label}){R}  │  Funding: {fr_col}{fr_pct:+.4f}% ({fr_label}){R}  │  News: {news_str}"))
+    cm_dxy = cross_market_monitor.dxy_trend
+    cm_dxy_c = RED if cm_dxy == "USD_SURGING" else (GRN if cm_dxy == "USD_WEAKENING" else GRY)
+    cm_eth = cross_market_monitor.eth_trend
+    cm_eth_c = GRN if cm_eth == "ETH_OUTPERFORMING" else (RED if cm_eth == "ETH_UNDERPERFORMING" else GRY)
+    buf.append(row(f" Macro DXY: {cm_dxy_c}{cm_dxy} ({cross_market_monitor.dxy_momentum_pct:+.2f}%){R}  │  ETH/BTC: {cm_eth_c}{cm_eth} ({cross_market_monitor.eth_btc_rel_pct:+.2f}%){R}"))
     buf.append(row(f" Next Event: {evt_col}{evt_str}{R}"))
     if retrain_scheduler:
         rs = retrain_scheduler.get_status()
@@ -1336,22 +1361,32 @@ async def _market_intel_loop():
     asyncio.create_task(_safe_fetch(news_guard.update_events(), "news"))
     asyncio.create_task(_safe_fetch(funding_monitor.update(SYMBOL), "funding"))
     asyncio.create_task(_safe_fetch(sentiment_monitor.update(), "sentiment"))
+    asyncio.create_task(_safe_fetch(cross_market_monitor.update(), "cross_market"))
     # Don't await — let them run in background while WS + dashboard start immediately
+    counter = 0
     while True:
-        await asyncio.sleep(300)   # 5 minutes
+        await asyncio.sleep(30)   # 30-second cycle for agile cross-market checks
+        counter += 1
         try:
-            await asyncio.gather(
-                asyncio.wait_for(news_guard.update_events(), timeout=10),
-                asyncio.wait_for(funding_monitor.update(SYMBOL), timeout=10),
-                asyncio.wait_for(sentiment_monitor.update(), timeout=10),
-                return_exceptions=True,
-            )
-            # Push fresh sentiment data into Council's SentimentAdvisor
+            # 1. Cross-market momentum updates every 30s
+            await asyncio.wait_for(cross_market_monitor.update(), timeout=8)
+
+            # 2. News, funding & sentiment update every 300s (every 10 cycles)
+            if counter % 10 == 0:
+                await asyncio.gather(
+                    asyncio.wait_for(news_guard.update_events(), timeout=10),
+                    asyncio.wait_for(funding_monitor.update(SYMBOL), timeout=10),
+                    asyncio.wait_for(sentiment_monitor.update(), timeout=10),
+                    return_exceptions=True,
+                )
+
+            # 3. Push fresh sentiment and cross-market data into Council
             if signal_engine and signal_engine.council:
                 try:
                     fg_val = int(sentiment_monitor.get_fear_greed())
                     fund_pct = float(funding_monitor.get_funding_pct(SYMBOL))
                     signal_engine.council.update_sentiment(fg_val, fund_pct)
+                    signal_engine.council.update_cross_market(cross_market_monitor.get_state())
                 except Exception:
                     pass
         except Exception:
@@ -1439,6 +1474,7 @@ def get_dashboard_state() -> dict:
             "news_clear": not is_blk,
             "next_event_min": mins_to,
         },
+        "cross_market": cross_market_monitor.get_state(),
         "ml": {
             "regime": regime_info.get("current", "UNKNOWN"),
             "atr": round(regime_info.get("atr", 0.0), 1),

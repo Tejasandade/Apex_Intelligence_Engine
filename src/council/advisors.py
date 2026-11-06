@@ -141,41 +141,155 @@ class StructureAdvisor(BaseAdvisor):
         factors = 0
         reasons = []
 
-        # MTF check: Structure confirmation from 5m chart
+        # ── 1. Higher-Timeframe (15m / 1h) Structure & Liquidity Engine ──
+        df_15m = kwargs.get("df_15m")
+        df_1h = kwargs.get("df_1h")
         df_5m = kwargs.get("df_5m")
-        mtf_ready = kwargs.get("mtf_ready", False)
 
-        if mtf_ready and df_5m is not None and len(df_5m) >= 200:
+        # Derive 15m from 5m if 15m is not provided directly
+        if (df_15m is None or len(df_15m) < 10) and df_5m is not None and len(df_5m) >= 30:
+            try:
+                d5 = df_5m.copy()
+                if "datetime" not in d5.columns and "timestamp" in d5.columns:
+                    d5["datetime"] = pd.to_datetime(d5["timestamp"], unit="ms")
+                    d5.set_index("datetime", inplace=True)
+                agg_dict = {
+                    "open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"
+                }
+                df_15m = d5.resample("15min").agg(agg_dict).dropna()
+            except Exception:
+                pass
+
+        htf_macro_counter = False
+        liquidity_sweep_confirmed = False
+        inside_fvg_confluent = False
+        opposing_fvg_detected = False
+        ema_50_val = 0.0
+        ema_200_val = 0.0
+
+        if df_15m is not None and len(df_15m) >= 15:
+            closes_15 = df_15m["close"]
+            current_close = closes_15.iloc[-1]
+            highs_15 = df_15m["high"]
+            lows_15 = df_15m["low"]
+
+            # 1a. Macro Trend Filter (EMA 50 / 200 on 15m)
+            ema_span_50 = min(50, len(df_15m))
+            ema_span_200 = min(200, len(df_15m))
+            ema_50 = closes_15.ewm(span=ema_span_50).mean().iloc[-1]
+            ema_200 = closes_15.ewm(span=ema_span_200).mean().iloc[-1]
+            ema_50_val = float(ema_50)
+            ema_200_val = float(ema_200)
+
+            if direction == "BUY":
+                if current_close < ema_50 and ema_50 < ema_200:
+                    htf_macro_counter = True
+                elif current_close > ema_50 and ema_50 > ema_200:
+                    factors += 1.0
+                    reasons.append("15m Macro Uptrend (Price > EMA50 > EMA200)")
+            else:  # SELL
+                if current_close > ema_50 and ema_50 > ema_200:
+                    htf_macro_counter = True
+                elif current_close < ema_50 and ema_50 < ema_200:
+                    factors += 1.0
+                    reasons.append("15m Macro Downtrend (Price < EMA50 < EMA200)")
+
+            # 1b. 15m Fair Value Gap (FVG) Scan (last 15 candles)
+            lookback_fvg = min(15, len(df_15m) - 2)
+            bullish_fvgs = []
+            bearish_fvgs = []
+            for i in range(-lookback_fvg, 0):
+                # Bullish FVG: low of candle i > high of candle i-2
+                if lows_15.iloc[i] > highs_15.iloc[i - 2]:
+                    f_bottom = float(highs_15.iloc[i - 2])
+                    f_top = float(lows_15.iloc[i])
+                    bullish_fvgs.append((f_bottom, f_top))
+                # Bearish FVG: high of candle i < low of candle i-2
+                if highs_15.iloc[i] < lows_15.iloc[i - 2]:
+                    f_top = float(lows_15.iloc[i - 2])
+                    f_bottom = float(highs_15.iloc[i])
+                    bearish_fvgs.append((f_bottom, f_top))
+
+            # Check price interaction with FVGs
+            if direction == "BUY":
+                for fb, ft in bullish_fvgs[-3:]:
+                    if fb * 0.998 <= price <= ft * 1.002:
+                        factors += 1.5
+                        inside_fvg_confluent = True
+                        reasons.append(f"Inside 15m Bullish FVG [${fb:,.0f}-${ft:,.0f}]")
+                        break
+                for fb, ft in bearish_fvgs[-2:]:
+                    if price < fb and (fb - price) / max(price, 1) < 0.003:
+                        opposing_fvg_detected = True
+                        reasons.append(f"Approaching overhead 15m Bearish FVG [${fb:,.0f}] ceiling")
+                        break
+            else:  # SELL
+                for fb, ft in bearish_fvgs[-3:]:
+                    if fb * 0.998 <= price <= ft * 1.002:
+                        factors += 1.5
+                        inside_fvg_confluent = True
+                        reasons.append(f"Inside 15m Bearish FVG [${fb:,.0f}-${ft:,.0f}]")
+                        break
+                for fb, ft in bullish_fvgs[-2:]:
+                    if price > ft and (price - ft) / max(price, 1) < 0.003:
+                        opposing_fvg_detected = True
+                        reasons.append(f"Approaching underlying 15m Bullish FVG [${ft:,.0f}] floor")
+                        break
+
+            # 1c. 15m Swing Liquidity Sweeps (Stop Hunts / Traps)
+            if len(df_15m) >= 20:
+                swing_lookback = min(25, len(df_15m) - 3)
+                prior_high = float(highs_15.iloc[-swing_lookback:-2].max())
+                prior_low = float(lows_15.iloc[-swing_lookback:-2].min())
+                recent_highs = highs_15.iloc[-2:]
+                recent_lows = lows_15.iloc[-2:]
+
+                # Bear Trap (Sell-side sweep): swept prior low, but now reclaimed above it
+                if any(recent_lows < prior_low) and price > prior_low:
+                    if direction == "BUY":
+                        factors += 2.0
+                        liquidity_sweep_confirmed = True
+                        reasons.append(f"15m Bear Trap: Sell-side swept below ${prior_low:,.0f} and reclaimed")
+                    else:
+                        opposing_fvg_detected = True
+
+                # Bull Trap (Buy-side sweep): swept prior high, but now rejected back below it
+                if any(recent_highs > prior_high) and price < prior_high:
+                    if direction == "SELL":
+                        factors += 2.0
+                        liquidity_sweep_confirmed = True
+                        reasons.append(f"15m Bull Trap: Buy-side swept above ${prior_high:,.0f} and rejected")
+                    else:
+                        opposing_fvg_detected = True
+
+        # Check 5m Bollinger Band discount/premium zone
+        if df_5m is not None and len(df_5m) >= 20:
             rolling_close = df_5m.close.rolling(20)
             bb_upper = rolling_close.mean().iloc[-1] + 2 * rolling_close.std().iloc[-1]
             bb_lower = rolling_close.mean().iloc[-1] - 2 * rolling_close.std().iloc[-1]
             current_price = df_5m.close.iloc[-1]
-            
-            # Macro Trend Check
-            ema_50 = df_5m.close.ewm(span=50).mean().iloc[-1]
-            ema_200 = df_5m.close.ewm(span=200).mean().iloc[-1]
-            
-            if direction == "BUY" and ema_50 < ema_200 and current_price < ema_50:
-                return self._make_vote(
-                    Vote.REJECT, 0.6,
-                    "Structure REJECT: Counter-trend BUY in macro downtrend",
-                    {"ema_50": ema_50, "ema_200": ema_200}
-                )
-            elif direction == "SELL" and ema_50 > ema_200 and current_price > ema_50:
-                return self._make_vote(
-                    Vote.REJECT, 0.6,
-                    "Structure REJECT: Counter-trend SELL in macro uptrend",
-                    {"ema_50": ema_50, "ema_200": ema_200}
-                )
+            if direction == "BUY" and current_price <= bb_lower * 1.002:
+                factors += 1
+                reasons.append("At 5m BB lower (discount zone)")
+            elif direction == "SELL" and current_price >= bb_upper * 0.998:
+                factors += 1
+                reasons.append("At 5m BB upper (premium zone)")
 
-            if direction == "BUY":
-                if current_price <= bb_lower * 1.002:
-                    factors += 1
-                    reasons.append("At 5m BB lower (discount zone)")
-            else:  # SELL
-                if current_price >= bb_upper * 0.998:
-                    factors += 1
-                    reasons.append("At 5m BB upper (premium zone)")
+        # Strict HTF Trend Veto if no confirmed smart-money liquidity sweep
+        if htf_macro_counter and not liquidity_sweep_confirmed:
+            trend_desc = "downtrend" if direction == "BUY" else "uptrend"
+            return self._make_vote(
+                Vote.REJECT, 0.65,
+                f"Structure REJECT: Counter-trend {direction} in 15m EMA50/200 {trend_desc} without liquidity sweep confirmation",
+                {"ema_50": ema_50_val, "ema_200": ema_200_val, "price": price}
+            )
+
+        if opposing_fvg_detected and not liquidity_sweep_confirmed and not scalp_mode:
+            return self._make_vote(
+                Vote.REJECT, 0.60,
+                f"Structure REJECT: {direction} fired directly into opposing 15m FVG zone/trap",
+                {"price": price}
+            )
 
         adv_bull_sweep = float(row.get("bullish_stop_run", 0.0))
         adv_bear_sweep = float(row.get("bearish_stop_run", 0.0))
@@ -1110,5 +1224,138 @@ class SentimentAdvisor(BaseAdvisor):
             Vote.ABSTAIN, 0.0,
             reason_str,
             {"fg": fg, "funding_pct": fund}
+        )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  10. CROSS-MARKET ADVISOR (DXY Momentum + ETH/BTC Relative Strength)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+class CrossMarketAdvisor(BaseAdvisor):
+    """
+    Evaluates multi-asset cross-market conditions:
+    1. US Dollar Index (DXY via EUR/USD inverse proxy) momentum:
+       - USD surging (> +0.08%): severe macro headwind for crypto longs.
+       - USD weakening (< -0.08%): strong macro tailwind for crypto longs.
+    2. ETH/BTC Relative Strength & Lead-Lag Divergence:
+       - Bearish Divergence: BTC pumps but ETH is dumping (< -0.20% vs BTC) -> fakeout long / bull trap.
+       - Bullish Divergence: BTC dumps but ETH is pumping (> +0.20% vs BTC) -> fakeout short / bear trap.
+       - Confluent: Both BTC and ETH moving together in trade direction -> institutional confirmation.
+    """
+
+    def __init__(self, weight: float = 1.2):
+        super().__init__(name="CrossMarket", weight=weight)
+        self._dxy_trend: str = "USD_NEUTRAL"
+        self._dxy_momentum_pct: float = 0.0
+        self._eth_trend: str = "ALIGNED"
+        self._eth_btc_rel_pct: float = 0.0
+        self._last_update: float = 0.0
+
+    def update_cross_market_data(self, state: dict[str, Any]) -> None:
+        """Update advisor state from CrossMarketMonitor."""
+        import time
+        self._dxy_trend = str(state.get("dxy_trend", self._dxy_trend))
+        self._dxy_momentum_pct = float(state.get("dxy_momentum_pct", self._dxy_momentum_pct))
+        self._eth_trend = str(state.get("eth_trend", self._eth_trend))
+        self._eth_btc_rel_pct = float(state.get("eth_btc_rel_pct", self._eth_btc_rel_pct))
+        self._last_update = time.time()
+
+    def evaluate(
+        self,
+        features: pd.DataFrame,
+        direction: str,
+        price: float,
+        regime: str,
+        atr: float,
+        **kwargs: Any,
+    ) -> AdvisorVote:
+        # Check if fresh cross_market_data was passed via kwargs
+        cmd = kwargs.get("cross_market_data")
+        if cmd and isinstance(cmd, dict):
+            self.update_cross_market_data(cmd)
+
+        is_long = direction in ("BUY", "LONG")
+        reasons: list[str] = []
+
+        # ── BUY / LONG EVALUATION ──
+        if is_long:
+            # Fatal macro counter-combination: USD surging AND ETH lagging
+            if self._dxy_trend == "USD_SURGING" and self._eth_trend == "ETH_UNDERPERFORMING":
+                return self._make_vote(
+                    Vote.REJECT, 0.75,
+                    f"Cross-Market REJECT: Surging USD (+{self._dxy_momentum_pct:.2f}%) + Bearish ETH Divergence ({self._eth_btc_rel_pct:.2f}%) — high bull trap risk",
+                    {"dxy": self._dxy_trend, "eth": self._eth_trend}
+                )
+
+            # Severe USD surge alone
+            if self._dxy_trend == "USD_SURGING" and self._dxy_momentum_pct > 0.15:
+                return self._make_vote(
+                    Vote.REJECT, 0.65,
+                    f"Cross-Market REJECT: Macro Dollar breakout (+{self._dxy_momentum_pct:.2f}%) — crypto longs heavily penalized",
+                    {"dxy": self._dxy_trend}
+                )
+
+            # High-conviction bullish confluence: Weak USD + ETH outperforming/aligned
+            if self._dxy_trend == "USD_WEAKENING" and self._eth_trend in ("ETH_OUTPERFORMING", "ALIGNED"):
+                reasons.append(f"Weakening USD ({self._dxy_momentum_pct:.2f}%) macro tailwind")
+                if self._eth_trend == "ETH_OUTPERFORMING":
+                    reasons.append(f"ETH leading risk-on (+{self._eth_btc_rel_pct:.2f}%)")
+                return self._make_vote(
+                    Vote.APPROVE, 0.80,
+                    f"Cross-Market APPROVE: {', '.join(reasons)}",
+                    {"dxy": self._dxy_trend, "eth": self._eth_trend}
+                )
+
+            # Moderate tailwind
+            if self._dxy_trend == "USD_WEAKENING" or self._eth_trend == "ETH_OUTPERFORMING":
+                reason = "USD weakening" if self._dxy_trend == "USD_WEAKENING" else "ETH outperforming"
+                return self._make_vote(
+                    Vote.APPROVE, 0.65,
+                    f"Cross-Market APPROVE: {reason} supporting long",
+                    {"dxy": self._dxy_trend, "eth": self._eth_trend}
+                )
+
+        # ── SELL / SHORT EVALUATION ──
+        else:
+            # Fatal macro counter-combination: USD dumping AND ETH pumping
+            if self._dxy_trend == "USD_WEAKENING" and self._eth_trend == "ETH_OUTPERFORMING":
+                return self._make_vote(
+                    Vote.REJECT, 0.75,
+                    f"Cross-Market REJECT: Weakening USD ({self._dxy_momentum_pct:.2f}%) + Bullish ETH Divergence (+{self._eth_btc_rel_pct:.2f}%) — high bear trap risk",
+                    {"dxy": self._dxy_trend, "eth": self._eth_trend}
+                )
+
+            # Severe USD dump alone
+            if self._dxy_trend == "USD_WEAKENING" and self._dxy_momentum_pct < -0.15:
+                return self._make_vote(
+                    Vote.REJECT, 0.65,
+                    f"Cross-Market REJECT: Macro Dollar dumping ({self._dxy_momentum_pct:.2f}%) — crypto shorts heavily penalized",
+                    {"dxy": self._dxy_trend}
+                )
+
+            # High-conviction bearish confluence: Strong USD + ETH underperforming/aligned
+            if self._dxy_trend == "USD_SURGING" and self._eth_trend in ("ETH_UNDERPERFORMING", "ALIGNED"):
+                reasons.append(f"Surging USD (+{self._dxy_momentum_pct:.2f}%) liquidity drain")
+                if self._eth_trend == "ETH_UNDERPERFORMING":
+                    reasons.append(f"ETH dumping harder ({self._eth_btc_rel_pct:.2f}%)")
+                return self._make_vote(
+                    Vote.APPROVE, 0.80,
+                    f"Cross-Market APPROVE: {', '.join(reasons)}",
+                    {"dxy": self._dxy_trend, "eth": self._eth_trend}
+                )
+
+            # Moderate tailwind for short
+            if self._dxy_trend == "USD_SURGING" or self._eth_trend == "ETH_UNDERPERFORMING":
+                reason = "USD surging" if self._dxy_trend == "USD_SURGING" else "ETH lagging"
+                return self._make_vote(
+                    Vote.APPROVE, 0.65,
+                    f"Cross-Market APPROVE: {reason} supporting short",
+                    {"dxy": self._dxy_trend, "eth": self._eth_trend}
+                )
+
+        return self._make_vote(
+            Vote.ABSTAIN, 0.0,
+            f"Cross-Market neutral: DXY={self._dxy_trend} ({self._dxy_momentum_pct:+.2f}%), ETH={self._eth_trend} ({self._eth_btc_rel_pct:+.2f}%)",
+            {"dxy": self._dxy_trend, "eth": self._eth_trend}
         )
 

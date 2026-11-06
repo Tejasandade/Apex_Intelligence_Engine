@@ -340,7 +340,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <div class="card-title">Stack Architecture</div>
         <div class="card-value" style="font-size: 16px; color: var(--accent-cyan);" id="models-active">24 Active Models</div>
         <div class="card-sub">
-          Council: <span class="green">9 Advisors</span> &bull; WalkForward: <span class="green">ON</span>
+          Council: <span class="green">10 Advisors</span> &bull; WalkForward: <span class="green">ON</span>
         </div>
       </div>
     </div>
@@ -409,6 +409,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <div style="background:#0d121c; padding: 10px; border-radius: 6px;">
             <div style="font-size: 10px; color: var(--text-muted); text-transform: uppercase;">Macro News Guard</div>
             <div style="font-size: 14px; font-family: var(--font-mono); color: var(--accent-green);" id="news-val">✓ CLEAR</div>
+          </div>
+        </div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 8px;">
+          <div style="background:#0d121c; padding: 10px; border-radius: 6px;">
+            <div style="font-size: 10px; color: var(--text-muted); text-transform: uppercase;">Macro DXY (Dollar Momentum)</div>
+            <div style="font-size: 13px; font-family: var(--font-mono);" id="dxy-val">USD_NEUTRAL (+0.00%)</div>
+          </div>
+          <div style="background:#0d121c; padding: 10px; border-radius: 6px;">
+            <div style="font-size: 10px; color: var(--text-muted); text-transform: uppercase;">ETH/BTC Relative Strength</div>
+            <div style="font-size: 13px; font-family: var(--font-mono);" id="eth-btc-val">ALIGNED (+0.00%)</div>
           </div>
         </div>
       </div>
@@ -485,6 +495,21 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         document.getElementById('funding-val').textContent = (fund >= 0 ? '+' : '') + fund.toFixed(4) + '%';
         document.getElementById('ofi-val').textContent = (data.momentum.ofi >= 0 ? '+' : '') + Number(data.momentum.ofi || 0).toFixed(3);
         document.getElementById('news-val').textContent = data.intel.news_clear ? '✓ CLEAR' : '⚠ BLACKOUT';
+
+        // Cross-Market Intel
+        if (data.cross_market) {
+          const cm = data.cross_market;
+          const dxyElem = document.getElementById('dxy-val');
+          if (dxyElem) {
+            dxyElem.textContent = `${cm.dxy_trend} (${cm.dxy_momentum_pct >= 0 ? '+' : ''}${Number(cm.dxy_momentum_pct).toFixed(2)}%)`;
+            dxyElem.style.color = cm.dxy_trend === 'USD_SURGING' ? 'var(--accent-red)' : (cm.dxy_trend === 'USD_WEAKENING' ? 'var(--accent-green)' : 'var(--text-main)');
+          }
+          const ethElem = document.getElementById('eth-btc-val');
+          if (ethElem) {
+            ethElem.textContent = `${cm.eth_trend} (${cm.eth_btc_rel_pct >= 0 ? '+' : ''}${Number(cm.eth_btc_rel_pct).toFixed(2)}%)`;
+            ethElem.style.color = cm.eth_trend === 'ETH_OUTPERFORMING' ? 'var(--accent-green)' : (cm.eth_trend === 'ETH_UNDERPERFORMING' ? 'var(--accent-red)' : 'var(--text-main)');
+          }
+        }
 
         // Position Banner
         const posCont = document.getElementById('position-container');
