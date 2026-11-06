@@ -161,3 +161,4 @@ class CrossMarketMonitor:
                 self._eth_trend = "ALIGNED"
         except Exception as exc:
             logger.debug("binance_cross_market_read_failed", error=str(exc))
+

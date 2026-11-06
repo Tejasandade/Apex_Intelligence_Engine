@@ -6,6 +6,7 @@ Designed for XM Global and other MT5 brokers (BTCUSD, Gold, Forex, CFDs).
 """
 
 import os
+import time
 import asyncio
 from typing import Optional, Dict, Any
 from src.core.logging import get_logger
