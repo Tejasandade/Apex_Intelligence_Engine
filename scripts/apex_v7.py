@@ -199,6 +199,8 @@ portfolio = {
     "regime_entry": "",
     "source": "",         # "ML" or "MOMENTUM"
     "highest_fav": 0.0,
+    "broker_ticket": "",
+    "broker_pnl": 0.0,
 }
 
 # ─── ACCOUNT ──────────────────────────────────────────────────────────────────
@@ -555,8 +557,11 @@ def execute_signal(signal: TradingSignal):
                     tp_distance=abs(tp2 - entry),
                 )
                 if oid:
+                    portfolio["broker_ticket"] = str(oid)
                     trade_log.append(f"[{b_name}] Order placed: {oid}")
                     telegram(f"{b_name} ORDER {side} {qty} BTC | SL:{sl_price:.1f} TP:{tp2:.1f} | id:{oid}")
+                    save_journal()
+                    state_manager.save_state(portfolio, account)
             except Exception as _be:
                 trade_log.append(f"[{b_name}] Order error: {_be}")
         try:
@@ -650,8 +655,29 @@ def check_exits():
         save_journal()
         state_manager.save_state(portfolio, account)   # APEX v7.2: crash-resume
 
+        # ── Physical Broker Execution: Close on MT5/Broker ──
+        if DEMO_MODE and _active_broker is not None:
+            t_id = portfolio.get("broker_ticket")
+            if t_id:
+                async def _exec_broker_close(ticket_id):
+                    try:
+                        if hasattr(_active_broker, "close_position_by_ticket"):
+                            await _active_broker.close_position_by_ticket(int(ticket_id))
+                        else:
+                            close_side = "Sell" if direction == "LONG" else "Buy"
+                            await _active_broker.place_market_order(SYMBOL, close_side, portfolio.get("notional", 0) / max(price, 1), reduce_only=True)
+                    except Exception as _ce:
+                        trade_log.append(f"[{BROKER_TYPE.upper()}] Close err: {_ce}")
+                try:
+                    import asyncio as _aio
+                    _loop = _aio.get_event_loop()
+                    if _loop.is_running():
+                        _loop.create_task(_exec_broker_close(t_id))
+                except Exception:
+                    pass
+
         portfolio.update({"position": "FLAT", "direction": None,
-                          "unrealized_pnl": 0.0, "banked_pnl": 0.0, "phase": 0})
+                          "unrealized_pnl": 0.0, "banked_pnl": 0.0, "phase": 0, "broker_ticket": "", "broker_pnl": 0.0})
 
     sl = portfolio["sl_price"]
     tp1 = portfolio["tp1_price"]
@@ -676,6 +702,22 @@ def check_exits():
             portfolio["phase"] = 2
             trade_log.append(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] "
                              f"2R TP1 +${partial:.2f} | 50% locked, SL→BE")
+            # ── Modify physical broker SL to Break-Even ──
+            if DEMO_MODE and _active_broker is not None and portfolio.get("broker_ticket"):
+                t_id = portfolio["broker_ticket"]
+                new_be_sl = portfolio["sl_price"]
+                new_tp2 = portfolio["tp2_price"]
+                async def _exec_broker_be(ticket_id, sl_v, tp_v):
+                    try:
+                        if hasattr(_active_broker, "modify_position_stops"):
+                            await _active_broker.modify_position_stops(int(ticket_id), new_sl=sl_v, new_tp=tp_v)
+                    except Exception:
+                        pass
+                try:
+                    import asyncio as _aio
+                    _aio.get_event_loop().create_task(_exec_broker_be(t_id, new_be_sl, new_tp2))
+                except Exception:
+                    pass
 
     # 3. Runner trail + full TP
     if portfolio["phase"] == 2:
@@ -1414,11 +1456,90 @@ def get_dashboard_state() -> dict:
             "sl_price": portfolio.get("sl_price", 0.0),
             "tp1_price": portfolio.get("tp1_price", 0.0),
             "tp2_price": portfolio.get("tp2_price", 0.0),
-            "unrealized_pnl": round(portfolio.get("unrealized_pnl", 0.0), 2),
+            "unrealized_pnl": round(portfolio.get("broker_pnl") if portfolio.get("broker_ticket") and portfolio.get("broker_pnl") != 0.0 else portfolio.get("unrealized_pnl", 0.0), 2),
             "duration_min": dur_min,
+            "broker_ticket": portfolio.get("broker_ticket", ""),
         },
         "journal": journal_ui,
     }
+
+
+# ─── BROKER POSITION MONITOR & CONTROLLER (APEX v7.2) ────────────────────────
+async def _broker_sync_loop():
+    """
+    Dedicated background supervisor: monitors MT5/Broker open positions every 2s.
+    Detects native broker SL/TP fills, synchronizes real PnL, and updates journal.
+    """
+    while True:
+        await asyncio.sleep(2)
+        if not DEMO_MODE or _active_broker is None:
+            continue
+
+        ticket_str = portfolio.get("broker_ticket")
+        if portfolio.get("position") == "OPEN" and ticket_str:
+            try:
+                ticket = int(ticket_str)
+                if hasattr(_active_broker, "get_open_position"):
+                    pos = await _active_broker.get_open_position(ticket=ticket)
+                    if pos:
+                        # Position is alive on MT5: sync real broker unrealized PnL
+                        portfolio["broker_pnl"] = float(pos.get("profit", 0.0))
+                    else:
+                        # Position is NO LONGER open on broker (hit native SL/TP or closed)
+                        deal = None
+                        if hasattr(_active_broker, "get_closed_deal"):
+                            deal = await _active_broker.get_closed_deal(ticket=ticket)
+
+                        exit_price = float(deal.get("price", market.get("ltp", 0.0))) if deal else market.get("ltp", 0.0)
+                        exit_profit = float(deal.get("profit", 0.0)) if deal else 0.0
+                        comment = deal.get("comment", "") if deal else ""
+                        reason = f"MT5 {comment}" if comment else "MT5 SL/TP EXIT"
+
+                        trade_log.append(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] "
+                                         f"BROKER SYNC: MT5 closed ticket {ticket} ({reason}) PnL: ${exit_profit:+.2f}")
+                        # Close locally
+                        cur_dir = portfolio.get("direction", "LONG")
+                        # Adjust portfolio PnL to match broker deal exactly
+                        portfolio["unrealized_pnl"] = exit_profit
+                        # Trigger local exit handler logic
+                        close_price = exit_price if exit_price > 0 else market.get("ltp", 0.0)
+                        def _do_close():
+                            if portfolio["position"] == "OPEN":
+                                # call check_exits inline close
+                                is_win = exit_profit > 0
+                                account["balance"] += exit_profit
+                                update_health()
+                                if is_win:
+                                    account["wins"] += 1
+                                    account["consecutive_losses"] = 0
+                                    account["total_wins_usd"] += exit_profit
+                                else:
+                                    account["losses"] += 1
+                                    account["consecutive_losses"] += 1
+                                    account["total_losses_usd"] += abs(exit_profit)
+                                    account["last_loss_time"] = time.time()
+                                    if account["consecutive_losses"] >= 2:
+                                        account["halted"] = True
+                                        account["halt_reason"] = "2 consecutive losses — cooling"
+                                        account["halt_until"] = time.time() + LOSS_COOLDOWN_2
+                                s = "+" if exit_profit >= 0 else ""
+                                trade_log.append(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] "
+                                                 f"CLOSE @${close_price:,.1f} PnL:{s}${exit_profit:.2f} | {reason}")
+                                for t in reversed(trade_journal):
+                                    if t.get("outcome") == "OPEN":
+                                        t.update({"exit_ts": datetime.datetime.now().isoformat(),
+                                                  "exit_price": close_price, "pnl_usd": exit_profit,
+                                                  "outcome": "WIN" if is_win else "LOSS",
+                                                  "exit_reason": reason})
+                                        break
+                                save_journal()
+                                portfolio.update({"position": "FLAT", "direction": None,
+                                                  "unrealized_pnl": 0.0, "banked_pnl": 0.0, "phase": 0,
+                                                  "broker_ticket": "", "broker_pnl": 0.0})
+                                state_manager.save_state(portfolio, account)
+                        _do_close()
+            except Exception:
+                pass
 
 async def main():
     global _candle_queue
@@ -1488,6 +1609,7 @@ async def main():
         ui_loop(),
         _candle_worker(),
         _market_intel_loop(),   # APEX v7.2: news + funding + sentiment
+        _broker_sync_loop(),    # Real-time MT5 position supervisor
     )
 
 if __name__ == "__main__":

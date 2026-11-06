@@ -352,6 +352,176 @@ class MT5Broker:
 
         return ",".join(closed_tickets) if closed_tickets else None
 
+    # =========================================================================
+    # ADVANCED POSITION MANAGEMENT & SYNCHRONIZATION
+    # =========================================================================
+
+    async def get_open_position(self, ticket: Optional[int] = None, symbol: Optional[str] = None) -> Optional[dict]:
+        """Fetch real-time details of an open position by ticket or symbol."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._get_open_position_sync, ticket, symbol)
+
+    def _get_open_position_sync(self, ticket: Optional[int] = None, symbol: Optional[str] = None) -> Optional[dict]:
+        if not self._ensure_connected():
+            return None
+
+        positions = None
+        if ticket:
+            positions = mt5.positions_get(ticket=int(ticket))
+        elif symbol:
+            act_sym = self.resolve_symbol(symbol) or symbol
+            positions = mt5.positions_get(symbol=act_sym)
+        else:
+            positions = mt5.positions_get()
+
+        if not positions:
+            return None
+
+        p = positions[0]
+        return {
+            "ticket": p.ticket,
+            "symbol": p.symbol,
+            "type": "BUY" if p.type == mt5.ORDER_TYPE_BUY else "SELL",
+            "volume": p.volume,
+            "price_open": p.price_open,
+            "price_current": p.price_current,
+            "sl": p.sl,
+            "tp": p.tp,
+            "profit": p.profit,
+            "time": p.time,
+        }
+
+    async def modify_position_stops(self, ticket: int, new_sl: float, new_tp: Optional[float] = None) -> bool:
+        """Modify Stop Loss and Take Profit of an active position in MT5."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._modify_position_stops_sync, ticket, new_sl, new_tp)
+
+    def _modify_position_stops_sync(self, ticket: int, new_sl: float, new_tp: Optional[float] = None) -> bool:
+        if not self._ensure_connected():
+            return False
+
+        pos = mt5.positions_get(ticket=int(ticket))
+        if not pos:
+            logger.warn("mt5_cannot_modify_stops_pos_not_found", ticket=ticket)
+            return False
+
+        p = pos[0]
+        tp_val = float(new_tp) if new_tp is not None else float(p.tp)
+        request = {
+            "action": mt5.TRADE_ACTION_SLTP,
+            "position": p.ticket,
+            "symbol": p.symbol,
+            "sl": float(new_sl),
+            "tp": tp_val,
+        }
+
+        res = mt5.order_send(request)
+        if res is None:
+            err = mt5.last_error()
+            logger.error("mt5_modify_stops_failed", error=err, ticket=ticket)
+            return False
+
+        if res.retcode != mt5.TRADE_RETCODE_DONE:
+            logger.warn("mt5_modify_stops_rejected", retcode=res.retcode, comment=res.comment, ticket=ticket)
+            return False
+
+        logger.info("mt5_stops_modified_success", ticket=ticket, sl=new_sl, tp=tp_val)
+        return True
+
+    async def close_position_by_ticket(self, ticket: int) -> bool:
+        """Close an exact position by ticket at market price."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._close_position_by_ticket_sync, ticket)
+
+    def _close_position_by_ticket_sync(self, ticket: int) -> bool:
+        if not self._ensure_connected():
+            return False
+
+        pos = mt5.positions_get(ticket=int(ticket))
+        if not pos:
+            logger.warn("mt5_close_ticket_not_found", ticket=ticket)
+            return False
+
+        p = pos[0]
+        close_type = mt5.ORDER_TYPE_SELL if p.type == mt5.ORDER_TYPE_BUY else mt5.ORDER_TYPE_BUY
+        tick = mt5.symbol_info_tick(p.symbol)
+        if not tick:
+            logger.error("mt5_close_no_tick_data", symbol=p.symbol)
+            return False
+
+        price = tick.bid if close_type == mt5.ORDER_TYPE_SELL else tick.ask
+
+        sym_info = mt5.symbol_info(p.symbol)
+        filling = mt5.ORDER_FILLING_IOC
+        if sym_info and hasattr(sym_info, "filling_mode"):
+            if sym_info.filling_mode & 2:
+                filling = mt5.ORDER_FILLING_IOC
+            elif sym_info.filling_mode & 1:
+                filling = mt5.ORDER_FILLING_FOK
+            else:
+                filling = mt5.ORDER_FILLING_RETURN
+
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "position": p.ticket,
+            "symbol": p.symbol,
+            "volume": p.volume,
+            "type": close_type,
+            "price": price,
+            "deviation": 20,
+            "magic": p.magic,
+            "comment": "Apex Exit",
+            "type_time": mt5.ORDER_TIME_GTC,
+            "type_filling": filling,
+        }
+
+        res = mt5.order_send(request)
+        if res is None or res.retcode != mt5.TRADE_RETCODE_DONE:
+            err = res.comment if res else str(mt5.last_error())
+            logger.error("mt5_close_failed", ticket=ticket, error=err)
+            return False
+
+        logger.info("mt5_position_closed_success", ticket=ticket, exit_price=price)
+        return True
+
+    async def get_closed_deal(self, ticket: int) -> Optional[dict]:
+        """Fetch exit deal details from history for a closed position."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._get_closed_deal_sync, ticket)
+
+    def _get_closed_deal_sync(self, ticket: int) -> Optional[dict]:
+        if not self._ensure_connected():
+            return None
+
+        deals = mt5.history_deals_get(position=int(ticket))
+        if not deals:
+            return None
+
+        # Look for the exit deal (entry == 1, DEAL_ENTRY_OUT)
+        for d in reversed(deals):
+            if d.entry == 1:
+                return {
+                    "deal_ticket": d.ticket,
+                    "order": d.order,
+                    "price": d.price,
+                    "profit": d.profit,
+                    "commission": d.commission,
+                    "swap": d.swap,
+                    "comment": d.comment,
+                    "time": d.time,
+                }
+
+        # Fallback to last deal
+        last_d = deals[-1]
+        return {
+            "deal_ticket": last_d.ticket,
+            "order": last_d.order,
+            "price": last_d.price,
+            "profit": last_d.profit,
+            "comment": last_d.comment,
+            "time": last_d.time,
+        }
+
     async def close(self):
         """Shutdown MT5 terminal connection."""
         if MT5_AVAILABLE and self._initialized:
