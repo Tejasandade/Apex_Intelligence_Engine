@@ -130,37 +130,58 @@ class MT5Broker:
 
     def resolve_symbol(self, target: str = "BTC") -> Optional[str]:
         """
-        Find the exact symbol name used by the broker (e.g. BTCUSD, BTCUSD.i, BTCUSD#).
+        Find the exact symbol name used by the broker (e.g. BTCUSD#, BTCUSD, etc.).
         """
         if not self._ensure_connected():
             return None
 
-        # Try exact match first
+        # Check explicit env override first
+        env_sym = os.getenv("MT5_SYMBOL")
+        if env_sym:
+            info = mt5.symbol_info(env_sym)
+            if info is not None:
+                mt5.symbol_select(env_sym, True)
+                return env_sym
+
+        t_up = target.upper()
+
+        # Priority list for Bitcoin
+        if "BTC" in t_up:
+            preferred = ["BTCUSD#", "BTCUSD", "BTCUSD.i", "BTCUSDm", "BTCUSDT"]
+            for p in preferred:
+                info = mt5.symbol_info(p)
+                if info is not None:
+                    mt5.symbol_select(p, True)
+                    return p
+
+        # Priority list for Gold
+        if "GOLD" in t_up or "XAU" in t_up:
+            preferred = ["GOLD#", "GOLD", "XAUUSD#", "XAUUSD", "GOLD.i#", "GOLD.i"]
+            for p in preferred:
+                info = mt5.symbol_info(p)
+                if info is not None:
+                    mt5.symbol_select(p, True)
+                    return p
+
+        # Direct exact match
         info = mt5.symbol_info(target)
-        if info and info.visible:
+        if info is not None:
+            mt5.symbol_select(target, True)
             return target
 
-        clean_target = target.upper().replace("USDT", "USD")
+        # Fallback search
+        clean_target = t_up.replace("USDT", "USD")
         symbols = mt5.symbols_get()
         if not symbols:
             return None
 
-        # Prioritize BTCUSD variants
-        candidates = []
         for s in symbols:
             name = s.name.upper()
-            if clean_target in name or "BTC" in name:
-                candidates.append(s.name)
+            if clean_target in name and not name.startswith("G") and not name.startswith("F"):
+                mt5.symbol_select(s.name, True)
+                return s.name
 
-        if not candidates:
-            return None
-
-        # Prefer shorter names or exact starts
-        candidates.sort(key=lambda x: len(x))
-        selected = candidates[0]
-        # Make sure symbol is selected in Market Watch
-        mt5.symbol_select(selected, True)
-        return selected
+        return None
 
     async def get_wallet_balance(self, coin: str = "USD") -> float:
         """Fetch current balance."""
@@ -337,3 +358,4 @@ class MT5Broker:
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, mt5.shutdown)
             self._initialized = False
+

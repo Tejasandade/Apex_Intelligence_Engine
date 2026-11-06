@@ -66,3 +66,4 @@ else:
 
 mt5.shutdown()
 print("=" * 60)
+
