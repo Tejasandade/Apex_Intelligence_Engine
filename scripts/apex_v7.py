@@ -150,8 +150,9 @@ def send_challenge_alert(event_type: str, details: dict):
         d_limit = pf.get("daily_limit_usd", 150.0)
 
         icon = "🔥" if event_type == "OPEN" else ("🎯" if "TP" in event_type else ("✅" if "CLOSED" in event_type and details.get("pnl_usd", 0) > 0 else ("❌" if "CLOSED" in event_type else "🛡️")))
+        mode_str = f" [{details.get('trade_mode')}]" if details.get("trade_mode") else ""
         txt = (
-            f"{icon} APEX: {event_type}\n"
+            f"{icon} APEX: {event_type}{mode_str}\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"Asset: {details.get('symbol', SYMBOL)} | Action: {details.get('action', '')} @ ${details.get('price', 0.0):,.1f}\n"
         )
@@ -191,7 +192,7 @@ BASE_RISK_PCT   = _rc("sizing", "min_allocation_pct", 0.010)   # from risk.yaml
 MAX_RISK_PCT   = _rc("sizing", "max_allocation_pct", 0.015)   # from risk.yaml
 MIN_RISK_PCT    = 0.005
 MAX_LEVERAGE    = 5.0
-MAX_TRADES_DAY  = _rc("sizing", "max_concurrent_trades", 3)   # from risk.yaml
+MAX_TRADES_DAY  = int(os.getenv("APEX_MAX_TRADES_DAY", "10"))
 MIN_INTERVAL    = 300       # 5min (1 candle) between trades (was 30m)
 LOSS_COOLDOWN_1 = 600       # 10min (2 candles) after 1 loss (was 2hr!)
 LOSS_COOLDOWN_2 = 1200      # 20min (4 candles) after 2 consecutive losses
@@ -697,6 +698,15 @@ def can_trade_symbol(symbol: str = SYMBOL, direction: str = "LONG") -> tuple[boo
     if blackout:
         return False, f"NEWS BLACKOUT: {blackout_reason}"
 
+    # ── Metals CFD Weekend Closure Guard (XM MT5 closes Friday 21:00 UTC to Sunday 22:00 UTC) ──
+    if ("GOLD" in sym or "PAXG" in sym) and DEMO_MODE and BROKER_TYPE.upper() == "MT5":
+        now_dt = datetime.datetime.now(datetime.timezone.utc)
+        weekday = now_dt.weekday()  # 4=Friday, 5=Saturday, 6=Sunday
+        hour = now_dt.hour
+        is_metals_closed = (weekday == 5) or (weekday == 4 and hour >= 21) or (weekday == 6 and hour < 22)
+        if is_metals_closed:
+            return False, "METALS MARKET CLOSED (MT5 Gold reopens Sunday 22:00 UTC)"
+
     # ── Macro Market Structure Filter (1D & 4H Trend Alignment) ──
     macro = symbol_macro_structure.get(sym)
     if macro:
@@ -708,7 +718,34 @@ def can_trade_symbol(symbol: str = SYMBOL, direction: str = "LONG") -> tuple[boo
     return True, "CLEAR"
 
 def can_trade() -> tuple[bool, str]:
-    return can_trade_symbol(PRIMARY_SYMBOL, "LONG")
+    """Check portfolio-wide account gates (is trading globally permitted?)."""
+    now = time.time()
+    shielded, shield_reason = is_rollover_or_maintenance()
+    if shielded:
+        return False, f"SPREAD SHIELD: {shield_reason}"
+
+    if PROP_FIRM_MODE and prop_firm_manager:
+        pf_ok, pf_reason = prop_firm_manager.can_trade()
+        if not pf_ok:
+            return False, f"PROP_FIRM: {pf_reason}"
+
+    if account["halted"]:
+        if account["halt_until"] <= now:
+            account["halted"] = False; account["halt_reason"] = ""
+        else:
+            rem = int(account["halt_until"] - now) if account["halt_until"] < float("inf") else 999999
+            return False, f"HALTED: {account['halt_reason']} ({rem//60}m left)"
+
+    if account["trades_today"] >= MAX_TRADES_DAY:
+        return False, f"DAY LIMIT ({MAX_TRADES_DAY} done)"
+
+    consec = account.get("consecutive_losses", 0)
+    cooldown_secs = LOSS_COOLDOWN_1 if consec <= 1 else (LOSS_COOLDOWN_2 if consec == 2 else LOSS_COOLDOWN_3)
+    if account["last_loss_time"] > 0 and (now - account["last_loss_time"]) < cooldown_secs:
+        rem = int(cooldown_secs - (now - account["last_loss_time"]))
+        return False, f"LOSS COOLDOWN {rem//60}m{rem%60:02d}s"
+
+    return True, "CLEAR"
 
 # ─── STRUCTURAL SL (DUAL HORIZON: SCALP vs SWING) ────────────────────────────
 def find_sl(direction: str, entry: float, symbol: str = SYMBOL, trade_mode: str = "SCALP") -> tuple[float, float]:
