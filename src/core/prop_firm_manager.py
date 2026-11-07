@@ -167,6 +167,74 @@ class PropFirmManager:
 
         return True, "CLEAR"
 
+    def can_open_multi_asset_trade(
+        self,
+        symbol: str,
+        direction: str,
+        active_positions: dict[str, dict],
+        estimated_risk_usd: float = 25.0,
+        max_concurrent: int = 2
+    ) -> tuple[bool, str]:
+        """
+        Evaluate if a new trade can be opened in a multi-asset environment
+        while strictly complying with SharkFunded prop firm risk caps.
+        """
+        # 1. Base challenge gate
+        ok, reason = self.can_trade()
+        if not ok:
+            return False, reason
+
+        sym_key = symbol.upper()
+        dir_upper = direction.upper()
+
+        # 2. Per-symbol isolation: Is this exact symbol already open?
+        for sym, pos in active_positions.items():
+            if sym.upper() == sym_key and pos.get("position") == "OPEN":
+                return False, f"Symbol {sym_key} already has an OPEN position"
+
+        # 3. Maximum concurrent positions cap across portfolio
+        open_count = sum(1 for pos in active_positions.values() if pos.get("position") == "OPEN")
+        if open_count >= max_concurrent:
+            return False, f"Portfolio concurrent position limit reached ({open_count}/{max_concurrent})"
+
+        # 4. Correlation Shield: BTC and ETH are strongly correlated
+        if "ETH" in sym_key:
+            btc_pos = active_positions.get("BTCUSDT", {})
+            if btc_pos.get("position") == "OPEN" and btc_pos.get("direction") == dir_upper:
+                return False, f"Correlation Shield: BTC already {dir_upper} — blocking same-direction {sym_key}"
+        elif "BTC" in sym_key:
+            eth_pos = active_positions.get("ETHUSDT", {})
+            if eth_pos.get("position") == "OPEN" and eth_pos.get("direction") == dir_upper:
+                return False, f"Correlation Shield: ETH already {dir_upper} — blocking same-direction {sym_key}"
+
+        # 5. Combined Portfolio Daily Risk Budget Pool
+        # Sum of maximum potential loss if all active trades hit stop loss
+        total_open_risk = sum(
+            float(pos.get("risk_usd", 25.0))
+            for pos in active_positions.values()
+            if pos.get("position") == "OPEN"
+        )
+        daily_safety_stop_usd = self.day_start_balance * (self.config["daily_safety_buffer_pct"] / 100.0)
+        remaining_daily_budget = daily_safety_stop_usd + self.daily_realized_pnl
+
+        projected_combined_risk = total_open_risk + float(estimated_risk_usd)
+        if projected_combined_risk > remaining_daily_budget:
+            return False, (
+                f"Combined Risk Pool: Projected risk (${projected_combined_risk:.2f}) "
+                f"exceeds remaining daily safety buffer (${remaining_daily_budget:.2f})"
+            )
+
+        return True, "CLEAR"
+
+    def update_multi_floating_pnl(self, active_positions: dict[str, dict]) -> None:
+        """Sum unrealized PnL across all open positions."""
+        total_unrealized = sum(
+            float(pos.get("unrealized_pnl", 0.0))
+            for pos in active_positions.values()
+            if pos.get("position") == "OPEN"
+        )
+        self.update_floating_pnl(total_unrealized)
+
     def calculate_lot_size(
         self,
         sl_distance: float,

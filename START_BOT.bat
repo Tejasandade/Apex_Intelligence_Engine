@@ -13,7 +13,8 @@ set PYTHON=%ROOT%venv\Scripts\python.exe
 echo.
 echo  ====================================================
 echo   APEX INTELLIGENCE ENGINE v7.2
-echo   Paper Trading Mode - BTC/USDT
+echo   Multi-Asset Engine (BTC, ETH, Gold)
+echo   Pluggable Prop Firm & MT5 Execution Ready
 echo  ====================================================
 echo.
 
