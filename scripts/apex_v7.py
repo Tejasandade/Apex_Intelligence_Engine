@@ -57,6 +57,9 @@ from src.data.providers.cross_market import CrossMarketMonitor
 from src.core.state_manager import StateManager
 from src.core.prop_firm_manager import PropFirmManager
 from src.models.training.retrain_scheduler import RetrainScheduler
+from src.intelligence.liquidity_engine import LiquidityEngine
+from src.intelligence.lead_lag_engine import LeadLagEngine
+from src.intelligence.microstructure_engine import MicrostructureEngine
 
 # ─── ANSI ────────────────────────────────────────────────────────────────────
 R="\033[0m"; BOLD="\033[1m"; DIM="\033[2m"
@@ -186,6 +189,35 @@ MIN_PROB_DIFF   = 0.06      # Long vs Short separation
 MIN_RR          = _rc("trade_management", "default_rr_target", 3.0)   # from risk.yaml
 MIN_SL_USD      = 250.0     # Never tighter than $250 stop
 MAX_SL_USD      = 800.0     # Never wider than $800
+
+def get_calibrated_threshold(symbol: str, regime: str = "UNKNOWN") -> float:
+    """
+    Asset-Calibrated Conviction Thresholds & Regime-Adaptive Sensitivity.
+    - BTC: baseline 0.58
+    - ETH: baseline 0.60 (higher noise on 5m)
+    - Gold / PAXG: baseline 0.59
+    - Trending high vol: -0.02 (allow clean momentum breakouts)
+    - Ranging low vol: +0.03 (prevent overtrading in dead chop)
+    - Ranging high vol: +0.01
+    - London/NY prime liquidity: -0.01
+    - Pacific low-liquidity: +0.02
+    """
+    sym = symbol.upper()
+    base = 0.60 if "ETH" in sym else (0.59 if ("GOLD" in sym or "PAXG" in sym) else 0.58)
+    reg_l = str(regime).lower()
+    if "trending_high_vol" in reg_l:
+        base -= 0.02
+    elif "ranging_low_vol" in reg_l:
+        base += 0.03
+    elif "ranging_high_vol" in reg_l:
+        base += 0.01
+
+    s_name = session.get("name", "UNKNOWN")
+    if s_name in ("LONDON", "NEW_YORK"):
+        base -= 0.01
+    elif s_name == "PACIFIC":
+        base += 0.02
+    return round(float(np.clip(base, 0.54, 0.66)), 3)
 
 # Risk
 BASE_RISK_PCT   = _rc("sizing", "min_allocation_pct", 0.010)   # from risk.yaml
@@ -456,6 +488,15 @@ funding_monitor      = FundingRateMonitor()
 sentiment_monitor    = SentimentMonitor()
 cross_market_monitor = CrossMarketMonitor()
 state_manager        = StateManager()
+
+# Institutional Intelligence Subsystems
+liquidity_engine     = LiquidityEngine()
+lead_lag_engine      = LeadLagEngine()
+microstructure_engines: dict[str, MicrostructureEngine] = {
+    sym: MicrostructureEngine(sym) for sym in TRADED_SYMBOLS
+}
+
+retrain_schedulers: dict[str, RetrainScheduler] = {} # Multi-asset independent retrainers
 retrain_scheduler: RetrainScheduler | None = None   # set in prewarm()
 
 # Async queue for safely passing 5m candles from sync tick handler → async ML loop
@@ -602,15 +643,25 @@ def update_health():
 
 # ─── SESSION ──────────────────────────────────────────────────────────────────
 def update_session():
-    utc_h = datetime.datetime.now(datetime.timezone.utc).hour
+    now_dt = datetime.datetime.now(datetime.timezone.utc)
+    utc_h = now_dt.hour
+    weekday = now_dt.weekday()  # 0=Monday ... 6=Sunday
     today = datetime.datetime.now().strftime("%Y-%m-%d")
     if today != account["today_date"]:
         account["trades_today"] = 0; account["today_date"] = today
         if "MAX TRADES" in account.get("halt_reason","") or "DAY" in account.get("halt_reason",""):
             account["halted"] = False; account["halt_reason"] = ""; account["halt_until"] = 0.0
+
+    # Sunday Weekly Open Liquidity Expansion (Sunday 22:00 UTC to Monday 04:00 UTC)
+    is_sunday_open = (weekday == 6 and utc_h >= 22) or (weekday == 0 and utc_h < 4)
+    session["sunday_weekly_open"] = is_sunday_open
+
     session["name"] = ("LONDON" if 7<=utc_h<13 else "NEW_YORK" if 13<=utc_h<21
                         else "ASIAN" if 0<=utc_h<7 else "PACIFIC")
-    session["risk_mult"] = 1.0 if session["name"] in ("LONDON","NEW_YORK") else (0.75 if session["name"]=="ASIAN" else 0.6)
+    if is_sunday_open:
+        session["risk_mult"] = 1.05  # Sunday open weekly liquidity expansion
+    else:
+        session["risk_mult"] = 1.0 if session["name"] in ("LONDON","NEW_YORK") else (0.75 if session["name"]=="ASIAN" else 0.6)
 
 def is_rollover_or_maintenance() -> tuple[bool, str]:
     """
@@ -1402,13 +1453,32 @@ async def _candle_worker():
         try:
             sig = await eng.process_candle(c5)
 
-            # APEX v7.2: Feed candle to retrain scheduler (non-blocking)
-            if sym == PRIMARY_SYMBOL and retrain_scheduler:
+            # APEX v7.2: Feed candle to multi-asset retrain scheduler (non-blocking)
+            r_sched = retrain_schedulers.get(sym, retrain_scheduler if sym == PRIMARY_SYMBOL else None)
+            if r_sched:
                 try:
-                    retrain_scheduler.on_candle(c5)
-                    retrain_scheduler.check_pending_swap()   # pick up new models if ready
+                    r_sched.on_candle(c5)
+                    r_sched.check_pending_swap()   # pick up new models if ready
                 except Exception:
                     pass
+
+            # Update Institutional Liquidity Levels (PDH/PDL, Asian Range, FVG, Sweeps)
+            try:
+                c1d = symbol_candles_1d.get(sym, [])
+                c1h = symbol_candles_1h.get(sym, [])
+                c5m = symbol_candles_5m.get(sym, [])
+                liquidity_engine.update_levels(sym, candles_1d=c1d, candles_1h=c1h, candles_5m=c5m)
+            except Exception:
+                pass
+
+            # Update Cross-Asset Lead-Lag & Spillover Diagnostics
+            try:
+                btc_ofi = 0.0
+                if "BTCUSDT" in momentum_engines:
+                    btc_ofi = float(momentum_engines["BTCUSDT"].get_diagnostics().get("ofi", 0.0))
+                lead_lag_engine.compute_spillover(dxy_trend=cross_market_monitor.dxy_trend, btc_ofi=btc_ofi)
+            except Exception:
+                pass
 
             # Always extract live probabilities from the ensemble — even if no signal
             try:
@@ -1438,6 +1508,31 @@ async def _candle_worker():
 
                 compute_macro_structure(sym)
                 direction = "LONG" if sig.direction == "BUY" else "SHORT"
+
+                # ── Apply Institutional Market Intelligence Synergy ──
+                liq_delta, liq_reason = liquidity_engine.evaluate_signal_synergy(sym, direction)
+                ll_delta, ll_reason = lead_lag_engine.evaluate_synergy(sym, direction)
+                micro_delta, micro_reason = (0.0, "")
+                if sym in microstructure_engines:
+                    micro_delta, micro_reason = microstructure_engines[sym].evaluate(direction)
+
+                total_intel_delta = liq_delta + ll_delta + micro_delta
+                calibrated_conviction = round(float(np.clip(sig.conviction + total_intel_delta, 0.0, 1.0)), 4)
+                required_threshold = get_calibrated_threshold(sym, sig.regime)
+
+                # Update signal conviction with market intelligence calibration
+                sig.conviction = calibrated_conviction
+
+                # Check if post-intelligence conviction satisfies asset-calibrated threshold
+                if sig.conviction < required_threshold:
+                    intel_notes = [n for n in (liq_reason, ll_reason, micro_reason) if n and n != "NEUTRAL"]
+                    intel_str = " | ".join(intel_notes) if intel_notes else "Low Intel Delta"
+                    last_gate_rejection["reason"] = f"[{sym}] Intel Conviction {sig.conviction:.3f} < {required_threshold:.3f} ({intel_str})"
+                    last_gate_rejection["signal"] = f"[{sym}] {direction} raw={sig.conviction - total_intel_delta:.3f} adj={sig.conviction:.3f}"
+                    last_gate_rejection["ts"] = time.time()
+                    _candle_queue.task_done()
+                    continue
+
                 ok, reason = can_trade_symbol(sym, direction)
                 sym_port = portfolios.get(sym, portfolio)
                 if sym_port["position"] == "FLAT" and ok:
@@ -1466,6 +1561,11 @@ def process_tick_for_symbol(sym: str, price: float, qty: float, is_buyer_maker: 
     if price <= 0 or qty <= 0: return
 
     now = time.time()
+
+    # Feed Cross-Asset Lead-Lag Engine & Microstructure CVD Engine
+    lead_lag_engine.update_price(sym, price, now)
+    if sym in microstructure_engines:
+        microstructure_engines[sym].add_tick(price, qty, is_buyer_maker)
 
     # Build 1m candle for fallback
     live_c = symbol_live_candle.get(sym)
@@ -1659,12 +1759,13 @@ def prewarm():
         print(f"  ✓ [{sym}] {len(models)} model files loaded")
         total_models_loaded += len(models)
 
-        # Build LiveSignalEngine for this symbol
+        sym_base_prob = 0.60 if "ETH" in sym else (0.59 if ("GOLD" in sym or "PAXG" in sym) else 0.58)
+        # Build LiveSignalEngine for this symbol (pre-filtered at base-0.03 to allow high-conviction intel synergy)
         engine = LiveSignalEngine(
             symbol=sym,
             market_type="crypto",
             models=models,
-            conviction_threshold=MIN_PROB,
+            conviction_threshold=round(sym_base_prob - 0.03, 3),
             risk_per_trade=25.0 if PROP_FIRM_MODE else (account["balance"] * BASE_RISK_PCT),
             default_rr=MIN_RR,
             max_concurrent=1,
@@ -1743,24 +1844,48 @@ def prewarm():
     state_manager.load_state(portfolio, account)
     update_health()
 
-    # APEX v7.2: Set up hot-swap retrain scheduler
-    global retrain_scheduler
-
-    def _on_models_ready(new_models):
-        """Hot-swap callback — atomically replaces ensemble members."""
-        if signal_engine and new_models:
+    # Prewarm Institutional Liquidity & Lead-Lag Engines with historical data
+    for sym in TRADED_SYMBOLS:
+        c1d = symbol_candles_1d.get(sym, [])
+        c1h = symbol_candles_1h.get(sym, [])
+        c5m = symbol_candles_5m.get(sym, [])
+        if c1d or c1h or c5m:
             try:
-                signal_engine.hot_swap_models(new_models)
-                telegram(f"🔄 APEX: {len(new_models)} models retrained + hot-swapped")
-                print(f"\n  ✓ HOT-SWAP: {len(new_models)} new models loaded into ensemble")
-            except Exception as e:
-                print(f"  WARN: hot_swap error: {e}")
+                liquidity_engine.update_levels(sym, candles_1d=c1d, candles_1h=c1h, candles_5m=c5m)
+                if c5m:
+                    for c in c5m[-12:]:
+                        lead_lag_engine.update_price(sym, float(c["close"]), float(c.get("timestamp", 0)) / 1000.0)
+            except Exception:
+                pass
 
-    retrain_scheduler = RetrainScheduler(
-        symbol=PRIMARY_SYMBOL,
-        retrain_every_n_candles=2000,
-        swap_callback=_on_models_ready,
-    )
+    # APEX v7.2: Independent Multi-Asset Walk-Forward Retrain Schedulers
+    global retrain_scheduler, retrain_schedulers
+    retrain_schedulers = {}
+
+    def make_swap_callback(s: str):
+        def _on_models_ready(new_models):
+            sym_eng = signal_engines.get(s)
+            if sym_eng and new_models:
+                try:
+                    sym_eng.hot_swap_models(new_models)
+                    telegram(f"🔄 APEX [{s}]: {len(new_models)} models retrained + hot-swapped")
+                    print(f"\n  ✓ HOT-SWAP [{s}]: {len(new_models)} new models loaded into ensemble")
+                except Exception as e:
+                    print(f"  WARN: hot_swap error [{s}]: {e}")
+        return _on_models_ready
+
+    for sym in TRADED_SYMBOLS:
+        stg_dir = Path(f"data/models/staging/{sym.lower()}")
+        stg_dir.mkdir(parents=True, exist_ok=True)
+        sched = RetrainScheduler(
+            symbol=sym,
+            retrain_every_n_candles=2000,
+            staging_dir=stg_dir,
+            swap_callback=make_swap_callback(sym),
+        )
+        retrain_schedulers[sym] = sched
+
+    retrain_scheduler = retrain_schedulers.get(PRIMARY_SYMBOL)
 
     print(f"\n  ── Concurrent Multi-Asset State ──")
     for sym in TRADED_SYMBOLS:
@@ -1837,7 +1962,8 @@ def render():
     buf=["\033[H", TOP]
     buf.append(row(f"{BOLD}{WHT}⚡ APEX INTELLIGENCE ENGINE v7.2 — CONCURRENT MULTI-ASSET CORE (BTC · ETH · GOLD) ⚡{R}"))
     ws = f"{GRN}LIVE ● (3 Symbols Active){R}" if market["ws_connected"] else f"{RED}DISCONNECTED{R}"
-    buf.append(row(f"{DIM}Time:{R} {now} IST  │  {CYN}{session['name']} ({session['risk_mult']:.0%}){R}  │  WS: {ws}"))
+    sess_str = f"{CYN}{session['name']} (SUNDAY OPEN {session['risk_mult']:.0%}){R}" if session.get("sunday_weekly_open") else f"{CYN}{session['name']} ({session['risk_mult']:.0%}){R}"
+    buf.append(row(f"{DIM}Time:{R} {now} IST  │  {sess_str}  │  WS: {ws}"))
     buf.append(MID)
 
     # 1. ACCOUNT & PROP FIRM HEADER
@@ -1889,10 +2015,16 @@ def render():
         else:
             pos_str = f"{GRY}FLAT{R}"
 
+        reg = s_reg.get("current", lp.get("regime", "UNKNOWN"))
+        reg_short = reg.replace("TRENDING_", "TREND_").replace("RANGING_", "RANGE_").replace("_VOL", "")
+        atr = s_reg.get("atr", 0.0)
+        reg_display = f"{reg_short} (${atr:.1f})"
+
+        calib_thr = get_calibrated_threshold(sym, reg)
         pl = lp.get("long", 0.5)
         ps = lp.get("short", 0.5)
-        pl_c = GRN if pl >= MIN_PROB else (YLW if pl >= 0.52 else GRY)
-        ps_c = RED if ps >= MIN_PROB else (YLW if ps >= 0.52 else GRY)
+        pl_c = GRN if pl >= calib_thr else (YLW if pl >= 0.52 else GRY)
+        ps_c = RED if ps >= calib_thr else (YLW if ps >= 0.52 else GRY)
 
         m_eng = momentum_engines.get(sym, momentum_eng)
         mom_d = m_eng.get_diagnostics() if m_eng else {}
@@ -1900,11 +2032,6 @@ def render():
         mom_c = GRN if mom_sig_str == "LONG" else (RED if mom_sig_str == "SHORT" else GRY)
         ofi_v = float(mom_d.get("ofi", 0.0))
         mom_display = f"{mom_c}{mom_sig_str:<5}{R} (OFI:{ofi_v:+.2f})"
-
-        reg = s_reg.get("current", lp.get("regime", "UNKNOWN"))
-        reg_short = reg.replace("TRENDING_", "TREND_").replace("RANGING_", "RANGE_").replace("_VOL", "")
-        atr = s_reg.get("atr", 0.0)
-        reg_display = f"{reg_short} (${atr:.1f})"
 
         buf.append(row(f" {BOLD}{sym:<8}{R} {ltp_str:>10} │ {pos_str:<25} │ L:{pl_c}{pl:.3f}{R} S:{ps_c}{ps:.3f}{R} │ {mom_display:<24} │ {reg_display:<18}"))
 
@@ -1998,11 +2125,41 @@ def render():
     cm_eth = cross_market_monitor.eth_trend
     cm_eth_c = GRN if cm_eth == "ETH_OUTPERFORMING" else (RED if cm_eth == "ETH_UNDERPERFORMING" else GRY)
     buf.append(row(f" Macro DXY: {cm_dxy_c}{cm_dxy} ({cross_market_monitor.dxy_momentum_pct:+.2f}%){R}  │  ETH/BTC: {cm_eth_c}{cm_eth} ({cross_market_monitor.eth_btc_rel_pct:+.2f}%){R}"))
+
+    # Key Liquidity Levels & Sweeps (ICT Turtle Soup & Key Levels)
+    btc_lev = liquidity_engine.get_levels("BTCUSDT")
+    pdh_v = btc_lev.get("pdh", 0.0)
+    pdl_v = btc_lev.get("pdl", 0.0)
+    ash_v = btc_lev.get("ash", 0.0)
+    asl_v = btc_lev.get("asl", 0.0)
+    if btc_lev.get("sweep_bullish"):
+        sw_tag = f"{GRN}SWEEP_BULL ({btc_lev.get('sweep_level')}){R}"
+    elif btc_lev.get("sweep_bearish"):
+        sw_tag = f"{RED}SWEEP_BEAR ({btc_lev.get('sweep_level')}){R}"
+    elif btc_lev.get("fvg_bullish"):
+        sw_tag = f"{CYN}FVG_BULL{R}"
+    elif btc_lev.get("fvg_bearish"):
+        sw_tag = f"{YLW}FVG_BEAR{R}"
+    else:
+        sw_tag = f"{GRY}NONE{R}"
+
+    ll_diag = getattr(lead_lag_engine, "_diagnostics", {})
+    spill_tag = ll_diag.get("eth_spillover_bias", "NEUTRAL")
+    spill_c = GRN if "BULL" in spill_tag else (RED if "BEAR" in spill_tag else GRY)
+    buf.append(row(f" BTC Key Lvls: PDH:${pdh_v:,.0f} PDL:${pdl_v:,.0f} │ Asian:${asl_v:,.0f}-${ash_v:,.0f} │ Sweep:{sw_tag} │ Spill:{spill_c}{spill_tag}{R}"))
     buf.append(row(f" Next Event: {evt_col}{evt_str}{R}"))
-    if retrain_scheduler:
-        rs = retrain_scheduler.get_status()
-        rt_str = f"{YLW}RETRAINING...{R}" if rs["is_retraining"] else f"{GRY}Next in {rs['next_retrain_in']} candles{R}"
-        buf.append(row(f" Retrain: {rt_str}  │  Count: {rs['retrain_count']}  │  Candles: {rs['candles_accumulated']}"))
+
+    # Multi-Asset Retrain Schedulers
+    rt_parts = []
+    for s_name in TRADED_SYMBOLS:
+        s_tag = "BTC" if "BTC" in s_name else ("ETH" if "ETH" in s_name else "GOLD")
+        sch = retrain_schedulers.get(s_name)
+        if sch:
+            st = sch.get_status()
+            nxt_c = f"{YLW}RETRAIN{R}" if st.get("is_retraining") else f"{st.get('next_retrain_in', 0)}c"
+            rt_parts.append(f"{s_tag}:{nxt_c}(#{st.get('candles_accumulated', 0)})")
+    rt_display = "  │  ".join(rt_parts) if rt_parts else "BTC: 2000c"
+    buf.append(row(f" Retrain Sched: {rt_display}"))
     buf.append(DIV)
 
     # 6. TRADE LOG
