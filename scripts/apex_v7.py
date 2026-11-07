@@ -2695,7 +2695,7 @@ def get_dashboard_state() -> dict:
                 "win_rate": round(account.get("win_rate", 0.0), 1),
                 "profit_factor": round(account.get("profit_factor", 0.0), 2),
                 "trades_today": account.get("trades_today", 0),
-                "max_trades_day": MAX_TRADES_PER_DAY,
+                "max_trades_day": MAX_TRADES_DAY,
             },
             "intel": {
                 "fear_greed": fg_val,
