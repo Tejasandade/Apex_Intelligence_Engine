@@ -39,6 +39,34 @@ PROFILES: dict[str, dict[str, Any]] = {
         "max_concurrent_trades": 1,
         "news_blackout_mins": 10,
     },
+    "sharkfunded_10k_lite_1step": {
+        "name": "SharkFunded Lite 10K (1-Step)",
+        "initial_balance": 10000.0,
+        "profit_target_pct": 9.0,         # $900.00 target
+        "max_daily_loss_pct": 3.0,        # $300.00 max daily loss
+        "daily_safety_buffer_pct": 2.25,  # $225.00 circuit breaker
+        "max_total_loss_pct": 6.0,        # $600.00 max overall loss
+        "total_safety_buffer_pct": 4.8,   # $480.00 emergency stop
+        "base_risk_pct": 0.5,             # 0.5% risk ($50.00 per trade)
+        "strong_risk_pct": 0.65,          # 0.65% risk ($65.00)
+        "min_risk_pct": 0.35,             # 0.35% risk ($35.00)
+        "max_concurrent_trades": 1,
+        "news_blackout_mins": 10,
+    },
+    "sharkfunded_25k_lite_1step": {
+        "name": "SharkFunded Lite 25K (1-Step)",
+        "initial_balance": 25000.0,
+        "profit_target_pct": 9.0,         # $2,250.00 target
+        "max_daily_loss_pct": 3.0,        # $750.00 max daily loss
+        "daily_safety_buffer_pct": 2.25,  # $562.50 circuit breaker
+        "max_total_loss_pct": 6.0,        # $1,500.00 max overall loss
+        "total_safety_buffer_pct": 4.8,   # $1,200.00 emergency stop
+        "base_risk_pct": 0.5,             # 0.5% risk ($125.00 per trade)
+        "strong_risk_pct": 0.65,          # 0.65% risk ($162.50)
+        "min_risk_pct": 0.35,             # 0.35% risk ($87.50)
+        "max_concurrent_trades": 2,
+        "news_blackout_mins": 10,
+    },
     "ftmo_10k_2step": {
         "name": "FTMO 10K (Phase 1)",
         "initial_balance": 10000.0,
@@ -53,6 +81,62 @@ PROFILES: dict[str, dict[str, Any]] = {
         "max_concurrent_trades": 1,
         "news_blackout_mins": 5,
     },
+    "ftmo_25k_2step": {
+        "name": "FTMO 25K (Phase 1)",
+        "initial_balance": 25000.0,
+        "profit_target_pct": 10.0,        # $2,500.00 target
+        "max_daily_loss_pct": 5.0,        # $1,250.00 max daily loss
+        "daily_safety_buffer_pct": 4.0,   # $1,000.00 circuit breaker
+        "max_total_loss_pct": 10.0,       # $2,500.00 max overall loss
+        "total_safety_buffer_pct": 8.0,   # $2,000.00 emergency stop
+        "base_risk_pct": 0.5,             # 0.5% risk ($125.00)
+        "strong_risk_pct": 0.75,          # 0.75% risk ($187.50)
+        "min_risk_pct": 0.35,             # 0.35% risk ($87.50)
+        "max_concurrent_trades": 2,
+        "news_blackout_mins": 5,
+    },
+    "ftmo_50k_2step": {
+        "name": "FTMO 50K (Phase 1)",
+        "initial_balance": 50000.0,
+        "profit_target_pct": 10.0,        # $5,000.00 target
+        "max_daily_loss_pct": 5.0,        # $2,500.00 max daily loss
+        "daily_safety_buffer_pct": 4.0,   # $2,000.00 circuit breaker
+        "max_total_loss_pct": 10.0,       # $5,000.00 max overall loss
+        "total_safety_buffer_pct": 8.0,   # $4,000.00 emergency stop
+        "base_risk_pct": 0.5,             # 0.5% risk ($250.00)
+        "strong_risk_pct": 0.75,          # 0.75% risk ($375.00)
+        "min_risk_pct": 0.35,             # 0.35% risk ($175.00)
+        "max_concurrent_trades": 2,
+        "news_blackout_mins": 5,
+    },
+    "ftmo_100k_2step": {
+        "name": "FTMO 100K (Phase 1)",
+        "initial_balance": 100000.0,
+        "profit_target_pct": 10.0,        # $10,000.00 target
+        "max_daily_loss_pct": 5.0,        # $5,000.00 max daily loss
+        "daily_safety_buffer_pct": 4.0,   # $4,000.00 circuit breaker
+        "max_total_loss_pct": 10.0,       # $10,000.00 max overall loss
+        "total_safety_buffer_pct": 8.0,   # $8,000.00 emergency stop
+        "base_risk_pct": 0.5,             # 0.5% risk ($500.00)
+        "strong_risk_pct": 0.75,          # 0.75% risk ($750.00)
+        "min_risk_pct": 0.35,             # 0.35% risk ($350.00)
+        "max_concurrent_trades": 3,
+        "news_blackout_mins": 5,
+    },
+    "fundednext_6k_stellar": {
+        "name": "FundedNext 6K (1-Step Stellar)",
+        "initial_balance": 6000.0,
+        "profit_target_pct": 10.0,        # $600.00 target
+        "max_daily_loss_pct": 3.0,        # $180.00 max daily loss
+        "daily_safety_buffer_pct": 2.25,  # $135.00 circuit breaker
+        "max_total_loss_pct": 6.0,        # $360.00 max overall loss
+        "total_safety_buffer_pct": 4.8,   # $288.00 emergency stop
+        "base_risk_pct": 0.5,             # 0.5% risk ($30.00)
+        "strong_risk_pct": 0.65,          # 0.65% risk ($39.00)
+        "min_risk_pct": 0.35,             # 0.35% risk ($21.00)
+        "max_concurrent_trades": 1,
+        "news_blackout_mins": 10,
+    },
     "fundednext_25k_stellar": {
         "name": "FundedNext 25K (1-Step Stellar)",
         "initial_balance": 25000.0,
@@ -64,8 +148,36 @@ PROFILES: dict[str, dict[str, Any]] = {
         "base_risk_pct": 0.4,             # 0.4% risk ($100.00)
         "strong_risk_pct": 0.6,           # 0.6% risk ($150.00)
         "min_risk_pct": 0.25,             # 0.25% risk ($62.50)
+        "max_concurrent_trades": 2,
+        "news_blackout_mins": 10,
+    },
+    "the5ers_5k_bootcamp": {
+        "name": "The5ers 5K (Bootcamp)",
+        "initial_balance": 5000.0,
+        "profit_target_pct": 6.0,         # $300.00 target
+        "max_daily_loss_pct": 3.0,        # $150.00 max daily loss
+        "daily_safety_buffer_pct": 2.25,  # $112.50 circuit breaker
+        "max_total_loss_pct": 5.0,        # $250.00 max overall loss
+        "total_safety_buffer_pct": 4.0,   # $200.00 emergency stop
+        "base_risk_pct": 0.5,             # 0.5% risk ($25.00)
+        "strong_risk_pct": 0.65,          # 0.65% risk ($32.50)
+        "min_risk_pct": 0.35,             # 0.35% risk ($17.50)
         "max_concurrent_trades": 1,
         "news_blackout_mins": 10,
+    },
+    "funding_pips_5k_2step": {
+        "name": "Funding Pips 5K (2-Step Phase 1)",
+        "initial_balance": 5000.0,
+        "profit_target_pct": 8.0,         # $400.00 target
+        "max_daily_loss_pct": 5.0,        # $250.00 max daily loss
+        "daily_safety_buffer_pct": 4.0,   # $200.00 circuit breaker
+        "max_total_loss_pct": 10.0,       # $500.00 max overall loss
+        "total_safety_buffer_pct": 8.0,   # $400.00 emergency stop
+        "base_risk_pct": 0.5,             # 0.5% risk ($25.00)
+        "strong_risk_pct": 0.75,          # 0.75% risk ($37.50)
+        "min_risk_pct": 0.35,             # 0.35% risk ($17.50)
+        "max_concurrent_trades": 1,
+        "news_blackout_mins": 5,
     },
 }
 
@@ -99,6 +211,11 @@ class PropFirmManager:
 
         self.load_state()
         self.check_day_rollover()
+
+    @property
+    def cumulative_profit(self) -> float:
+        """Current cumulative profit above the challenge starting balance."""
+        return self.virtual_balance - self.initial_balance
 
     def check_day_rollover(self) -> None:
         """Check for 00:00 UTC day rollover to reset daily loss tracker."""
@@ -372,19 +489,28 @@ class PropFirmManager:
 
         return {
             "challenge_name": self.config["name"],
+            "name": self.config["name"],
             "profile_key": self.profile_key,
+            "initial_balance": float(self.initial_balance),
             "virtual_balance": round(self.virtual_balance, 2),
+            "virtual_equity": round(self.virtual_balance, 2),
             "target_balance": round(self.initial_balance + target_usd, 2),
             "current_profit_usd": round(current_profit, 2),
+            "cumulative_profit": round(current_profit, 2),
             "target_usd": round(target_usd, 2),
+            "profit_target_usd": round(target_usd, 2),
             "remaining_target_usd": round(remaining_target_usd, 2),
             "progress_pct": round(progress_pct, 1),
             "soft_landing_active": soft_landing_active,
             "daily_pnl_usd": round(current_daily_pnl, 2),
             "daily_limit_usd": round(daily_limit_usd, 2),
+            "max_daily_loss_usd": round(daily_limit_usd, 2),
+            "daily_loss_used_usd": round(abs(min(0.0, current_daily_pnl)), 2),
             "daily_loss_used_pct": round(daily_loss_used_pct, 1),
             "total_dd_usd": round(total_dd_usd, 2),
+            "max_dd_used_usd": round(total_dd_usd, 2),
             "max_dd_usd": round(max_loss_usd, 2),
+            "max_loss_usd": round(max_loss_usd, 2),
             "total_dd_pct": round(total_dd_pct, 2),
             "max_dd_limit_pct": self.config["max_total_loss_pct"],
             "status": self.status,
@@ -415,6 +541,43 @@ class PropFirmManager:
         with open(self.state_file, "w") as f:
             json.dump(data, f, indent=2)
 
+    def switch_profile(self, profile_key: str, reset: bool = False) -> bool:
+        """Dynamically switch challenge profile (e.g. SharkFunded -> FTMO -> FundedNext)."""
+        if profile_key not in PROFILES:
+            return False
+        self.profile_key = profile_key
+        self.config = PROFILES[profile_key]
+        old_initial = self.initial_balance
+        profit_offset = self.virtual_balance - old_initial
+        self.initial_balance = float(self.config["initial_balance"])
+        if reset or self.virtual_balance <= 0:
+            self.reset_challenge()
+        else:
+            self.virtual_balance = self.initial_balance + profit_offset
+            self.peak_balance = max(self.virtual_balance, self.initial_balance)
+            self.day_start_balance = self.initial_balance
+            self.save_state()
+        logger.info("prop_firm_profile_switched", profile=profile_key, name=self.config["name"])
+        return True
+
+    def reset_challenge(self) -> None:
+        """Reset the challenge metrics to initial state (e.g. starting new challenge)."""
+        self.initial_balance = float(self.config["initial_balance"])
+        self.virtual_balance = self.initial_balance
+        self.peak_balance = self.initial_balance
+        self.day_start_balance = self.initial_balance
+        self.today_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        self.daily_realized_pnl = 0.0
+        self.daily_unrealized_pnl = 0.0
+        self.total_realized_pnl = 0.0
+        self.wins = 0
+        self.losses = 0
+        self.total_trades = 0
+        self.status = "IN_PROGRESS"
+        self.halt_reason = ""
+        self.save_state()
+        logger.info("prop_firm_challenge_reset", profile=self.profile_key, balance=self.virtual_balance)
+
     def load_state(self) -> bool:
         """Load virtual prop firm challenge state from disk."""
         if not self.state_file.exists():
@@ -423,6 +586,9 @@ class PropFirmManager:
             with open(self.state_file, "r") as f:
                 data = json.load(f)
             self.profile_key = data.get("profile_key", self.profile_key)
+            if self.profile_key in PROFILES:
+                self.config = PROFILES[self.profile_key]
+                self.initial_balance = float(self.config["initial_balance"])
             self.virtual_balance = float(data.get("virtual_balance", self.initial_balance))
             self.peak_balance = float(data.get("peak_balance", self.initial_balance))
             self.day_start_balance = float(data.get("day_start_balance", self.initial_balance))

@@ -2436,6 +2436,75 @@ async def _market_intel_loop():
             pass
 
 
+async def handle_web_action(action: str, payload: dict) -> dict:
+    """Dispatches interactive actions from Web Dashboard REST APIs."""
+    global PROP_FIRM_MODE, MAX_TRADES_DAY, prop_firm_manager
+    if action == "close_all":
+        closed_syms = []
+        for sym in TRADED_SYMBOLS:
+            sym_port = portfolios.get(sym)
+            if sym_port and sym_port.get("position") == "OPEN":
+                ticket = sym_port.get("broker_ticket")
+                if ticket and _active_broker and hasattr(_active_broker, "close_position_by_ticket"):
+                    try:
+                        await _active_broker.close_position_by_ticket(int(ticket))
+                    except Exception as e:
+                        print(f"  [WebAction] Close ticket {ticket} failed: {e}")
+                sym_mkt = symbol_markets.get(sym, market)
+                exit_price = sym_mkt["bid"] if sym_port.get("direction") == "LONG" else sym_mkt["ask"]
+                exit_profit = float(sym_port.get("broker_pnl", 0.0) or sym_port.get("unrealized_pnl", 0.0))
+                _do_close_symbol(sym, exit_profit, exit_price, "WEB DASHBOARD EMERGENCY FLATTEN ALL")
+                closed_syms.append(sym)
+        return {"success": True, "message": f"Flattened: {', '.join(closed_syms) if closed_syms else 'None open'}"}
+
+    elif action == "close_symbol":
+        sym = payload.get("symbol", "").upper()
+        sym_port = portfolios.get(sym)
+        if sym_port and sym_port.get("position") == "OPEN":
+            ticket = sym_port.get("broker_ticket")
+            if ticket and _active_broker and hasattr(_active_broker, "close_position_by_ticket"):
+                try:
+                    await _active_broker.close_position_by_ticket(int(ticket))
+                except Exception as e:
+                    print(f"  [WebAction] Close ticket {ticket} failed: {e}")
+            sym_mkt = symbol_markets.get(sym, market)
+            exit_price = sym_mkt["bid"] if sym_port.get("direction") == "LONG" else sym_mkt["ask"]
+            exit_profit = float(sym_port.get("broker_pnl", 0.0) or sym_port.get("unrealized_pnl", 0.0))
+            _do_close_symbol(sym, exit_profit, exit_price, f"WEB DASHBOARD CLOSE [{sym}]")
+            return {"success": True, "message": f"{sym} closed"}
+        return {"success": False, "message": f"No open position for {sym}"}
+
+    elif action == "toggle_pause":
+        account["halted"] = not account.get("halted", False)
+        account["halt_reason"] = "PAUSED VIA WEB DASHBOARD" if account["halted"] else ""
+        return {"success": True, "halted": account["halted"]}
+
+    elif action == "prop_firm_settings":
+        enabled = payload.get("enabled")
+        profile = payload.get("profile")
+        reset = payload.get("reset", False)
+        if enabled is not None:
+            PROP_FIRM_MODE = bool(enabled)
+        if profile and prop_firm_manager:
+            prop_firm_manager.switch_profile(profile, reset=reset)
+        elif reset and prop_firm_manager:
+            prop_firm_manager.reset_challenge()
+        return {
+            "success": True,
+            "enabled": PROP_FIRM_MODE,
+            "profile": prop_firm_manager.profile_key if prop_firm_manager else "DISABLED",
+            "metrics": prop_firm_manager.get_hud_metrics() if (PROP_FIRM_MODE and prop_firm_manager) else None
+        }
+
+    elif action == "risk_settings":
+        mt = payload.get("max_trades_day")
+        if mt is not None:
+            MAX_TRADES_DAY = int(mt)
+        return {"success": True, "max_trades_day": MAX_TRADES_DAY}
+
+    return {"error": f"Unknown action {action}"}
+
+
 def get_dashboard_state() -> dict:
     """Extract real-time metrics for Web Dashboard & remote monitoring."""
     dur_min = 0
@@ -2448,7 +2517,7 @@ def get_dashboard_state() -> dict:
         nxt = news_guard.get_next_event()
         if nxt:
             mins_to = round((nxt["time"] - datetime.datetime.now(datetime.timezone.utc)).total_seconds() / 60.0, 1)
-        is_blk, _ = news_guard.is_blackout(SYMBOL)
+        is_blk, _ = news_guard.is_blackout(PRIMARY_SYMBOL)
     except Exception:
         is_blk = False
 
@@ -2486,12 +2555,39 @@ def get_dashboard_state() -> dict:
 
     funding_pct = 0.0
     try:
-        funding_pct = round(funding_monitor.get_funding_pct(SYMBOL), 4)
+        funding_pct = round(funding_monitor.get_funding_pct(PRIMARY_SYMBOL), 4)
+    except Exception:
+        pass
+
+    # Multi-asset liquidity levels
+    liq_map = {}
+    try:
+        for sym in TRADED_SYMBOLS:
+            liq_map[sym] = liquidity_engine.get_levels(sym)
+    except Exception:
+        pass
+
+    # Walk-forward retrain schedulers status
+    retrain_map = {}
+    try:
+        for sym, sch in retrain_schedulers.items():
+            retrain_map[sym] = sch.get_status()
+    except Exception:
+        pass
+
+    lead_lag_diag = {}
+    try:
+        lead_lag_diag = getattr(lead_lag_engine, "_diagnostics", {})
     except Exception:
         pass
 
     return {
         "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "halted": account.get("halted", False),
+        "halt_reason": account.get("halt_reason", ""),
+        "session_name": session.get("name", "LONDON"),
+        "kill_zone": session.get("kill_zone", ""),
+        "prop_firm_mode": PROP_FIRM_MODE,
         "market": {
             "ltp": market.get("ltp", 0.0),
             "bid": market.get("bid", 0.0),
@@ -2518,6 +2614,7 @@ def get_dashboard_state() -> dict:
             "next_event_min": mins_to,
         },
         "cross_market": cross_market_monitor.get_state(),
+        "lead_lag": lead_lag_diag,
         "ml": {
             "regime": regime_info.get("current", "UNKNOWN"),
             "atr": round(regime_info.get("atr", 0.0), 1),
@@ -2555,6 +2652,8 @@ def get_dashboard_state() -> dict:
                 "unrealized_pnl": portfolios.get(sym, {}).get("broker_pnl") if portfolios.get(sym, {}).get("broker_ticket") else portfolios.get(sym, {}).get("unrealized_pnl", 0.0),
             } for sym in TRADED_SYMBOLS
         },
+        "liquidity": liq_map,
+        "retrain_status": retrain_map,
         "prop_firm": prop_firm_manager.get_hud_metrics() if (PROP_FIRM_MODE and prop_firm_manager) else None,
         "journal": journal_ui,
     }
@@ -2721,6 +2820,220 @@ async def _broker_sync_loop():
                 except Exception:
                     pass
 
+# ─── 2-WAY INTERACTIVE TELEGRAM COMMAND CENTER (APEX v7.2) ───────────────────
+async def _telegram_command_loop():
+    """
+    2-Way Telegram Interactive Command Center.
+    Polls getUpdates from Telegram Bot API with long-polling.
+    Authenticates every message against TELEGRAM_CHAT_ID for rock-solid security.
+    Supported commands:
+      /help, /start       - Command cheatsheet
+      /status             - Real-time engine health, DD, win rate, prop firm metrics
+      /positions          - Detailed view of open positions across BTC, ETH, and GOLD
+      /closeall, /flatten - Emergency close all open positions across all assets
+      /close <symbol>     - Close specific symbol (e.g. /close btc)
+      /pause              - Pause new order execution
+      /resume             - Resume trading engine
+      /propfirm [profile] - List or hot-switch prop firm challenge profile
+      /reset              - Reset current prop firm challenge balance & stats
+      /mode <prop|live>   - Toggle Prop Firm challenge rules vs Personal trading
+    """
+    global PROP_FIRM_MODE, prop_firm_manager
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+
+    offset = 0
+    poll_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
+    send_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+
+    import aiohttp
+
+    async with aiohttp.ClientSession() as session_http:
+        while True:
+            try:
+                params = {"offset": offset, "timeout": 10}
+                async with session_http.get(poll_url, params=params, timeout=15) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        for update in data.get("result", []):
+                            offset = max(offset, update["update_id"] + 1)
+                            msg = update.get("message", {})
+                            chat_id = str(msg.get("chat", {}).get("id", ""))
+                            # Security: only process commands from authorized chat ID
+                            if chat_id != str(TELEGRAM_CHAT_ID):
+                                continue
+
+                            text = msg.get("text", "").strip()
+                            if not text:
+                                continue
+
+                            parts = text.split()
+                            cmd = parts[0].lower()
+                            arg = parts[1] if len(parts) > 1 else ""
+
+                            reply_txt = ""
+
+                            if cmd in ("/help", "/start"):
+                                reply_txt = (
+                                    "⚡ *APEX 2-Way Command Center*\n\n"
+                                    "📊 */status* - Real-time bot & challenge health\n"
+                                    "💼 */positions* - View all open positions\n"
+                                    "🛑 */closeall* - Emergency flatten all positions\n"
+                                    "🎯 */close <symbol>* - Close symbol (e.g. `/close btc`)\n"
+                                    "⏸️ */pause* - Pause trading engine\n"
+                                    "▶️ */resume* - Resume trading engine\n"
+                                    "🏆 */propfirm [profile]* - Switch/view challenge profiles\n"
+                                    "🔄 */reset* - Reset challenge balance/drawdown\n"
+                                    "⚙️ */mode <prop|personal>* - Toggle Prop Firm mode"
+                                )
+
+                            elif cmd == "/status":
+                                pf_status = "DISABLED (Personal Mode)"
+                                if PROP_FIRM_MODE and prop_firm_manager:
+                                    m = prop_firm_manager.get_hud_metrics()
+                                    pf_status = (
+                                        f"*{m['name']}* ({m['status']})\n"
+                                        f"Virtual Equity: `${m['virtual_equity']:,.2f}`\n"
+                                        f"Target: `${m['cumulative_profit']:+,.2f}` / `${m['profit_target_usd']:,.2f}` ({m['progress_pct']}%)\n"
+                                        f"Daily Loss: `-${m['daily_loss_used_usd']:,.2f}` / `-${m['max_daily_loss_usd']:,.2f}` ({m['daily_loss_used_pct']}%)\n"
+                                        f"Max Drawdown: `-${m['max_dd_used_usd']:,.2f}` / `-${m['max_loss_usd']:,.2f}`"
+                                    )
+                                open_pos_count = sum(1 for p in portfolios.values() if p.get("position") == "OPEN")
+                                state_icon = "⏸️ PAUSED" if account.get("halted") else "🟢 ACTIVE"
+                                reply_txt = (
+                                    f"⚡ *APEX Engine Status* [{state_icon}]\n"
+                                    f"Balance: `${account.get('balance', 0.0):,.2f}` | PnL: `${account.get('net_pnl', 0.0):+,.2f}`\n"
+                                    f"Win Rate: `{account.get('win_rate', 0.0)}%` ({account.get('wins', 0)}W/{account.get('losses', 0)}L)\n"
+                                    f"Active Positions: `{open_pos_count}/{MAX_CONCURRENT_TRADES}`\n\n"
+                                    f"🏆 *Prop Firm Challenge:*\n{pf_status}"
+                                )
+
+                            elif cmd == "/positions":
+                                lines = ["💼 *APEX Open Positions:*"]
+                                has_open = False
+                                for sym in TRADED_SYMBOLS:
+                                    p = portfolios.get(sym, {})
+                                    if p.get("position") == "OPEN":
+                                        has_open = True
+                                        pnl = p.get("broker_pnl") if p.get("broker_ticket") else p.get("unrealized_pnl", 0.0)
+                                        pnl_sign = "+" if pnl >= 0 else ""
+                                        lines.append(
+                                            f"• *{sym}* {p.get('direction')} @ `${p.get('entry_price', 0.0):,.2f}`\n"
+                                            f"  PnL: `{pnl_sign}${pnl:,.2f}` | SL: `${p.get('sl_price', 0.0):,.2f}` | TP: `${p.get('tp2_price', 0.0):,.2f}`"
+                                        )
+                                if not has_open:
+                                    lines.append("No active positions (All assets FLAT).")
+                                reply_txt = "\n".join(lines)
+
+                            elif cmd in ("/closeall", "/flatten"):
+                                closed_list = []
+                                for sym in TRADED_SYMBOLS:
+                                    sym_port = portfolios.get(sym)
+                                    if sym_port and sym_port.get("position") == "OPEN":
+                                        ticket = sym_port.get("broker_ticket")
+                                        if ticket and _active_broker and hasattr(_active_broker, "close_position_by_ticket"):
+                                            try:
+                                                await _active_broker.close_position_by_ticket(int(ticket))
+                                            except Exception:
+                                                pass
+                                        sym_mkt = symbol_markets.get(sym, market)
+                                        cur_p = sym_mkt["bid"] if sym_port.get("direction") == "LONG" else sym_mkt["ask"]
+                                        pnl = float(sym_port.get("broker_pnl", 0.0) or sym_port.get("unrealized_pnl", 0.0))
+                                        _do_close_symbol(sym, pnl, cur_p, "TELEGRAM /closeall COMMAND")
+                                        closed_list.append(f"{sym} (${pnl:+,.2f})")
+                                if closed_list:
+                                    reply_txt = f"🛑 *Closed All Open Positions:*\n" + "\n".join(closed_list)
+                                else:
+                                    reply_txt = "ℹ️ No open positions to close."
+
+                            elif cmd == "/close":
+                                target_sym = None
+                                arg_u = arg.upper()
+                                for s in TRADED_SYMBOLS:
+                                    if arg_u in s:
+                                        target_sym = s
+                                        break
+                                if not target_sym:
+                                    reply_txt = f"⚠️ Unknown or unspecified symbol. Options: {', '.join(TRADED_SYMBOLS)}"
+                                else:
+                                    sym_port = portfolios.get(target_sym)
+                                    if sym_port and sym_port.get("position") == "OPEN":
+                                        ticket = sym_port.get("broker_ticket")
+                                        if ticket and _active_broker and hasattr(_active_broker, "close_position_by_ticket"):
+                                            try:
+                                                await _active_broker.close_position_by_ticket(int(ticket))
+                                            except Exception:
+                                                pass
+                                        sym_mkt = symbol_markets.get(target_sym, market)
+                                        cur_p = sym_mkt["bid"] if sym_port.get("direction") == "LONG" else sym_mkt["ask"]
+                                        pnl = float(sym_port.get("broker_pnl", 0.0) or sym_port.get("unrealized_pnl", 0.0))
+                                        _do_close_symbol(target_sym, pnl, cur_p, f"TELEGRAM /close {target_sym} COMMAND")
+                                        reply_txt = f"✅ Closed *{target_sym}* at `${cur_p:,.2f}` | PnL: `${pnl:+,.2f}`"
+                                    else:
+                                        reply_txt = f"ℹ️ *{target_sym}* is currently FLAT."
+
+                            elif cmd == "/pause":
+                                account["halted"] = True
+                                account["halt_reason"] = "PAUSED VIA TELEGRAM COMMAND"
+                                reply_txt = "⏸️ *APEX Trading Engine PAUSED*. Existing positions remain managed, new signals will not enter."
+
+                            elif cmd == "/resume":
+                                account["halted"] = False
+                                account["halt_reason"] = ""
+                                reply_txt = "▶️ *APEX Trading Engine RESUMED*. Live ML evaluation active."
+
+                            elif cmd in ("/propfirm", "/profile"):
+                                from src.core.prop_firm_manager import PROFILES
+                                if not arg:
+                                    curr = prop_firm_manager.profile_key if prop_firm_manager else 'None'
+                                    prof_list = "\n".join([f"• `{k}` ({v['name']})" for k, v in PROFILES.items()])
+                                    reply_txt = (
+                                        f"🏆 Current Profile: *{curr}*\n\n"
+                                        f"To switch profile, type:\n`/propfirm <profile_key>`\n\n"
+                                        f"Available Profiles:\n{prof_list}"
+                                    )
+                                else:
+                                    match_key = None
+                                    for k in PROFILES:
+                                        if arg.lower() == k.lower():
+                                            match_key = k
+                                            break
+                                    if match_key and prop_firm_manager:
+                                        prop_firm_manager.switch_profile(match_key, reset=False)
+                                        reply_txt = f"✅ Prop firm profile switched to *{PROFILES[match_key]['name']}*!"
+                                    else:
+                                        reply_txt = f"❌ Invalid profile `{arg}`. Type `/propfirm` to see all 11 profiles."
+
+                            elif cmd == "/reset":
+                                if prop_firm_manager:
+                                    prop_firm_manager.reset_challenge()
+                                    reply_txt = "🔄 Prop Firm Challenge balance & statistics cleanly reset to starting baseline."
+                                else:
+                                    reply_txt = "⚠️ Prop Firm Manager not active."
+
+                            elif cmd == "/mode":
+                                if "prop" in arg.lower():
+                                    PROP_FIRM_MODE = True
+                                    reply_txt = "🏆 Switched to *Prop Firm Challenge Mode* (Strict rule enforcement active)."
+                                elif "person" in arg.lower() or "live" in arg.lower() or "off" in arg.lower():
+                                    PROP_FIRM_MODE = False
+                                    reply_txt = "🚀 Switched to *Personal Account Mode* (Challenge constraints disabled)."
+                                else:
+                                    reply_txt = f"Current mode: *{'Prop Firm' if PROP_FIRM_MODE else 'Personal'}*. Usage: `/mode prop` or `/mode personal`."
+
+                            if reply_txt:
+                                await session_http.post(
+                                    send_url,
+                                    json={"chat_id": chat_id, "text": reply_txt, "parse_mode": "Markdown"},
+                                    timeout=5
+                                )
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                await asyncio.sleep(2)
+            await asyncio.sleep(1)
+
+
 async def main():
     global _candle_queue
     _candle_queue = asyncio.Queue(maxsize=50)  # Must be created inside running event loop
@@ -2782,6 +3095,7 @@ async def main():
     from src.ui.web_server import ApexWebServer
     web_server = ApexWebServer(
         state_provider=get_dashboard_state,
+        action_handler=handle_web_action,
         host="0.0.0.0",
         port=web_port
     )
@@ -2793,6 +3107,7 @@ async def main():
         _candle_worker(),
         _market_intel_loop(),   # APEX v7.2: news + funding + sentiment
         _broker_sync_loop(),    # Real-time MT5 position supervisor
+        _telegram_command_loop(), # APEX v7.2: 2-way Telegram command center
     )
 
 if __name__ == "__main__":

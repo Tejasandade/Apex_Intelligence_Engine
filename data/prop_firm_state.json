@@ -1,0 +1,15 @@
+{
+  "profile_key": "sharkfunded_5k_lite_1step",
+  "initial_balance": 5000.0,
+  "virtual_balance": 5000.0,
+  "peak_balance": 5000.0,
+  "day_start_balance": 5000.0,
+  "today_date": "2026-11-07",
+  "daily_realized_pnl": 0.0,
+  "total_realized_pnl": 0.0,
+  "wins": 0,
+  "losses": 0,
+  "total_trades": 0,
+  "status": "IN_PROGRESS",
+  "halt_reason": ""
+}
