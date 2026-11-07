@@ -1162,12 +1162,25 @@ def _check_exit_for_symbol(sym: str):
         port["highest_fav"] = cur
 
     def close(price: float, reason: str):
-        if direction == "LONG":
-            nbps = ((price-entry)/entry * 10000.0) - ROUNDTRIP_BPS
-        else:
-            nbps = ((entry-price)/entry * 10000.0) - ROUNDTRIP_BPS
+        t_id = port.get("broker_ticket")
+        broker_pnl_val = float(port.get("broker_pnl", 0.0))
 
-        net_usd = (nbps/10000.0) * port["notional"]
+        # 1. PRIORITY: If an active MT5 broker ticket exists, ground truth is the broker profit!
+        if t_id and (broker_pnl_val != 0.0 or DEMO_MODE):
+            if broker_pnl_val != 0.0:
+                net_usd = broker_pnl_val
+            else:
+                raw_diff = (price - entry) if direction == "LONG" else (entry - price)
+                net_usd = (raw_diff / entry) * port.get("notional", 1000.0)
+        else:
+            # Paper mode: calculate net after slippage/fees
+            if direction == "LONG":
+                nbps = ((price-entry)/entry * 10000.0) - ROUNDTRIP_BPS
+            else:
+                nbps = ((entry-price)/entry * 10000.0) - ROUNDTRIP_BPS
+
+            net_usd = (nbps/10000.0) * port["notional"]
+
         total   = round(port["banked_pnl"] + net_usd, 2)
         is_win  = total > 0
 

@@ -839,5 +839,83 @@
     "pnl_usd": -2.51,
     "exit_reason": "MT5 [sl 76071.85]",
     "exit_ts": "2026-11-07T03:32:36.091187"
+  },
+  {
+    "id": 13,
+    "open_ts": "2026-11-08T02:16:02.762424",
+    "symbol": "BTCUSDT",
+    "action": "SELL",
+    "trade_mode": "SCALP",
+    "entry_price": 75680.0,
+    "sl_price": 75748.7,
+    "tp1_price": 75556.34,
+    "tp2_price": 75405.2,
+    "sl_dist": 68.7,
+    "notional": 756.8,
+    "risk_usd": 68.7,
+    "lots": 1.0,
+    "leverage": 0.76,
+    "prob": 0.5739,
+    "council_score": 0.6942488262910798,
+    "regime": "TRENDING_LOW_VOL",
+    "signal_id": "sig_BTCUSDT_e6d82cc4",
+    "council_votes": {
+      "Momentum": {
+        "vote": "APPROVE",
+        "conviction": 0.6666666666666666,
+        "weight": 1.0
+      },
+      "Structure": {
+        "vote": "APPROVE",
+        "conviction": 0.5,
+        "weight": 2.5
+      },
+      "Volume": {
+        "vote": "APPROVE",
+        "conviction": 1.0,
+        "weight": 1.0
+      },
+      "Regime": {
+        "vote": "APPROVE",
+        "conviction": 0.9,
+        "weight": 2.0
+      },
+      "Session": {
+        "vote": "APPROVE",
+        "conviction": 0.8,
+        "weight": 1.0
+      },
+      "Exhaustion": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 2.0
+      },
+      "Velocity": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 2.5
+      },
+      "CrossMarket": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.2
+      },
+      "Sentiment": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.0
+      },
+      "Risk": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 0.0
+      }
+    },
+    "outcome": "WIN",
+    "exit_price": 75663.35,
+    "pnl_usd": 43.2,
+    "exit_reason": "OFI REVERSAL HARVEST (OFI +0.76 at +1.2R)",
+    "exit_ts": "2026-11-08T02:20:29.166661",
+    "dur_min": 4.4
   }
 ]
