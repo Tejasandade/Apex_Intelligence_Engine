@@ -256,7 +256,15 @@ class MT5Broker:
         # ── Spread Optimizer & Fill Protection ──
         # Measure real broker spread (Ask - Bid)
         spread = tick.ask - tick.bid
-        max_spread_usd = 35.0 if "BTC" in actual_symbol else (sym_info.point * 300)
+        act_up = actual_symbol.upper()
+        if "BTC" in act_up:
+            max_spread_usd = 35.00
+        elif "ETH" in act_up:
+            max_spread_usd = 2.50
+        elif "GOLD" in act_up or "XAU" in act_up or "PAXG" in act_up:
+            max_spread_usd = 0.80
+        else:
+            max_spread_usd = float(sym_info.point * 150)
         
         wait_start = time.time()
         max_wait_secs = 6.0

@@ -262,6 +262,23 @@ class PropFirmManager:
 
         risk_usd = self.virtual_balance * (risk_pct / 100.0)
 
+        # ── SOFT-LANDING RISK DECELERATION ──
+        # When approaching challenge victory (within $50 of profit target),
+        # smoothly taper down risk so banked profits are protected and victory is locked in.
+        target_usd = self.initial_balance * (self.config["profit_target_pct"] / 100.0)
+        current_profit = self.virtual_balance - self.initial_balance
+        remaining_target = target_usd - current_profit
+        if 0 < remaining_target <= 50.0:
+            soft_risk = max(10.0, remaining_target * 0.50)
+            if soft_risk < risk_usd:
+                logger.info(
+                    "prop_firm_soft_landing_deceleration",
+                    remaining_target=round(remaining_target, 2),
+                    original_risk=round(risk_usd, 2),
+                    soft_landing_risk=round(soft_risk, 2)
+                )
+                risk_usd = soft_risk
+
         # Ensure risk_usd does not exceed remaining daily budget
         daily_safety_stop_usd = self.day_start_balance * (self.config["daily_safety_buffer_pct"] / 100.0)
         remaining_daily_budget = daily_safety_stop_usd + (self.daily_realized_pnl + self.daily_unrealized_pnl)
@@ -350,6 +367,8 @@ class PropFirmManager:
         total_dd_pct = (total_dd_usd / self.initial_balance) * 100.0
 
         win_rate = round((self.wins / self.total_trades) * 100.0, 1) if self.total_trades > 0 else 0.0
+        remaining_target_usd = max(0.0, target_usd - current_profit)
+        soft_landing_active = (0 < remaining_target_usd <= 50.0) and (current_profit > 0)
 
         return {
             "challenge_name": self.config["name"],
@@ -358,7 +377,9 @@ class PropFirmManager:
             "target_balance": round(self.initial_balance + target_usd, 2),
             "current_profit_usd": round(current_profit, 2),
             "target_usd": round(target_usd, 2),
+            "remaining_target_usd": round(remaining_target_usd, 2),
             "progress_pct": round(progress_pct, 1),
+            "soft_landing_active": soft_landing_active,
             "daily_pnl_usd": round(current_daily_pnl, 2),
             "daily_limit_usd": round(daily_limit_usd, 2),
             "daily_loss_used_pct": round(daily_loss_used_pct, 1),

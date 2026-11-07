@@ -206,10 +206,12 @@ _active_broker = None  # unified broker (BybitBroker or MT5Broker)
 def _create_symbol_portfolio(sym: str) -> dict:
     return {
         "symbol": sym, "position": "FLAT", "direction": None,
+        "trade_mode": "SCALP", # SCALP (precision 5m) | SWING (macro 1D/4H/1H aligned)
         "entry_price": 0.0, "entry_time": 0.0,
         "sl_price": 0.0, "sl_distance": 0.0,
         "tp1_price": 0.0, "tp2_price": 0.0,
         "tp1_rr": 1.8, "tp2_rr": 3.5,
+        "max_duration_min": 360.0, "adverse_decay_min": 240.0,
         "risk_tier": 0, "entry_lots": 0.0, "risk_usd": 0.0,
         "notional": 0.0, "initial_notional": 0.0,
         "unrealized_pnl": 0.0, "banked_pnl": 0.0,
@@ -228,11 +230,12 @@ def _create_symbol_market(sym: str) -> dict:
 symbol_markets: dict[str, dict] = {sym: _create_symbol_market(sym) for sym in TRADED_SYMBOLS}
 market = symbol_markets[PRIMARY_SYMBOL]
 
-# Per-symbol candle buffers
+# Per-symbol candle buffers (5m execution, 15m structural, 1h trend, 4h intermediate, 1d macro)
 symbol_candles_5m: dict[str, deque]  = {sym: deque(maxlen=210) for sym in TRADED_SYMBOLS}
 symbol_candles_15m: dict[str, deque] = {sym: deque(maxlen=100) for sym in TRADED_SYMBOLS}
 symbol_candles_1h: dict[str, deque]  = {sym: deque(maxlen=168) for sym in TRADED_SYMBOLS}
-symbol_candles_4h: dict[str, deque]  = {sym: deque(maxlen=50) for sym in TRADED_SYMBOLS}
+symbol_candles_4h: dict[str, deque]  = {sym: deque(maxlen=60) for sym in TRADED_SYMBOLS}
+symbol_candles_1d: dict[str, deque]  = {sym: deque(maxlen=60) for sym in TRADED_SYMBOLS}
 
 symbol_live_candle: dict[str, dict]  = {
     sym: {"open": 0.0, "high": 0.0, "low": 0.0, "close": 0.0, "volume": 0.0, "timestamp": 0}
@@ -243,18 +246,186 @@ symbol_acc_1m: dict[str, list]       = {sym: [] for sym in TRADED_SYMBOLS}
 symbol_acc_5m_15m: dict[str, list]   = {sym: [] for sym in TRADED_SYMBOLS}
 symbol_acc_15m_1h: dict[str, list]   = {sym: [] for sym in TRADED_SYMBOLS}
 symbol_acc_1h_4h: dict[str, list]    = {sym: [] for sym in TRADED_SYMBOLS}
+symbol_acc_4h_1d: dict[str, list]    = {sym: [] for sym in TRADED_SYMBOLS}
+
+# Multi-timeframe Macro Structure Store (1D, 4H, 1H)
+symbol_macro_structure: dict[str, dict] = {
+    sym: {
+        "symbol": sym,
+        "trend_1d": "NEUTRAL",
+        "ema20_1d": 0.0, "ema50_1d": 0.0, "rsi_1d": 50.0,
+        "trend_4h": "NEUTRAL",
+        "ema20_4h": 0.0, "ema50_4h": 0.0, "structure_4h": "RANGE",
+        "trend_1h": "NEUTRAL",
+        "ema20_1h": 0.0, "ema50_1h": 0.0,
+        "macro_bias": "NEUTRAL",
+        "score": 0,
+        "swing_eligible_long": False,
+        "swing_eligible_short": False,
+    }
+    for sym in TRADED_SYMBOLS
+}
+
+def _calc_ema(prices: list[float], period: int) -> float:
+    if not prices or len(prices) < period:
+        return prices[-1] if prices else 0.0
+    k = 2.0 / (period + 1.0)
+    ema = float(prices[0])
+    for p in prices[1:]:
+        ema = float(p) * k + ema * (1.0 - k)
+    return ema
+
+def _calc_rsi(prices: list[float], period: int = 14) -> float:
+    if len(prices) <= period:
+        return 50.0
+    diffs = [prices[i] - prices[i - 1] for i in range(1, len(prices))]
+    gains = [d if d > 0 else 0.0 for d in diffs]
+    losses = [-d if d < 0 else 0.0 for d in diffs]
+    if len(gains) < period:
+        return 50.0
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    for i in range(period, len(diffs)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+    if avg_loss == 0:
+        return 100.0 if avg_gain > 0 else 50.0
+    rs = avg_gain / avg_loss
+    return 100.0 - (100.0 / (1.0 + rs))
+
+def compute_macro_structure(symbol: str) -> dict:
+    """
+    Computes higher-timeframe market structure (1D, 4H, 1H) for a given symbol.
+    Extracts EMA alignments, RSI, and structural swing pivots.
+    Determines overall Macro Bias (STRONG_BULL, MOD_BULL, NEUTRAL, MOD_BEAR, STRONG_BEAR)
+    and evaluates Swing Trade eligibility.
+    """
+    sym = symbol.upper()
+    c_1d = list(symbol_candles_1d.get(sym, []))
+    c_4h = list(symbol_candles_4h.get(sym, []))
+    c_1h = list(symbol_candles_1h.get(sym, []))
+
+    res = {
+        "symbol": sym,
+        "trend_1d": "NEUTRAL",
+        "ema20_1d": 0.0, "ema50_1d": 0.0, "rsi_1d": 50.0,
+        "trend_4h": "NEUTRAL",
+        "ema20_4h": 0.0, "ema50_4h": 0.0, "structure_4h": "RANGE",
+        "trend_1h": "NEUTRAL",
+        "ema20_1h": 0.0, "ema50_1h": 0.0,
+        "macro_bias": "NEUTRAL",
+        "score": 0,
+        "swing_eligible_long": False,
+        "swing_eligible_short": False,
+    }
+
+    score = 0
+
+    # 1. Daily (1D) Analysis
+    if len(c_1d) >= 15:
+        closes_1d = [float(c["close"]) for c in c_1d]
+        cur_1d = closes_1d[-1]
+        ema20_1d = _calc_ema(closes_1d, 20)
+        ema50_1d = _calc_ema(closes_1d, min(50, len(closes_1d)))
+        rsi_1d = _calc_rsi(closes_1d, 14)
+
+        res["ema20_1d"] = round(ema20_1d, 2)
+        res["ema50_1d"] = round(ema50_1d, 2)
+        res["rsi_1d"] = round(rsi_1d, 1)
+
+        if cur_1d > ema50_1d and ema20_1d >= ema50_1d:
+            res["trend_1d"] = "BULLISH"
+            score += 2
+        elif cur_1d < ema50_1d and ema20_1d <= ema50_1d:
+            res["trend_1d"] = "BEARISH"
+            score -= 2
+        elif cur_1d > ema20_1d:
+            res["trend_1d"] = "MILD_BULL"
+            score += 1
+        elif cur_1d < ema20_1d:
+            res["trend_1d"] = "MILD_BEAR"
+            score -= 1
+
+    # 2. 4-Hour (4H) Intermediate Structure
+    if len(c_4h) >= 12:
+        closes_4h = [float(c["close"]) for c in c_4h]
+        cur_4h = closes_4h[-1]
+        ema20_4h = _calc_ema(closes_4h, 20)
+        ema50_4h = _calc_ema(closes_4h, min(50, len(closes_4h)))
+
+        res["ema20_4h"] = round(ema20_4h, 2)
+        res["ema50_4h"] = round(ema50_4h, 2)
+
+        highs = [float(c["high"]) for c in c_4h[-12:]]
+        lows = [float(c["low"]) for c in c_4h[-12:]]
+        recent_h = max(highs[-6:])
+        prev_h = max(highs[:6])
+        recent_l = min(lows[-6:])
+        prev_l = min(lows[:6])
+
+        if recent_h > prev_h and recent_l > prev_l:
+            res["structure_4h"] = "BULL_EXPANSION"
+            score += 1
+        elif recent_h < prev_h and recent_l < prev_l:
+            res["structure_4h"] = "BEAR_EXPANSION"
+            score -= 1
+
+        if cur_4h > ema20_4h > ema50_4h:
+            res["trend_4h"] = "BULLISH"
+            score += 1
+        elif cur_4h < ema20_4h < ema50_4h:
+            res["trend_4h"] = "BEARISH"
+            score -= 1
+
+    # 3. 1-Hour (1H) Setup Analysis
+    if len(c_1h) >= 12:
+        closes_1h = [float(c["close"]) for c in c_1h]
+        cur_1h = closes_1h[-1]
+        ema20_1h = _calc_ema(closes_1h, 20)
+        ema50_1h = _calc_ema(closes_1h, min(50, len(closes_1h)))
+
+        res["ema20_1h"] = round(ema20_1h, 2)
+        res["ema50_1h"] = round(ema50_1h, 2)
+
+        if cur_1h > ema20_1h:
+            res["trend_1h"] = "BULLISH"
+            score += 1
+        elif cur_1h < ema20_1h:
+            res["trend_1h"] = "BEARISH"
+            score -= 1
+
+    res["score"] = score
+    if score >= 3:
+        res["macro_bias"] = "STRONG_BULL"
+        res["swing_eligible_long"] = True
+    elif score in (1, 2):
+        res["macro_bias"] = "MOD_BULL"
+        res["swing_eligible_long"] = (res["trend_1d"] in ("BULLISH", "MILD_BULL") and res["trend_4h"] == "BULLISH")
+    elif score in (-1, -2):
+        res["macro_bias"] = "MOD_BEAR"
+        res["swing_eligible_short"] = (res["trend_1d"] in ("BEARISH", "MILD_BEAR") and res["trend_4h"] == "BEARISH")
+    elif score <= -3:
+        res["macro_bias"] = "STRONG_BEAR"
+        res["swing_eligible_short"] = True
+    else:
+        res["macro_bias"] = "NEUTRAL"
+
+    symbol_macro_structure[sym] = res
+    return res
 
 # Backward compatibility pointers
 candles_5m  = symbol_candles_5m[PRIMARY_SYMBOL]
 candles_15m = symbol_candles_15m[PRIMARY_SYMBOL]
 candles_1h  = symbol_candles_1h[PRIMARY_SYMBOL]
 candles_4h  = symbol_candles_4h[PRIMARY_SYMBOL]
+candles_1d  = symbol_candles_1d[PRIMARY_SYMBOL]
 live_candle = symbol_live_candle[PRIMARY_SYMBOL]
 cur_min_ts  = 0
 acc_1m      = symbol_acc_1m[PRIMARY_SYMBOL]
 acc_5m_15m  = symbol_acc_5m_15m[PRIMARY_SYMBOL]
 acc_15m_1h  = symbol_acc_15m_1h[PRIMARY_SYMBOL]
 acc_1h_4h   = symbol_acc_1h_4h[PRIMARY_SYMBOL]
+acc_4h_1d   = symbol_acc_4h_1d[PRIMARY_SYMBOL]
 
 # Per-symbol signal engines and momentum engines
 signal_engines: dict[str, LiveSignalEngine] = {}
@@ -525,47 +696,83 @@ def can_trade_symbol(symbol: str = SYMBOL, direction: str = "LONG") -> tuple[boo
     blackout, blackout_reason = news_guard.is_blackout(sym)
     if blackout:
         return False, f"NEWS BLACKOUT: {blackout_reason}"
+
+    # ── Macro Market Structure Filter (1D & 4H Trend Alignment) ──
+    macro = symbol_macro_structure.get(sym)
+    if macro:
+        if dir_upper == "LONG" and macro.get("macro_bias") == "STRONG_BEAR":
+            return False, f"MACRO SHIELD: {sym} Strong Bear Macro (1D/4H aligned down)"
+        elif dir_upper == "SHORT" and macro.get("macro_bias") == "STRONG_BULL":
+            return False, f"MACRO SHIELD: {sym} Strong Bull Macro (1D/4H aligned up)"
+
     return True, "CLEAR"
 
 def can_trade() -> tuple[bool, str]:
     return can_trade_symbol(PRIMARY_SYMBOL, "LONG")
 
-# ─── STRUCTURAL SL ────────────────────────────────────────────────────────────
-def find_sl(direction: str, entry: float, symbol: str = SYMBOL) -> tuple[float, float]:
+# ─── STRUCTURAL SL (DUAL HORIZON: SCALP vs SWING) ────────────────────────────
+def find_sl(direction: str, entry: float, symbol: str = SYMBOL, trade_mode: str = "SCALP") -> tuple[float, float]:
     sym = symbol.upper()
     sym_reg = symbol_regime_info.get(sym, regime_info)
     atr = max(sym_reg.get("atr", 10.0), 1.0)
+    is_swing = (trade_mode == "SWING")
 
-    # Asset-adaptive ATR bounds
+    # Asset & Horizon Adaptive ATR bounds
     if "ETH" in sym:
-        min_sl = max(8.0, entry * 0.0035)
-        max_sl = min(35.0, entry * 0.012)
+        if is_swing:
+            min_sl = max(22.0, entry * 0.010)
+            max_sl = min(55.0, entry * 0.025)
+        else:
+            min_sl = max(8.0, entry * 0.0035)
+            max_sl = min(25.0, entry * 0.010)
     elif "GOLD" in sym or "XAU" in sym or "PAXG" in sym:
-        min_sl = max(4.0, entry * 0.0015)
-        max_sl = min(15.0, entry * 0.005)
+        if is_swing:
+            min_sl = max(8.0, entry * 0.0025)
+            max_sl = min(22.0, entry * 0.006)
+        else:
+            min_sl = max(4.0, entry * 0.0015)
+            max_sl = min(12.0, entry * 0.004)
     else:  # BTC
-        min_sl = max(160.0, atr * 1.5)
-        max_sl = min(550.0, atr * 3.5)
-
-    c_5m = symbol_candles_5m.get(sym, candles_5m)
-    c_15m = symbol_candles_15m.get(sym, candles_15m)
+        if is_swing:
+            min_sl = max(380.0, atr * 4.0)
+            max_sl = min(850.0, atr * 8.0)
+        else:
+            min_sl = max(160.0, atr * 1.5)
+            max_sl = min(400.0, atr * 3.5)
 
     candidates = []
-    data_15m = list(c_15m)[-25:]
-    if len(data_15m) >= 5:
-        if direction == "LONG":
-            candidates.append(min(c["low"] for c in data_15m[-12:]))
-        else:
-            candidates.append(max(c["high"] for c in data_15m[-12:]))
 
-    data = list(c_5m)[-40:]
-    if len(data) >= 10:
-        if direction == "LONG":
-            candidates.append(min(c["low"] for c in data[-20:]))
-            candidates.append(min(c["low"] for c in data[-10:]))
-        else:
-            candidates.append(max(c["high"] for c in data[-20:]))
-            candidates.append(max(c["high"] for c in data[-10:]))
+    if is_swing:
+        # Swing stops anchor to 1H and 4H structural pivots
+        c_1h = list(symbol_candles_1h.get(sym, []))[-15:]
+        c_4h = list(symbol_candles_4h.get(sym, []))[-8:]
+        if c_1h:
+            if direction == "LONG":
+                candidates.append(min(float(c["low"]) for c in c_1h))
+            else:
+                candidates.append(max(float(c["high"]) for c in c_1h))
+        if c_4h:
+            if direction == "LONG":
+                candidates.append(min(float(c["low"]) for c in c_4h))
+            else:
+                candidates.append(max(float(c["high"]) for c in c_4h))
+    else:
+        # Scalp stops anchor to 5m and 15m micro pivots
+        c_15m = list(symbol_candles_15m.get(sym, candles_15m))[-25:]
+        if len(c_15m) >= 5:
+            if direction == "LONG":
+                candidates.append(min(float(c["low"]) for c in c_15m[-12:]))
+            else:
+                candidates.append(max(float(c["high"]) for c in c_15m[-12:]))
+
+        c_5m = list(symbol_candles_5m.get(sym, candles_5m))[-40:]
+        if len(c_5m) >= 10:
+            if direction == "LONG":
+                candidates.append(min(float(c["low"]) for c in c_5m[-20:]))
+                candidates.append(min(float(c["low"]) for c in c_5m[-10:]))
+            else:
+                candidates.append(max(float(c["high"]) for c in c_5m[-20:]))
+                candidates.append(max(float(c["high"]) for c in c_5m[-10:]))
 
     if direction == "LONG":
         valid = [c for c in candidates if c < entry and (entry - c) >= min_sl]
@@ -648,17 +855,39 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL):
     if entry <= 0: entry = mkt.get("ltp", 0.0)
     if entry <= 0: return
 
-    sl_price, sl_dist = find_sl(direction, entry, symbol=sym)
+    # ── DUAL-HORIZON TRADE CLASSIFICATION: SWING vs PRECISION SCALP ──
+    macro = compute_macro_structure(sym)
+    is_ranging = "ranging" in str(signal.regime).lower()
+
+    # Swing criteria: Trending regime + High Conviction + Macro 1D/4H Alignment
+    is_swing = False
+    if not is_ranging and prob >= 0.62 and council >= 0.70:
+        if direction == "LONG" and macro.get("swing_eligible_long", False):
+            is_swing = True
+        elif direction == "SHORT" and macro.get("swing_eligible_short", False):
+            is_swing = True
+
+    trade_mode = "SWING" if is_swing else "SCALP"
+
+    sl_price, sl_dist = find_sl(direction, entry, symbol=sym, trade_mode=trade_mode)
     if sl_dist <= 0: return
 
-    # Dynamic Regime-Adaptive TP Brackets
-    is_ranging = "ranging" in str(signal.regime).lower()
-    if is_ranging:
-        tp1_rr = 1.6
-        tp2_rr = 2.4
+    # ── VOLATILITY & HORIZON ADAPTIVE TARGETS (Regime-Adaptive R:R) ──
+    if trade_mode == "SWING":
+        tp1_rr = 2.5
+        tp2_rr = 5.0 if council >= 0.80 else 4.5
+        max_duration_min = 2880.0  # 48 hours for swing trades
+        adverse_decay_min = 720.0  # 12 hours adverse hold
     else:
-        tp1_rr = 1.8 if council < 0.75 else 2.0
-        tp2_rr = 3.5 if council >= 0.85 else (3.0 if council >= 0.70 else MIN_RR)
+        # Precision SCALP
+        max_duration_min = 360.0   # 6 hours
+        adverse_decay_min = 240.0  # 4 hours
+        if is_ranging:
+            tp1_rr = 1.5
+            tp2_rr = 2.2 if "low_vol" in str(signal.regime).lower() else 2.4
+        else:
+            tp1_rr = 1.8 if council < 0.75 else 2.0
+            tp2_rr = 3.5 if council >= 0.85 else (3.2 if council >= 0.70 else MIN_RR)
 
     tp1 = round(entry + sl_dist * tp1_rr if direction == "LONG" else entry - sl_dist * tp1_rr, 2)
     tp2 = round(entry + sl_dist * tp2_rr if direction == "LONG" else entry - sl_dist * tp2_rr, 2)
@@ -700,10 +929,13 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL):
     port.update({
         "symbol": sym,
         "position": "OPEN", "direction": direction,
+        "trade_mode": trade_mode,
         "entry_price": entry, "entry_time": now_t,
         "sl_price": sl_price, "sl_distance": sl_dist,
         "tp1_price": tp1, "tp2_price": tp2,
         "tp1_rr": tp1_rr, "tp2_rr": tp2_rr,
+        "max_duration_min": max_duration_min,
+        "adverse_decay_min": adverse_decay_min,
         "risk_tier": 0,
         "entry_lots": entry_lots, "risk_usd": risk_usd,
         "notional": notional, "initial_notional": notional,
@@ -720,7 +952,8 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL):
     last_signal = signal
 
     council_str = f"Council:{council:.2f}" if signal.council_approved else f"Council:OVERRIDE({council:.2f})"
-    log = (f"[{now_str}] OPEN {action} {sym} @${entry:,.1f} | "
+    mode_tag = f"[{trade_mode}]"
+    log = (f"[{now_str}] OPEN {action} {sym} {mode_tag} @${entry:,.1f} | "
            f"SL:${sl_price:,.1f}(${sl_dist:.1f}) TP2:${tp2:,.1f}({tp2_rr:.1f}R) | "
            f"Prob:{prob:.3f} {council_str} Risk:${risk_usd:.2f} ({entry_lots:.2f} lots)")
     trade_log.append(log)
@@ -728,6 +961,7 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL):
     send_challenge_alert("OPEN", {
         "symbol": sym,
         "action": action,
+        "trade_mode": trade_mode,
         "price": entry,
         "sl": sl_price,
         "tp2": tp2,
@@ -741,7 +975,9 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL):
         "id": len(trade_journal)+1,
         "open_ts": datetime.datetime.now().isoformat(),
         "symbol": sym,
-        "action": action, "entry_price": entry,
+        "action": action,
+        "trade_mode": trade_mode,
+        "entry_price": entry,
         "sl_price": sl_price, "tp1_price": tp1, "tp2_price": tp2,
         "sl_dist": sl_dist, "notional": notional, "risk_usd": risk_usd,
         "lots": entry_lots,
@@ -993,15 +1229,17 @@ def _check_exit_for_symbol(sym: str):
         except Exception:
             pass
 
-    # ── DYNAMIC TIER 3: Partial TP at TP1 ──
+    # ── DYNAMIC TIER 3: Partial TP at TP1 (Horizon Adaptive: 40% Swing / 50% Scalp) ──
+    is_swing = (port.get("trade_mode") == "SWING")
     if port["phase"] == 1:
         hit = (direction=="LONG" and cur>=tp1) or (direction=="SHORT" and cur<=tp1)
         if hit:
-            partial = port["unrealized_pnl"] * 0.50
+            part_frac = 0.40 if is_swing else 0.50
+            partial = port["unrealized_pnl"] * part_frac
             port["banked_pnl"] += partial
             account["balance"]      += partial
             update_health()
-            port["notional"]   *= 0.50
+            port["notional"]   *= (1.0 - part_frac)
             fee_buf = entry * (ROUNDTRIP_BPS * 1.5 / 10000.0)
             port["sl_price"] = entry + fee_buf if direction=="LONG" else entry - fee_buf
             port["phase"] = 2
@@ -1009,18 +1247,18 @@ def _check_exit_for_symbol(sym: str):
             if PROP_FIRM_MODE and prop_firm_manager:
                 prop_firm_manager.on_trade_closed(partial, "TP1 PARTIAL")
 
-            log_msg = f"[{now_str}] {sym} TP1 HIT (+{port.get('tp1_rr', 2.0):.1f}R) +${partial:.2f} | 50% locked, SL→BE"
+            log_msg = f"[{now_str}] {sym} [{port.get('trade_mode','SCALP')}] TP1 HIT (+{port.get('tp1_rr', 2.0):.1f}R) +${partial:.2f} | {int(part_frac*100)}% locked, SL→BE"
             trade_log.append(log_msg)
             if HEADLESS: print(f"  ⚡ {log_msg}", flush=True)
-            send_challenge_alert("TP1 HIT (50% BANKED)", {
+            send_challenge_alert("TP1 HIT (LOCKED)", {
                 "symbol": sym, "action": direction, "price": cur, "pnl_usd": partial,
-                "reason": f"+{port.get('tp1_rr', 2.0):.1f}R TP1",
+                "reason": f"+{port.get('tp1_rr', 2.0):.1f}R TP1 ({port.get('trade_mode','SCALP')})",
             })
 
             # ── Execute Physical Partial Close on Broker (MT5) ──
             if DEMO_MODE and _active_broker is not None and t_id:
                 cur_vol = port.get("entry_lots", 0.0)
-                part_vol = round(cur_vol * 0.50, 2)
+                part_vol = round(cur_vol * part_frac, 2)
                 min_step = 0.02 if "ETH" in sym else 0.01
                 part_vol = max(min_step, part_vol)
                 new_be_sl = port["sl_price"]
@@ -1041,7 +1279,7 @@ def _check_exit_for_symbol(sym: str):
 
     # ── DYNAMIC TIER 4: Dynamic Runner Chandelier Trail + Full TP2 + Stagnant Runner Harvest ──
     if port["phase"] == 2:
-        if r_mult >= 1.0 and dur_min >= 75.0:
+        if not is_swing and r_mult >= 1.0 and dur_min >= 75.0:
             try:
                 m_eng = momentum_engines.get(sym, momentum_eng)
                 mom_d = m_eng.get_diagnostics()
@@ -1052,7 +1290,11 @@ def _check_exit_for_symbol(sym: str):
             except Exception:
                 pass
 
-        trail_buf = max(atr * 2.0, 10.0 if "ETH" in sym else (5.0 if "GOLD" in sym else 160.0))
+        if is_swing:
+            trail_buf = max(atr * 3.5, 25.0 if "ETH" in sym else (10.0 if "GOLD" in sym else 400.0))
+        else:
+            trail_buf = max(atr * 2.0, 10.0 if "ETH" in sym else (5.0 if "GOLD" in sym else 160.0))
+
         if direction == "LONG":
             new_sl = cur - trail_buf
             if new_sl > port["sl_price"]:
@@ -1070,7 +1312,7 @@ def _check_exit_for_symbol(sym: str):
                         _aio.get_event_loop().create_task(_ratchet_sl(t_id, port["sl_price"], port["tp2_price"]))
                     except Exception:
                         pass
-            if cur >= tp2: close(cur, f"FULL TP2 ({port.get('tp2_rr', 3.5):.1f}R)"); return
+            if cur >= tp2: close(cur, f"FULL TP2 ({port.get('tp2_rr', 3.5):.1f}R [{port.get('trade_mode','SCALP')}])"); return
         else:
             new_sl = cur + trail_buf
             if new_sl < port["sl_price"]:
@@ -1088,12 +1330,17 @@ def _check_exit_for_symbol(sym: str):
                         _aio.get_event_loop().create_task(_ratchet_sl(t_id, port["sl_price"], port["tp2_price"]))
                     except Exception:
                         pass
-            if cur <= tp2: close(cur, f"FULL TP2 ({port.get('tp2_rr', 3.5):.1f}R)"); return
+            if cur <= tp2: close(cur, f"FULL TP2 ({port.get('tp2_rr', 3.5):.1f}R [{port.get('trade_mode','SCALP')}])"); return
 
-    # 4. Time decay
-    if dur_min > 360: close(cur, "MAX DURATION 6h"); return
-    if dur_min > 240 and port["phase"] == 1 and port["unrealized_pnl"] < 0:
-        close(cur, "TIME DECAY 4h adverse"); return
+    # 4. Time decay (Horizon-adaptive)
+    max_dur = port.get("max_duration_min", 360.0)
+    adv_dur = port.get("adverse_decay_min", 240.0)
+    if dur_min > max_dur:
+        close(cur, f"MAX DURATION {max_dur/60:.0f}h ({port.get('trade_mode', 'SCALP')})")
+        return
+    if dur_min > adv_dur and port["phase"] == 1 and port["unrealized_pnl"] < 0:
+        close(cur, f"TIME DECAY {adv_dur/60:.0f}h adverse ({port.get('trade_mode', 'SCALP')})")
+        return
 
     # 5. Model-halt exit
     sym_eng = signal_engines.get(sym, signal_engine)
@@ -1152,7 +1399,9 @@ async def _candle_worker():
                     regime_info["current"] = sig.regime
                     regime_info["atr"]     = sig.atr
 
-                ok, reason = can_trade_symbol(sym)
+                compute_macro_structure(sym)
+                direction = "LONG" if sig.direction == "BUY" else "SHORT"
+                ok, reason = can_trade_symbol(sym, direction)
                 sym_port = portfolios.get(sym, portfolio)
                 if sym_port["position"] == "FLAT" and ok:
                     if sig.council_approved and sig.direction in ("BUY", "SELL"):
@@ -1160,7 +1409,7 @@ async def _candle_worker():
                 elif sym_port["position"] == "FLAT" and sig.council_approved and sig.direction in ("BUY", "SELL"):
                     # P3: Approved but gated — track for dashboard
                     last_gate_rejection["reason"] = f"[{sym}] {reason}"
-                    last_gate_rejection["signal"] = f"[{sym}] " + ("LONG" if sig.direction == "BUY" else "SHORT") + f" p={sig.conviction:.3f}"
+                    last_gate_rejection["signal"] = f"[{sym}] {direction} p={sig.conviction:.3f}"
                     last_gate_rejection["ts"] = time.time()
         except Exception:
             pass
@@ -1399,7 +1648,8 @@ def prewarm():
         raw5m = fetch_klines(sym, "5m", 210)
         raw15m = fetch_klines(sym, "15m", 100)
         raw1h = fetch_klines(sym, "1h", 72)
-        raw4h = fetch_klines(sym, "4h", 40)
+        raw4h = fetch_klines(sym, "4h", 48)
+        raw1d = fetch_klines(sym, "1d", 60)
 
         if not raw5m:
             print(f"  ⚠️ Warning: Could not fetch 5m candles for {sym}, starting with empty buffer")
@@ -1438,8 +1688,15 @@ def prewarm():
             symbol_candles_4h[sym].append(c)
             if sym == PRIMARY_SYMBOL:
                 candles_4h.append(c)
+        for c in (raw1d or []):
+            symbol_candles_1d[sym].append(c)
+            if sym == PRIMARY_SYMBOL:
+                candles_1d.append(c)
 
-        print(f"  ✓ [{sym}] Buffers ready: 5m={len(symbol_candles_5m[sym])}, 15m={len(symbol_candles_15m[sym])}, 1h={len(symbol_candles_1h[sym])}")
+        macro = compute_macro_structure(sym)
+        bias_str = macro.get("macro_bias", "NEUTRAL")
+        print(f"  ✓ [{sym}] Buffers ready: 5m={len(symbol_candles_5m[sym])}, 15m={len(symbol_candles_15m[sym])}, 1h={len(symbol_candles_1h[sym])}, 4h={len(symbol_candles_4h[sym])}, 1d={len(symbol_candles_1d[sym])}")
+        print(f"    Macro Bias: {bias_str} (1D:{macro['trend_1d']}, 4H:{macro['trend_4h']}, 1H:{macro['trend_1h']})")
 
     _loaded_model_count = total_models_loaded
     regime_info["atr"] = 200.0  # Default until first signal
@@ -1566,8 +1823,9 @@ def render():
         target_str = f"+${pf['current_profit_usd']:.2f} / +${pf['target_usd']:.0f} ({pf['progress_pct']:.1f}%)"
         daily_loss_str = f"-${abs(min(0.0, pf['daily_pnl_usd'])):.2f} / -${pf['daily_limit_usd']:.0f} ({pf['daily_loss_used_pct']:.0f}% used)"
         dd_str = f"-${pf['total_dd_usd']:.2f} / -${pf['max_dd_usd']:.0f} ({pf['total_dd_pct']:.1f}%)"
+        sl_badge = f"  │  {YLW}⚡ SOFT-LANDING (Tapered Risk){R}" if pf.get("soft_landing_active") else ""
         buf.append(DIV)
-        buf.append(row(f"{BOLD}{YLW}🏆 PROP FIRM CHALLENGE [{pf['challenge_name']}]:{R}  Status: {pf_st_c}{pf['status']}{R}"))
+        buf.append(row(f"{BOLD}{YLW}🏆 PROP FIRM CHALLENGE [{pf['challenge_name']}]:{R}  Status: {pf_st_c}{pf['status']}{R}{sl_badge}"))
         buf.append(row(f" Virtual Equity: {BOLD}${pf['virtual_balance']:,.2f}{R}  │  Target: {GRN}{target_str}{R}"))
         buf.append(row(f" Daily Loss: {daily_loss_str}  │  Max DD: {dd_str}"))
     buf.append(DIV)
@@ -1589,7 +1847,8 @@ def render():
             d_c = GRN if d == "LONG" else RED
             pnl = p.get("broker_pnl") if p.get("broker_ticket") else p.get("unrealized_pnl", 0.0)
             pnl_c = GRN if pnl >= 0 else RED
-            pos_str = f"{d_c}{BOLD}{d}{R} ({pnl_c}${pnl:+.2f}{R})"
+            mode_tag = f"[{p.get('trade_mode','SCALP')[:2]}]"
+            pos_str = f"{d_c}{BOLD}{d}{R}{mode_tag}({pnl_c}${pnl:+.2f}{R})"
         else:
             pos_str = f"{GRY}FLAT{R}"
 
@@ -1611,6 +1870,19 @@ def render():
         reg_display = f"{reg_short} (${atr:.1f})"
 
         buf.append(row(f" {BOLD}{sym:<8}{R} {ltp_str:>10} │ {pos_str:<25} │ L:{pl_c}{pl:.3f}{R} S:{ps_c}{ps:.3f}{R} │ {mom_display:<24} │ {reg_display:<18}"))
+
+    # Higher-Timeframe Macro Market Structure Row
+    macro_items = []
+    for s_m in TRADED_SYMBOLS:
+        ms = symbol_macro_structure.get(s_m, {})
+        bias = ms.get("macro_bias", "NEUTRAL")
+        b_c = GRN if "BULL" in bias else (RED if "BEAR" in bias else GRY)
+        s_lbl = "GOLD" if "PAXG" in s_m else s_m.replace("USDT", "")
+        a1d = "▲" if "BULL" in ms.get("trend_1d", "") else ("▼" if "BEAR" in ms.get("trend_1d", "") else "▬")
+        a4h = "▲" if "BULL" in ms.get("trend_4h", "") else ("▼" if "BEAR" in ms.get("trend_4h", "") else "▬")
+        bias_short = bias.replace("STRONG_", "STR_")
+        macro_items.append(f"{BOLD}{s_lbl}:{R} 1D:{a1d} 4H:{a4h} ({b_c}{bias_short}{R})")
+    buf.append(row(f" {BOLD}{CYN}MACRO (1D/4H):{R} {' │ '.join(macro_items)}"))
     buf.append(DIV)
 
     # 3. ACTIVE POSITIONS & PORTFOLIO RISK POOL SUPERVISOR
@@ -1621,12 +1893,12 @@ def render():
     corr_str = "CLEAR"
     if any(p.get("symbol") == "BTCUSDT" and p.get("position") == "OPEN" for p in portfolios.values()):
         btc_dir = portfolios["BTCUSDT"]["direction"]
-        corr_str = f"BTC {btc_dir} (ETH {btc_dir} Shielded)"
+        corr_str = f"BTC {btc_dir} (ETH Shielded)"
     elif any(p.get("symbol") == "ETHUSDT" and p.get("position") == "OPEN" for p in portfolios.values()):
         eth_dir = portfolios["ETHUSDT"]["direction"]
-        corr_str = f"ETH {eth_dir} (BTC {eth_dir} Shielded)"
+        corr_str = f"ETH {eth_dir} (BTC Shielded)"
 
-    risk_pool_str = f"Positions: {open_count}/2 max  │  Open Risk: ${open_risk:.2f}/$50.00 max  │  Correlation Shield: {corr_str}"
+    risk_pool_str = f"Positions: {open_count}/2 max  │  Open Risk: ${open_risk:.2f}/$50.00  │  Shield: {corr_str}"
     buf.append(row(f" {risk_pool_str}"))
 
     if open_ports:
@@ -1644,10 +1916,11 @@ def render():
             t_id = op.get("broker_ticket", "PAPER")
             ph = "FULL" if op.get("phase") == 1 else "RUNNER(50%)"
             dur = (time.time() - op.get("entry_time", time.time())) / 60.0
-            buf.append(row(f"  ► {BOLD}{sym_o}{R}: {d_c}{BOLD}{d}{R} {lots}L @${entry:,.1f} │ PnL: {pnl_c}{BOLD}${pnl_val:+.2f}{R} │ Phase:{ph} │ Age:{dur:.0f}m │ Ticket:#{t_id}"))
-            buf.append(row(f"    SL:${sl_p:,.1f} │ TP1:${tp1_p:,.1f} │ TP2:${tp2_p:,.1f} │ P:{op.get('prob',0.0):.3f} Cncl:{op.get('council_score',0.0):.2f}"))
+            mode_tag = f"[{op.get('trade_mode', 'SCALP')}]"
+            buf.append(row(f"  ► {BOLD}{sym_o}{R}: {d_c}{BOLD}{d}{R} {mode_tag} {lots}L @${entry:,.1f} │ PnL: {pnl_c}{BOLD}${pnl_val:+.2f}{R} │ Phase:{ph} │ Age:{dur:.0f}m │ Ticket:#{t_id}"))
+            buf.append(row(f"    SL:${sl_p:,.1f} │ TP1:${tp1_p:,.1f}({op.get('tp1_rr', 1.8):.1f}R) │ TP2:${tp2_p:,.1f}({op.get('tp2_rr', 3.5):.1f}R) │ P:{op.get('prob',0.0):.3f} Cncl:{op.get('council_score',0.0):.2f}"))
     else:
-        buf.append(row(f"  {GRY}► All assets FLAT — Monitoring 5m candles across 3 symbols for Council-approved entry (p ≥ {MIN_PROB:.2f}){R}"))
+        buf.append(row(f"  {GRY}► All assets FLAT — Monitoring 5m candles (Dual Scalp/Swing) across 3 symbols for Council entry{R}"))
     buf.append(DIV)
 
     # 4. LAST SIGNAL & GATE REJECTION
@@ -1821,6 +2094,18 @@ async def binance_ws():
                                                     symbol_candles_4h[sym].append(dict(c4h))
                                                     if sym == PRIMARY_SYMBOL:
                                                         candles_4h.append(dict(c4h))
+                                                    acc1d = symbol_acc_4h_1d.get(sym)
+                                                    if acc1d is not None:
+                                                        acc1d.append(dict(c4h))
+                                                        if len(acc1d) >= 6:
+                                                            c1d = {"open": acc1d[0]["open"], "high": max(x["high"] for x in acc1d),
+                                                                   "low": min(x["low"] for x in acc1d), "close": acc1d[-1]["close"],
+                                                                   "volume": sum(x["volume"] for x in acc1d), "timestamp": int(k["t"])}
+                                                            acc1d.clear()
+                                                            symbol_candles_1d[sym].append(dict(c1d))
+                                                            if sym == PRIMARY_SYMBOL:
+                                                                candles_1d.append(dict(c1d))
+                                                    compute_macro_structure(sym)
 
                             if _candle_queue is not None:
                                 try:
