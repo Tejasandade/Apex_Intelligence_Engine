@@ -8,6 +8,7 @@
 title APEX Intelligence Engine v7.2
 
 set ROOT=%~dp0
+cd /d "%ROOT%"
 set PYTHON=%ROOT%venv\Scripts\python.exe
 
 echo.
