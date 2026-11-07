@@ -174,9 +174,11 @@ class PropFirmManager:
         conviction: float = 0.60,
         council_score: float = 0.65,
         consecutive_losses: int = 0,
+        symbol: str = "BTCUSDT",
     ) -> tuple[float, float]:
         """
         Calculate exact lot size anchored to the Prop Firm challenge rules.
+        Dynamically adapts contract size and minimum volume for BTC, ETH, and GOLD.
         Returns: (lots, risk_usd)
         """
         if sl_distance <= 0 or price <= 0:
@@ -198,13 +200,41 @@ class PropFirmManager:
         if remaining_daily_budget > 0:
             risk_usd = min(risk_usd, remaining_daily_budget * 0.70)  # Max 70% of remaining daily budget on 1 trade
 
-        # Contract size for BTC is 1.0 on XM
+        # Asset-specific contract size & minimum volume defaults
+        sym_upper = str(symbol).upper()
         contract_size = 1.0
-        raw_lots = risk_usd / (sl_distance * contract_size)
-
-        # Clamp to XM broker volume step (0.01)
         step = 0.01
-        lots = max(0.01, round(raw_lots / step) * step)
+        min_v = 0.01
+
+        if "GOLD" in sym_upper or "XAU" in sym_upper or "PAXG" in sym_upper:
+            contract_size = 100.0   # 1 standard lot = 100 oz
+            min_v = 0.01
+        elif "ETH" in sym_upper:
+            contract_size = 1.0
+            min_v = 0.02           # XM minimum volume for ETHUSD# is 0.02
+        else:
+            contract_size = 1.0    # BTCUSD#
+            min_v = 0.01
+
+        # Query live MT5 broker specs if terminal is connected
+        try:
+            import MetaTrader5 as mt5
+            term = mt5.terminal_info()
+            if term and term.connected:
+                for cand in [symbol, f"{symbol}#", "GOLD.i#", "BTCUSD#", "ETHUSD#"]:
+                    s_info = mt5.symbol_info(cand)
+                    if s_info:
+                        contract_size = float(getattr(s_info, "trade_contract_size", contract_size))
+                        step = float(getattr(s_info, "volume_step", step))
+                        min_v = float(getattr(s_info, "volume_min", min_v))
+                        break
+        except Exception:
+            pass
+
+        raw_lots = risk_usd / max(sl_distance * contract_size, 0.0001)
+
+        # Clamp to broker volume step
+        lots = max(min_v, round(raw_lots / step) * step)
         lots = round(lots, 2)
 
         actual_risk_usd = round(lots * sl_distance * contract_size, 2)
@@ -319,3 +349,4 @@ class PropFirmManager:
         except Exception as e:
             logger.warn("prop_firm_state_load_failed", error=str(e))
             return False
+

@@ -127,6 +127,48 @@ def telegram(msg: str):
     except Exception:
         pass
 
+def send_challenge_alert(event_type: str, details: dict):
+    """
+    Send rich mobile notification with Prop Firm Challenge HUD to Telegram and Web UI.
+    """
+    if PROP_FIRM_MODE and prop_firm_manager:
+        pf = prop_firm_manager.get_hud_metrics()
+        cur_prof = pf.get("current_profit_usd", 0.0)
+        tgt_usd = pf.get("target_usd", 450.0)
+        prog_pct = pf.get("progress_pct", 0.0)
+        v_bal = pf.get("virtual_balance", 5000.0)
+        d_pnl = pf.get("daily_pnl_usd", 0.0)
+        d_limit = pf.get("daily_limit_usd", 150.0)
+
+        icon = "🔥" if event_type == "OPEN" else ("🎯" if "TP" in event_type else ("✅" if "CLOSED" in event_type and details.get("pnl_usd", 0) > 0 else ("❌" if "CLOSED" in event_type else "🛡️")))
+        txt = (
+            f"{icon} APEX: {event_type}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"Asset: {details.get('symbol', SYMBOL)} | Action: {details.get('action', '')} @ ${details.get('price', 0.0):,.1f}\n"
+        )
+        if details.get("lots"):
+            txt += f"Size: {details.get('lots', 0.0)} lots | Risk: ${details.get('risk_usd', 0.0):.2f}\n"
+        if details.get("sl"):
+            txt += f"SL: ${details.get('sl', 0.0):,.1f} | TP2: ${details.get('tp2', 0.0):,.1f}\n"
+        if details.get("pnl_usd") is not None:
+            pnl_s = f"+${details['pnl_usd']:.2f}" if details['pnl_usd'] >= 0 else f"-${abs(details['pnl_usd']):.2f}"
+            txt += f"Result: {pnl_s} ({details.get('reason', '')})\n"
+        if details.get("new_sl"):
+            txt += f"Updated SL: ${details.get('new_sl', 0.0):,.1f}\n"
+
+        txt += (
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🏆 SHARKFUNDED 5K CHALLENGE\n"
+            f"• Virtual Equity: ${v_bal:,.2f}\n"
+            f"• Target: {cur_prof:+.2f} / +${tgt_usd:.0f} ({prog_pct:.1f}%)\n"
+            f"• Daily PnL: {d_pnl:+.2f} / -${d_limit:.0f}\n"
+            f"• Status: {pf.get('status', 'IN_PROGRESS')}"
+        )
+    else:
+        txt = f"APEX {event_type}: {details.get('action', '')} @ ${details.get('price', 0.0):,.1f} | PnL: ${details.get('pnl_usd', 0.0):+.2f}"
+
+    telegram(txt)
+
 # Entry gates
 MIN_PROB        = _rc("conviction", "min_signal_threshold", 0.58)   # from risk.yaml
 STRONG_PROB     = 0.65      # High-conviction → full risk
@@ -364,8 +406,30 @@ def update_session():
                         else "ASIAN" if 0<=utc_h<7 else "PACIFIC")
     session["risk_mult"] = 1.0 if session["name"] in ("LONDON","NEW_YORK") else (0.75 if session["name"]=="ASIAN" else 0.6)
 
+def is_rollover_or_maintenance() -> tuple[bool, str]:
+    """
+    Detects daily broker server rollover spikes and maintenance windows.
+    Protects against artificial spread widening (e.g. 23:55-00:10 UTC on XM).
+    """
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    # 1. Daily Broker Rollover window: 23:55 UTC to 00:10 UTC
+    if (now_utc.hour == 23 and now_utc.minute >= 55) or (now_utc.hour == 0 and now_utc.minute <= 10):
+        return True, "XM DAILY ROLLOVER WINDOW (23:55-00:10 UTC) — SPREAD SHIELD"
+    # 2. Weekend Maintenance window on XM: Saturday 06:00 to 12:00 UTC
+    if now_utc.weekday() == 5 and (6 <= now_utc.hour < 12):
+        return True, "WEEKEND SERVER MAINTENANCE WINDOW — TRADING PAUSED"
+    # 3. Abnormal Broker Spread (> 12.0 bps for BTC)
+    current_spread = market.get("spread_bps", 0.0)
+    if current_spread > 12.0:
+        return True, f"ABNORMAL SPREAD ({current_spread:.1f} bps > 12.0 bps)"
+    return False, "CLEAR"
+
 def can_trade() -> tuple[bool, str]:
     now = time.time()
+    # Weekend & Daily Rollover Spread Shield (XM MT5 Protection)
+    shielded, shield_reason = is_rollover_or_maintenance()
+    if shielded:
+        return False, f"SPREAD SHIELD: {shield_reason}"
     # Prop Firm Challenge Circuit Breakers (SharkFunded Lite 5k)
     if PROP_FIRM_MODE and prop_firm_manager:
         pf_ok, pf_reason = prop_firm_manager.can_trade()
@@ -436,7 +500,7 @@ def find_sl(direction: str, entry: float) -> tuple[float, float]:
     return round(sl_price, 1), round(sl_dist, 1)
 
 # ─── SIZING ───────────────────────────────────────────────────────────────────
-def size_position(sl_dist: float, prob: float, entry: float, council_score: float = 0.7, direction: str = "LONG") -> tuple[float, float]:
+def size_position(sl_dist: float, prob: float, entry: float, council_score: float = 0.7, direction: str = "LONG", symbol: str = SYMBOL) -> tuple[float, float]:
     # ── PROP FIRM MODE: Size directly to Challenge Target & Drawdown Limits ──
     if PROP_FIRM_MODE and prop_firm_manager:
         consec = account.get("consecutive_losses", 0)
@@ -446,6 +510,7 @@ def size_position(sl_dist: float, prob: float, entry: float, council_score: floa
             conviction=prob,
             council_score=council_score,
             consecutive_losses=consec,
+            symbol=symbol,
         )
         notional = round(lots * entry, 2)
         return notional, risk_usd
@@ -578,7 +643,17 @@ def execute_signal(signal: TradingSignal):
            f"Prob:{prob:.3f} {council_str} Risk:${risk_usd:.2f} ({entry_lots:.2f} lots)")
     trade_log.append(log)
     if HEADLESS: print(f"\n🔥 TRADE EVENT: {log}", flush=True)
-    telegram(f"APEX OPEN {action} @${entry:,.0f} | SL:${sl_price:,.0f} TP2:${tp2:,.0f} | p={prob:.3f} Council:{council:.2f} | Risk:${risk_usd:.2f}")
+    send_challenge_alert("OPEN", {
+        "symbol": SYMBOL,
+        "action": action,
+        "price": entry,
+        "sl": sl_price,
+        "tp2": tp2,
+        "lots": entry_lots,
+        "risk_usd": risk_usd,
+        "prob": prob,
+        "council": council,
+    })
 
     trade_journal.append({
         "id": len(trade_journal)+1,
@@ -704,9 +779,14 @@ def check_exits():
         s = "+" if total >= 0 else ""
         trade_log.append(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] "
                          f"CLOSE @${price:,.1f} PnL:{s}${total:.2f} | {reason}")
-        # P4: Telegram on close
-        emoji = "✅" if is_win else "❌"
-        telegram(f"{emoji} APEX CLOSE @${price:,.0f} | PnL: {s}${total:.2f} | {reason} | Balance: ${account['balance']:,.2f}")
+        # P4: Rich Mobile Telegram alert on close with Prop Firm Challenge HUD
+        send_challenge_alert("TRADE CLOSED", {
+            "symbol": SYMBOL,
+            "action": direction,
+            "price": price,
+            "pnl_usd": total,
+            "reason": reason,
+        })
 
         for t in reversed(trade_journal):
             if t.get("outcome") == "OPEN":
@@ -765,6 +845,9 @@ def check_exits():
         log_msg = f"[{now_str}] DYNAMIC TIER 1 (+1.0R): Risk reduced 75% | SL tightened to -0.25R @${new_sl:,.1f}"
         trade_log.append(log_msg)
         if HEADLESS: print(f"  ⚡ {log_msg}", flush=True)
+        send_challenge_alert("RISK REDUCED 75%", {
+            "symbol": SYMBOL, "action": direction, "price": cur, "new_sl": portfolio["sl_price"],
+        })
         if DEMO_MODE and _active_broker is not None and t_id:
             async def _exec_modify_t1(ticket_id, sl_v, tp_v):
                 try:
@@ -787,6 +870,9 @@ def check_exits():
         log_msg = f"[{now_str}] DYNAMIC TIER 2 (+1.5R): SL moved to Break-Even + fees @${new_sl:,.1f} | RISK FREE"
         trade_log.append(log_msg)
         if HEADLESS: print(f"  ⚡ {log_msg}", flush=True)
+        send_challenge_alert("BREAK-EVEN LOCKED", {
+            "symbol": SYMBOL, "action": direction, "price": cur, "new_sl": portfolio["sl_price"],
+        })
         if DEMO_MODE and _active_broker is not None and t_id:
             async def _exec_modify_t2(ticket_id, sl_v, tp_v):
                 try:
@@ -833,6 +919,10 @@ def check_exits():
             log_msg = f"[{now_str}] TP1 HIT (+{portfolio.get('tp1_rr', 2.0):.1f}R) +${partial:.2f} | 50% locked, SL→BE"
             trade_log.append(log_msg)
             if HEADLESS: print(f"  ⚡ {log_msg}", flush=True)
+            send_challenge_alert("TP1 HIT (50% BANKED)", {
+                "symbol": SYMBOL, "action": direction, "price": cur, "pnl_usd": partial,
+                "reason": f"+{portfolio.get('tp1_rr', 2.0):.1f}R TP1",
+            })
 
             # ── Execute Physical Partial Close on Broker (MT5) ──
             if DEMO_MODE and _active_broker is not None and t_id:
@@ -854,8 +944,21 @@ def check_exits():
                 except Exception:
                     pass
 
-    # ── DYNAMIC TIER 4: Dynamic Runner Chandelier Trail + Full TP2 ──
+    # ── DYNAMIC TIER 4: Dynamic Runner Chandelier Trail + Full TP2 + Stagnant Runner Harvest ──
     if portfolio["phase"] == 2:
+        # ── STAGNANT RUNNER HARVEST (Improvement 1) ──
+        # If runner is floating at >= +1.0R for > 75 mins and OFI momentum has stalled (|OFI| < 0.20),
+        # lock in the additional profits at market rather than waiting to get stopped out at BE!
+        if r_mult >= 1.0 and dur_min >= 75.0:
+            try:
+                mom_d = momentum_eng.get_diagnostics()
+                ofi_val = abs(float(mom_d.get("ofi", 0.0)))
+                if ofi_val < 0.20:
+                    close(cur, f"STAGNANT RUNNER HARVEST (+{r_mult:.1f}R after {dur_min:.0f}m, OFI neutral)")
+                    return
+            except Exception:
+                pass
+
         trail_buf = max(atr * 2.0, 160.0)
         if direction == "LONG":
             new_sl = cur - trail_buf
@@ -1774,6 +1877,13 @@ async def _broker_sync_loop():
                                 s = "+" if exit_profit >= 0 else ""
                                 trade_log.append(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] "
                                                  f"CLOSE @${close_price:,.1f} PnL:{s}${exit_profit:.2f} | {reason}")
+                                send_challenge_alert("BROKER CLOSE", {
+                                    "symbol": SYMBOL,
+                                    "action": cur_dir,
+                                    "price": close_price,
+                                    "pnl_usd": exit_profit,
+                                    "reason": reason,
+                                })
                                 for t in reversed(trade_journal):
                                     if t.get("outcome") == "OPEN":
                                         t.update({"exit_ts": datetime.datetime.now().isoformat(),

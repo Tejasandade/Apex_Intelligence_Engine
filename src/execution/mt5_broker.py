@@ -155,9 +155,18 @@ class MT5Broker:
                     mt5.symbol_select(p, True)
                     return p
 
+        # Priority list for Ethereum
+        if "ETH" in t_up:
+            preferred = ["ETHUSD#", "ETHUSD", "ETHUSD.i", "ETHUSDm", "ETHUSDT"]
+            for p in preferred:
+                info = mt5.symbol_info(p)
+                if info is not None:
+                    mt5.symbol_select(p, True)
+                    return p
+
         # Priority list for Gold
-        if "GOLD" in t_up or "XAU" in t_up:
-            preferred = ["GOLD#", "GOLD", "XAUUSD#", "XAUUSD", "GOLD.i#", "GOLD.i"]
+        if "GOLD" in t_up or "XAU" in t_up or "PAXG" in t_up:
+            preferred = ["GOLD.i#", "GOLD#", "GOLD", "XAUUSD#", "XAUUSD", "GOLD.i"]
             for p in preferred:
                 info = mt5.symbol_info(p)
                 if info is not None:
