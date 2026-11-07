@@ -516,7 +516,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <section class="card">
       <div class="card-title">
         <span>TRADE EXECUTION JOURNAL</span>
-        <span class="muted" id="journal-stats">0 Trades | 0W / 0L</span>
+        <div style="display:flex; align-items:center; gap:10px;">
+          <span class="muted" id="journal-stats">0 Trades | 0W / 0L</span>
+          <a href="/api/export/journal" download="apex_trade_journal.csv" class="btn" style="text-decoration:none; padding:3px 8px; font-size:11px; background:#1e293b; color:#38bdf8; border:1px solid #334155; border-radius:4px;">📥 Export CSV</a>
+        </div>
       </div>
       <div class="table-container">
         <table>
@@ -874,6 +877,7 @@ class ApexWebServer:
         self.app.router.add_post("/api/action/toggle_pause", self.handle_toggle_pause)
         self.app.router.add_post("/api/settings/prop_firm", self.handle_prop_firm_settings)
         self.app.router.add_post("/api/settings/risk", self.handle_risk_settings)
+        self.app.router.add_get("/api/export/journal", self.handle_export_journal)
         self.app.router.add_get("/health", self.handle_health)
 
     async def handle_index(self, request: web.Request) -> web.Response:
@@ -933,6 +937,22 @@ class ApexWebServer:
             res = await self.action_handler("risk_settings", data)
             return web.json_response(res)
         return web.json_response({"error": "No action handler configured"}, status=501)
+
+    async def handle_export_journal(self, request: web.Request) -> web.Response:
+        try:
+            state = self.state_provider()
+            journal = state.get("journal", [])
+            lines = ["ID,Time,Action,Entry Price,Exit Price,PnL USD,Exit Reason"]
+            for t in journal:
+                lines.append(f"{t.get('id', '')},{t.get('open_ts', '')},{t.get('action', '')},{t.get('entry_price', 0.0)},{t.get('exit_price', 0.0)},{t.get('pnl_usd', 0.0)},\"{t.get('exit_reason', '')}\"")
+            csv_content = "\n".join(lines)
+            return web.Response(
+                text=csv_content,
+                content_type="text/csv",
+                headers={"Content-Disposition": 'attachment; filename="apex_trade_journal.csv"'}
+            )
+        except Exception as e:
+            return web.Response(text=f"Error exporting journal: {e}", status=500)
 
     async def handle_health(self, request: web.Request) -> web.Response:
         return web.json_response({"status": "ok", "service": "apex-intelligence-engine"})

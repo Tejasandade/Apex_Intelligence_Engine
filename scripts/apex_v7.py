@@ -2877,6 +2877,7 @@ async def _telegram_command_loop():
                                 reply_txt = (
                                     "⚡ *APEX 2-Way Command Center*\n\n"
                                     "📊 */status* - Real-time bot & challenge health\n"
+                                    "📈 */report* - Full performance audit & deal journal\n"
                                     "💼 */positions* - View all open positions\n"
                                     "🛑 */closeall* - Emergency flatten all positions\n"
                                     "🎯 */close <symbol>* - Close symbol (e.g. `/close btc`)\n"
@@ -2885,6 +2886,53 @@ async def _telegram_command_loop():
                                     "🏆 */propfirm [profile]* - Switch/view challenge profiles\n"
                                     "🔄 */reset* - Reset challenge balance/drawdown\n"
                                     "⚙️ */mode <prop|personal>* - Toggle Prop Firm mode"
+                                )
+
+                            elif cmd == "/report":
+                                now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                total_t = account.get("total", 0)
+                                wins = account.get("wins", 0)
+                                losses = account.get("losses", 0)
+                                wr = account.get("win_rate", 0.0)
+                                pf_val = account.get("profit_factor", 0.0)
+                                net_pnl = account.get("net_pnl", 0.0)
+                                bal = account.get("balance", 0.0)
+                                dd = account.get("drawdown_pct", 0.0)
+                                best_t = account.get("best", 0.0)
+                                worst_t = account.get("worst", 0.0)
+                                avg_w = account.get("avg_win", 0.0)
+                                avg_l = account.get("avg_loss", 0.0)
+
+                                pf_info = "Disabled (Personal Mode)"
+                                if PROP_FIRM_MODE and prop_firm_manager:
+                                    m = prop_firm_manager.get_hud_metrics()
+                                    pf_info = (
+                                        f"• Profile: *{m['name']}* [{m['status']}]\n"
+                                        f"• Target: `${m['cumulative_profit']:+,.2f}` / `${m['profit_target_usd']:,.2f}` ({m['progress_pct']}%)\n"
+                                        f"• Daily Loss: `-${m['daily_loss_used_usd']:,.2f}` / `-${m['max_daily_loss_usd']:,.2f}` ({m['daily_loss_used_pct']}%)\n"
+                                        f"• Max DD: `-${m['max_dd_used_usd']:,.2f}` / `-${m['max_loss_usd']:,.2f}`"
+                                    )
+
+                                rec_lines = []
+                                for t in reversed(trade_journal[-5:]):
+                                    t_pnl = t.get("pnl_usd", 0.0)
+                                    s_sign = "+" if t_pnl >= 0 else ""
+                                    rec_lines.append(f"• `{t.get('symbol', 'BTC')}` {t.get('action', '')} PnL: `{s_sign}${t_pnl:,.2f}` ({t.get('exit_reason', '')[:20]})")
+                                rec_block = "\n".join(rec_lines) if rec_lines else "No trades recorded yet."
+
+                                reply_txt = (
+                                    f"📈 *APEX PERFORMANCE AUDIT REPORT*\n"
+                                    f"🕒 `{now_str} IST`\n\n"
+                                    f"💰 *Account Overview:*\n"
+                                    f"• Balance: `${bal:,.2f}`\n"
+                                    f"• Net PnL: `${net_pnl:+,.2f}`\n"
+                                    f"• Peak Drawdown: `{dd:.1f}%`\n"
+                                    f"• Win Rate: `{wr}%` ({wins}W / {losses}L | Total: {total_t})\n"
+                                    f"• Profit Factor: `{pf_val:.2f}`\n"
+                                    f"• Avg Win: `${avg_w:.2f}` | Avg Loss: `${avg_l:.2f}`\n"
+                                    f"• Best: `${best_t:+.2f}` | Worst: `${worst_t:+.2f}`\n\n"
+                                    f"🏆 *Prop Firm Metrics:*\n{pf_info}\n\n"
+                                    f"📝 *Recent Closed Deals:*\n{rec_block}"
                                 )
 
                             elif cmd == "/status":
