@@ -104,7 +104,7 @@ def create_sequences(X_data: np.ndarray, y_data: np.ndarray, seq_len: int):
         return TensorDataset(torch.empty(0, seq_len, X.shape[1]), torch.empty(0))
         
     X_seq = X.unfold(0, seq_len, 1).transpose(1, 2)
-    y_seq = y[seq_len:]
+    y_seq = y[seq_len - 1:]
     return TensorDataset(X_seq, y_seq)
 
 

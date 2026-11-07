@@ -38,44 +38,68 @@ class MicrostructureEngine:
         self._cvd_running += delta
         self._deltas.append((price, delta))
 
-    def evaluate(self, direction: str) -> tuple[float, str]:
+    def evaluate(self, direction: str, obi: float = 0.0) -> tuple[float, str]:
         """
-        Evaluate if current order flow delta confirms direction or signals an absorption trap.
+        Evaluate if current order flow delta confirms direction or signals an absorption trap,
+        and incorporate L2 Order Book Imbalance (OBI).
         Returns: (conviction_delta: float, summary: str)
         """
-        if len(self._deltas) < 100:
-            return 0.0, "CVD warming up"
-
-        recent = list(self._deltas)[-300:]
-        p_now = recent[-1][0]
-        p_first = recent[0][0]
-        p_change_pct = ((p_now - p_first) / max(p_first, 0.001)) * 100.0
-
-        delta_sum = sum(d[1] for d in recent)
-        total_vol = sum(abs(d[1]) for d in recent)
-        delta_ratio = delta_sum / max(total_vol, 0.0001)
-
         dir_u = direction.upper()
+        delta_score = 0.0
+        reasons = []
 
-        # 1. Delta Confirmation
-        if dir_u in ("BUY", "LONG") and delta_ratio > 0.20 and p_change_pct > 0:
-            return +0.04, f"CVD Confirmation (Delta +{delta_ratio:.0%})"
-        if dir_u in ("SELL", "SHORT") and delta_ratio < -0.20 and p_change_pct < 0:
-            return +0.04, f"CVD Confirmation (Delta {delta_ratio:.0%})"
+        if len(self._deltas) >= 100:
+            recent = list(self._deltas)[-300:]
+            p_now = recent[-1][0]
+            p_first = recent[0][0]
+            p_change_pct = ((p_now - p_first) / max(p_first, 0.001)) * 100.0
 
-        # 2. Absorption Trap Detection (Divergence)
-        # Price dropped, but buyers heavily absorbed aggressive selling (delta positive)
-        if dir_u in ("BUY", "LONG") and p_change_pct < -0.15 and delta_ratio > 0.25:
-            return +0.06, f"Bullish Absorption Trap (Sellers absorbed at lows, Delta +{delta_ratio:.0%})"
+            delta_sum = sum(d[1] for d in recent)
+            total_vol = sum(abs(d[1]) for d in recent)
+            delta_ratio = delta_sum / max(total_vol, 0.0001)
 
-        # Price rallied, but sellers heavily absorbed aggressive buying (delta negative)
-        if dir_u in ("SELL", "SHORT") and p_change_pct > 0.15 and delta_ratio < -0.25:
-            return +0.06, f"Bearish Absorption Trap (Buyers absorbed at highs, Delta {delta_ratio:.0%})"
+            # 1. Delta Confirmation
+            if dir_u in ("BUY", "LONG") and delta_ratio > 0.20 and p_change_pct > 0:
+                delta_score += 0.04
+                reasons.append(f"CVD Confirmed (+{delta_ratio:.0%})")
+            elif dir_u in ("SELL", "SHORT") and delta_ratio < -0.20 and p_change_pct < 0:
+                delta_score += 0.04
+                reasons.append(f"CVD Confirmed ({delta_ratio:.0%})")
 
-        # 3. Exhaustion Warning: Buying into negative delta
-        if dir_u in ("BUY", "LONG") and delta_ratio < -0.35:
-            return -0.05, f"Warning: Heavy Aggressive Selling (Delta {delta_ratio:.0%})"
-        if dir_u in ("SELL", "SHORT") and delta_ratio > 0.35:
-            return -0.05, f"Warning: Heavy Aggressive Buying (Delta +{delta_ratio:.0%})"
+            # 2. Absorption Trap Detection (Divergence)
+            if dir_u in ("BUY", "LONG") and p_change_pct < -0.15 and delta_ratio > 0.25:
+                delta_score += 0.06
+                reasons.append(f"Bullish Absorption Trap (+{delta_ratio:.0%})")
+            elif dir_u in ("SELL", "SHORT") and p_change_pct > 0.15 and delta_ratio < -0.25:
+                delta_score += 0.06
+                reasons.append(f"Bearish Absorption Trap ({delta_ratio:.0%})")
 
-        return 0.0, f"CVD Neutral (Delta {delta_ratio:+.0%})"
+            # 3. Exhaustion Warning: Buying into heavy negative delta
+            elif dir_u in ("BUY", "LONG") and delta_ratio < -0.35:
+                delta_score -= 0.05
+                reasons.append(f"Heavy Sell Aggression ({delta_ratio:.0%})")
+            elif dir_u in ("SELL", "SHORT") and delta_ratio > 0.35:
+                delta_score -= 0.05
+                reasons.append(f"Heavy Buy Aggression (+{delta_ratio:.0%})")
+
+        # 4. L2 Order Book Imbalance (OBI) Alignment
+        if obi != 0.0:
+            if dir_u in ("BUY", "LONG"):
+                if obi >= 0.28:
+                    delta_score += 0.03
+                    reasons.append(f"L2 Bid Support (OBI {obi:+.2f})")
+                elif obi <= -0.35:
+                    delta_score -= 0.04
+                    reasons.append(f"L2 Ask Wall Overhead (OBI {obi:+.2f})")
+            elif dir_u in ("SELL", "SHORT"):
+                if obi <= -0.28:
+                    delta_score += 0.03
+                    reasons.append(f"L2 Ask Pressure (OBI {obi:+.2f})")
+                elif obi >= 0.35:
+                    delta_score -= 0.04
+                    reasons.append(f"L2 Bid Floor (OBI {obi:+.2f})")
+
+        total_delta = round(max(-0.08, min(0.08, delta_score)), 3)
+        summary = " | ".join(reasons) if reasons else "Neutral Microstructure"
+        return total_delta, summary
+

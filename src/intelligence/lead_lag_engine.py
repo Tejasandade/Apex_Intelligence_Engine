@@ -112,3 +112,4 @@ class LeadLagEngine:
                 return +0.05, "USD Surging Headwinds for Gold"
 
         return 0.0, "NEUTRAL"
+

@@ -217,6 +217,11 @@ def get_calibrated_threshold(symbol: str, regime: str = "UNKNOWN") -> float:
         base -= 0.01
     elif s_name == "PACIFIC":
         base += 0.02
+
+    # ICT Kill Zone institutional liquidity alignment
+    if session.get("is_kill_zone", False):
+        base -= 0.01
+
     return round(float(np.clip(base, 0.54, 0.66)), 3)
 
 # Risk
@@ -655,6 +660,20 @@ def update_session():
     # Sunday Weekly Open Liquidity Expansion (Sunday 22:00 UTC to Monday 04:00 UTC)
     is_sunday_open = (weekday == 6 and utc_h >= 22) or (weekday == 0 and utc_h < 4)
     session["sunday_weekly_open"] = is_sunday_open
+
+    # ICT Institutional Kill Zones (London Open 07-09, NY Open 12-15, London Close 15:30-16:30, Asian 00-02 UTC)
+    kz_name = ""
+    if 7 <= utc_h < 9:
+        kz_name = "LONDON_OPEN_KZ"
+    elif 12 <= utc_h < 15:
+        kz_name = "NY_OPEN_KZ"
+    elif (utc_h == 15 and now_dt.minute >= 30) or (utc_h == 16 and now_dt.minute <= 30):
+        kz_name = "LONDON_CLOSE_KZ"
+    elif 0 <= utc_h < 2:
+        kz_name = "ASIAN_KZ"
+
+    session["kill_zone"] = kz_name
+    session["is_kill_zone"] = bool(kz_name)
 
     session["name"] = ("LONDON" if 7<=utc_h<13 else "NEW_YORK" if 13<=utc_h<21
                         else "ASIAN" if 0<=utc_h<7 else "PACIFIC")
@@ -1512,11 +1531,31 @@ async def _candle_worker():
                 # ── Apply Institutional Market Intelligence Synergy ──
                 liq_delta, liq_reason = liquidity_engine.evaluate_signal_synergy(sym, direction)
                 ll_delta, ll_reason = lead_lag_engine.evaluate_synergy(sym, direction)
+                
+                # Microstructure CVD & L2 Order Book Imbalance (OBI)
                 micro_delta, micro_reason = (0.0, "")
                 if sym in microstructure_engines:
-                    micro_delta, micro_reason = microstructure_engines[sym].evaluate(direction)
+                    sym_mkt = symbol_markets.get(sym, market)
+                    sym_obi = sym_mkt.get("obi", 0.0)
+                    micro_delta, micro_reason = microstructure_engines[sym].evaluate(direction, obi=sym_obi)
 
-                total_intel_delta = liq_delta + ll_delta + micro_delta
+                # Extreme Funding Squeeze & Liquidation Cascade Alpha
+                fund_pct = funding_monitor.get_funding_pct(sym)
+                fund_delta, fund_reason = (0.0, "")
+                if direction == "LONG" and fund_pct <= -0.025:
+                    fund_delta = +0.04
+                    fund_reason = f"Short Squeeze Setup (Funding {fund_pct:+.4f}%)"
+                elif direction == "SHORT" and fund_pct >= 0.040:
+                    fund_delta = +0.04
+                    fund_reason = f"Long Liquidation Cascade (Funding {fund_pct:+.4f}%)"
+                elif direction == "LONG" and fund_pct >= 0.060:
+                    fund_delta = -0.03
+                    fund_reason = f"Warning: Overcrowded Longs (Funding {fund_pct:+.4f}%)"
+                elif direction == "SHORT" and fund_pct <= -0.045:
+                    fund_delta = -0.03
+                    fund_reason = f"Warning: Overcrowded Shorts (Funding {fund_pct:+.4f}%)"
+
+                total_intel_delta = liq_delta + ll_delta + micro_delta + fund_delta
                 calibrated_conviction = round(float(np.clip(sig.conviction + total_intel_delta, 0.0, 1.0)), 4)
                 required_threshold = get_calibrated_threshold(sym, sig.regime)
 
@@ -1525,7 +1564,7 @@ async def _candle_worker():
 
                 # Check if post-intelligence conviction satisfies asset-calibrated threshold
                 if sig.conviction < required_threshold:
-                    intel_notes = [n for n in (liq_reason, ll_reason, micro_reason) if n and n != "NEUTRAL"]
+                    intel_notes = [n for n in (liq_reason, ll_reason, micro_reason, fund_reason) if n and n != "NEUTRAL"]
                     intel_str = " | ".join(intel_notes) if intel_notes else "Low Intel Delta"
                     last_gate_rejection["reason"] = f"[{sym}] Intel Conviction {sig.conviction:.3f} < {required_threshold:.3f} ({intel_str})"
                     last_gate_rejection["signal"] = f"[{sym}] {direction} raw={sig.conviction - total_intel_delta:.3f} adj={sig.conviction:.3f}"
@@ -1962,7 +2001,11 @@ def render():
     buf=["\033[H", TOP]
     buf.append(row(f"{BOLD}{WHT}⚡ APEX INTELLIGENCE ENGINE v7.2 — CONCURRENT MULTI-ASSET CORE (BTC · ETH · GOLD) ⚡{R}"))
     ws = f"{GRN}LIVE ● (3 Symbols Active){R}" if market["ws_connected"] else f"{RED}DISCONNECTED{R}"
-    sess_str = f"{CYN}{session['name']} (SUNDAY OPEN {session['risk_mult']:.0%}){R}" if session.get("sunday_weekly_open") else f"{CYN}{session['name']} ({session['risk_mult']:.0%}){R}"
+    kz_lbl = f" {MAG}[{session['kill_zone'].replace('_KZ', '')}]{R}" if session.get("is_kill_zone") else ""
+    if session.get("sunday_weekly_open"):
+        sess_str = f"{CYN}{session['name']}{R}{kz_lbl} (SUN OPEN {session['risk_mult']:.0%})"
+    else:
+        sess_str = f"{CYN}{session['name']}{R}{kz_lbl} ({session['risk_mult']:.0%})"
     buf.append(row(f"{DIM}Time:{R} {now} IST  │  {sess_str}  │  WS: {ws}"))
     buf.append(MID)
 
@@ -2351,8 +2394,9 @@ async def _market_intel_loop():
         except Exception:
             pass   # DNS failure, timeout, etc. — silently skip
 
+    for s in TRADED_SYMBOLS:
+        asyncio.create_task(_safe_fetch(funding_monitor.update(s), f"funding_{s}"))
     asyncio.create_task(_safe_fetch(news_guard.update_events(), "news"))
-    asyncio.create_task(_safe_fetch(funding_monitor.update(SYMBOL), "funding"))
     asyncio.create_task(_safe_fetch(sentiment_monitor.update(), "sentiment"))
     asyncio.create_task(_safe_fetch(cross_market_monitor.update(), "cross_market"))
     # Don't await — let them run in background while WS + dashboard start immediately
@@ -2366,22 +2410,28 @@ async def _market_intel_loop():
 
             # 2. News, funding & sentiment update every 300s (every 10 cycles)
             if counter % 10 == 0:
+                fund_coros = [asyncio.wait_for(funding_monitor.update(s), timeout=10) for s in TRADED_SYMBOLS]
                 await asyncio.gather(
                     asyncio.wait_for(news_guard.update_events(), timeout=10),
-                    asyncio.wait_for(funding_monitor.update(SYMBOL), timeout=10),
                     asyncio.wait_for(sentiment_monitor.update(), timeout=10),
+                    *fund_coros,
                     return_exceptions=True,
                 )
 
-            # 3. Push fresh sentiment and cross-market data into Council
-            if signal_engine and signal_engine.council:
-                try:
-                    fg_val = int(sentiment_monitor.get_fear_greed())
-                    fund_pct = float(funding_monitor.get_funding_pct(SYMBOL))
-                    signal_engine.council.update_sentiment(fg_val, fund_pct)
-                    signal_engine.council.update_cross_market(cross_market_monitor.get_state())
-                except Exception:
-                    pass
+            # 3. Push fresh sentiment and cross-market data into Council across all symbols
+            try:
+                fg_val = int(sentiment_monitor.get_fear_greed())
+                cm_state = cross_market_monitor.get_state()
+                for s, eng in signal_engines.items():
+                    if eng and eng.council:
+                        try:
+                            f_pct = float(funding_monitor.get_funding_pct(s))
+                            eng.council.update_sentiment(fg_val, f_pct)
+                            eng.council.update_cross_market(cm_state)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
         except Exception:
             pass
 

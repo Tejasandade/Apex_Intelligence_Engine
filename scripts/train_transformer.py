@@ -68,10 +68,11 @@ def train_transformer(market: str, symbol: str):
         atr_col="ATR"
     )
     
-    labeled_df = labeled_df.dropna(subset=["target"])
+    target_col = "target_long" if "target_long" in labeled_df.columns else "target"
+    labeled_df = labeled_df.dropna(subset=[target_col])
     
     X = labeled_df[store.feature_columns]
-    y = labeled_df["target"]
+    y = labeled_df[target_col]
     
     # Chronological Split (80/20) - Transformers require temporal continuity
     split_idx = int(len(X) * 0.8)
