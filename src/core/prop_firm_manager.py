@@ -181,6 +181,242 @@ PROFILES: dict[str, dict[str, Any]] = {
     },
 }
 
+# ── Dynamic Firm & Multi-Phase Templates (Phase 1, Phase 2, Funded, 1-Step) ───
+FIRM_TEMPLATES: dict[str, dict[str, Any]] = {
+    "sharkfunded": {
+        "name": "SharkFunded",
+        "sizes": [5000, 10000, 25000, 50000, 100000],
+        "default_size": 5000,
+        "phases": {
+            "1-step": {
+                "name": "1-Step Evaluation",
+                "profit_target_pct": 9.0,
+                "max_daily_loss_pct": 3.0,
+                "daily_safety_buffer_pct": 2.25,
+                "max_total_loss_pct": 6.0,
+                "total_safety_buffer_pct": 4.8,
+                "base_risk_pct": 0.5,
+                "max_concurrent_trades": 1,
+            },
+            "phase1": {
+                "name": "Phase 1 (Assessment)",
+                "profit_target_pct": 8.0,
+                "max_daily_loss_pct": 4.0,
+                "daily_safety_buffer_pct": 3.0,
+                "max_total_loss_pct": 8.0,
+                "total_safety_buffer_pct": 6.5,
+                "base_risk_pct": 0.5,
+                "max_concurrent_trades": 2,
+            },
+            "phase2": {
+                "name": "Phase 2 (Verification)",
+                "profit_target_pct": 5.0,
+                "max_daily_loss_pct": 4.0,
+                "daily_safety_buffer_pct": 3.0,
+                "max_total_loss_pct": 8.0,
+                "total_safety_buffer_pct": 6.5,
+                "base_risk_pct": 0.5,
+                "max_concurrent_trades": 2,
+            },
+            "funded": {
+                "name": "Funded Master Account",
+                "profit_target_pct": 0.0,
+                "max_daily_loss_pct": 3.0,
+                "daily_safety_buffer_pct": 2.25,
+                "max_total_loss_pct": 6.0,
+                "total_safety_buffer_pct": 4.8,
+                "base_risk_pct": 0.4,
+                "max_concurrent_trades": 2,
+            }
+        }
+    },
+    "ftmo": {
+        "name": "FTMO",
+        "sizes": [10000, 25000, 50000, 100000, 200000],
+        "default_size": 10000,
+        "phases": {
+            "phase1": {
+                "name": "Phase 1 (Challenge)",
+                "profit_target_pct": 10.0,
+                "max_daily_loss_pct": 5.0,
+                "daily_safety_buffer_pct": 4.0,
+                "max_total_loss_pct": 10.0,
+                "total_safety_buffer_pct": 8.0,
+                "base_risk_pct": 0.5,
+                "max_concurrent_trades": 2,
+            },
+            "phase2": {
+                "name": "Phase 2 (Verification)",
+                "profit_target_pct": 5.0,
+                "max_daily_loss_pct": 5.0,
+                "daily_safety_buffer_pct": 4.0,
+                "max_total_loss_pct": 10.0,
+                "total_safety_buffer_pct": 8.0,
+                "base_risk_pct": 0.5,
+                "max_concurrent_trades": 2,
+            },
+            "funded": {
+                "name": "FTMO Trader (Funded)",
+                "profit_target_pct": 0.0,
+                "max_daily_loss_pct": 5.0,
+                "daily_safety_buffer_pct": 4.0,
+                "max_total_loss_pct": 10.0,
+                "total_safety_buffer_pct": 8.0,
+                "base_risk_pct": 0.5,
+                "max_concurrent_trades": 2,
+            }
+        }
+    },
+    "fundednext": {
+        "name": "FundedNext",
+        "sizes": [6000, 15000, 25000, 50000, 100000, 200000],
+        "default_size": 6000,
+        "phases": {
+            "1-step": {
+                "name": "Stellar 1-Step",
+                "profit_target_pct": 10.0,
+                "max_daily_loss_pct": 3.0,
+                "daily_safety_buffer_pct": 2.25,
+                "max_total_loss_pct": 6.0,
+                "total_safety_buffer_pct": 4.8,
+                "base_risk_pct": 0.5,
+                "max_concurrent_trades": 2,
+            },
+            "phase1": {
+                "name": "Stellar 2-Step (Phase 1)",
+                "profit_target_pct": 8.0,
+                "max_daily_loss_pct": 5.0,
+                "daily_safety_buffer_pct": 4.0,
+                "max_total_loss_pct": 10.0,
+                "total_safety_buffer_pct": 8.0,
+                "base_risk_pct": 0.5,
+                "max_concurrent_trades": 2,
+            },
+            "phase2": {
+                "name": "Stellar 2-Step (Phase 2)",
+                "profit_target_pct": 5.0,
+                "max_daily_loss_pct": 5.0,
+                "daily_safety_buffer_pct": 4.0,
+                "max_total_loss_pct": 10.0,
+                "total_safety_buffer_pct": 8.0,
+                "base_risk_pct": 0.5,
+                "max_concurrent_trades": 2,
+            },
+            "funded": {
+                "name": "FundedNext Master (Funded)",
+                "profit_target_pct": 0.0,
+                "max_daily_loss_pct": 5.0,
+                "daily_safety_buffer_pct": 4.0,
+                "max_total_loss_pct": 10.0,
+                "total_safety_buffer_pct": 8.0,
+                "base_risk_pct": 0.5,
+                "max_concurrent_trades": 2,
+            }
+        }
+    },
+    "the5ers": {
+        "name": "The 5%ers",
+        "sizes": [5000, 10000, 20000, 60000, 100000],
+        "default_size": 5000,
+        "phases": {
+            "bootcamp": {
+                "name": "Bootcamp (Phase 1)",
+                "profit_target_pct": 6.0,
+                "max_daily_loss_pct": 5.0,
+                "daily_safety_buffer_pct": 4.0,
+                "max_total_loss_pct": 6.0,
+                "total_safety_buffer_pct": 4.8,
+                "base_risk_pct": 0.4,
+                "max_concurrent_trades": 1,
+            },
+            "hyper": {
+                "name": "Hyper Growth (Phase 1)",
+                "profit_target_pct": 10.0,
+                "max_daily_loss_pct": 5.0,
+                "daily_safety_buffer_pct": 4.0,
+                "max_total_loss_pct": 10.0,
+                "total_safety_buffer_pct": 8.0,
+                "base_risk_pct": 0.5,
+                "max_concurrent_trades": 2,
+            },
+            "phase2": {
+                "name": "Phase 2 Verification",
+                "profit_target_pct": 5.0,
+                "max_daily_loss_pct": 5.0,
+                "daily_safety_buffer_pct": 4.0,
+                "max_total_loss_pct": 8.0,
+                "total_safety_buffer_pct": 6.5,
+                "base_risk_pct": 0.5,
+                "max_concurrent_trades": 2,
+            },
+            "funded": {
+                "name": "The5ers Funded Trader",
+                "profit_target_pct": 0.0,
+                "max_daily_loss_pct": 5.0,
+                "daily_safety_buffer_pct": 4.0,
+                "max_total_loss_pct": 6.0,
+                "total_safety_buffer_pct": 4.8,
+                "base_risk_pct": 0.4,
+                "max_concurrent_trades": 2,
+            }
+        }
+    },
+    "funding_pips": {
+        "name": "Funding Pips",
+        "sizes": [5000, 10000, 25000, 50000, 100000],
+        "default_size": 5000,
+        "phases": {
+            "phase1": {
+                "name": "Student (Phase 1)",
+                "profit_target_pct": 8.0,
+                "max_daily_loss_pct": 5.0,
+                "daily_safety_buffer_pct": 4.0,
+                "max_total_loss_pct": 10.0,
+                "total_safety_buffer_pct": 8.0,
+                "base_risk_pct": 0.5,
+                "max_concurrent_trades": 2,
+            },
+            "phase2": {
+                "name": "Practitioner (Phase 2)",
+                "profit_target_pct": 5.0,
+                "max_daily_loss_pct": 5.0,
+                "daily_safety_buffer_pct": 4.0,
+                "max_total_loss_pct": 10.0,
+                "total_safety_buffer_pct": 8.0,
+                "base_risk_pct": 0.5,
+                "max_concurrent_trades": 2,
+            },
+            "funded": {
+                "name": "Master (Funded)",
+                "profit_target_pct": 0.0,
+                "max_daily_loss_pct": 5.0,
+                "daily_safety_buffer_pct": 4.0,
+                "max_total_loss_pct": 10.0,
+                "total_safety_buffer_pct": 8.0,
+                "base_risk_pct": 0.5,
+                "max_concurrent_trades": 2,
+            }
+        }
+    },
+    "custom": {
+        "name": "Custom Challenge",
+        "sizes": [5000, 10000, 25000, 50000, 100000, 200000],
+        "default_size": 10000,
+        "phases": {
+            "custom": {
+                "name": "Custom Parameters",
+                "profit_target_pct": 10.0,
+                "max_daily_loss_pct": 5.0,
+                "daily_safety_buffer_pct": 4.0,
+                "max_total_loss_pct": 10.0,
+                "total_safety_buffer_pct": 8.0,
+                "base_risk_pct": 0.5,
+                "max_concurrent_trades": 2,
+            }
+        }
+    }
+}
+
 
 class PropFirmManager:
     """
@@ -490,6 +726,8 @@ class PropFirmManager:
         return {
             "challenge_name": self.config["name"],
             "name": self.config["name"],
+            "firm": self.config.get("firm", "Prop Firm"),
+            "phase": self.config.get("phase", "Phase 1"),
             "profile_key": self.profile_key,
             "initial_balance": float(self.initial_balance),
             "virtual_balance": round(self.virtual_balance, 2),
@@ -499,12 +737,15 @@ class PropFirmManager:
             "cumulative_profit": round(current_profit, 2),
             "target_usd": round(target_usd, 2),
             "profit_target_usd": round(target_usd, 2),
+            "profit_target_pct": float(self.config.get("profit_target_pct", 10.0)),
             "remaining_target_usd": round(remaining_target_usd, 2),
             "progress_pct": round(progress_pct, 1),
             "soft_landing_active": soft_landing_active,
             "daily_pnl_usd": round(current_daily_pnl, 2),
             "daily_limit_usd": round(daily_limit_usd, 2),
             "max_daily_loss_usd": round(daily_limit_usd, 2),
+            "max_daily_loss_pct": float(self.config.get("max_daily_loss_pct", 5.0)),
+            "daily_safety_buffer_pct": float(self.config.get("daily_safety_buffer_pct", 4.0)),
             "daily_loss_used_usd": round(abs(min(0.0, current_daily_pnl)), 2),
             "daily_loss_used_pct": round(daily_loss_used_pct, 1),
             "total_dd_usd": round(total_dd_usd, 2),
@@ -512,7 +753,10 @@ class PropFirmManager:
             "max_dd_usd": round(max_loss_usd, 2),
             "max_loss_usd": round(max_loss_usd, 2),
             "total_dd_pct": round(total_dd_pct, 2),
-            "max_dd_limit_pct": self.config["max_total_loss_pct"],
+            "max_dd_limit_pct": float(self.config.get("max_total_loss_pct", 10.0)),
+            "total_safety_buffer_pct": float(self.config.get("total_safety_buffer_pct", 8.0)),
+            "base_risk_pct": float(self.config.get("base_risk_pct", 0.5)),
+            "max_concurrent_trades": int(self.config.get("max_concurrent_trades", 1)),
             "status": self.status,
             "halt_reason": self.halt_reason,
             "trades_count": self.total_trades,
@@ -524,6 +768,7 @@ class PropFirmManager:
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
         data = {
             "profile_key": self.profile_key,
+            "config": self.config,
             "initial_balance": self.initial_balance,
             "virtual_balance": self.virtual_balance,
             "peak_balance": self.peak_balance,
@@ -540,6 +785,48 @@ class PropFirmManager:
         }
         with open(self.state_file, "w") as f:
             json.dump(data, f, indent=2)
+
+    def update_custom_config(self, custom_cfg: dict, reset: bool = False) -> bool:
+        """
+        Dynamically update or override challenge configuration with user-customized values:
+        firm, phase, initial_balance, profit_target_pct, max_daily_loss_pct,
+        daily_safety_buffer_pct, max_total_loss_pct, total_safety_buffer_pct,
+        base_risk_pct, max_concurrent_trades, etc.
+        """
+        old_initial = self.initial_balance
+        profit_offset = self.virtual_balance - old_initial
+
+        for k, v in custom_cfg.items():
+            if k == "initial_balance":
+                self.config[k] = float(v)
+            elif k in ("profit_target_pct", "max_daily_loss_pct", "daily_safety_buffer_pct",
+                       "max_total_loss_pct", "total_safety_buffer_pct", "base_risk_pct"):
+                self.config[k] = float(v)
+            elif k == "max_concurrent_trades":
+                self.config[k] = int(v)
+            else:
+                self.config[k] = v
+
+        if "initial_balance" in custom_cfg:
+            self.initial_balance = float(custom_cfg["initial_balance"])
+
+        # Format display name
+        firm_str = self.config.get("firm", custom_cfg.get("firm_name", "Prop Firm"))
+        size_str = f"${int(self.initial_balance):,}" if self.initial_balance >= 1000 else f"${self.initial_balance}"
+        phase_str = self.config.get("phase", "")
+        self.config["name"] = f"{firm_str} {size_str} ({phase_str})".strip() if phase_str else f"{firm_str} {size_str}"
+        self.profile_key = f"custom_{int(self.initial_balance)}"
+
+        if reset or self.virtual_balance <= 0:
+            self.reset_challenge()
+        else:
+            self.virtual_balance = self.initial_balance + profit_offset
+            self.peak_balance = max(self.virtual_balance, self.initial_balance)
+            self.day_start_balance = self.initial_balance
+            self.save_state()
+
+        logger.info("prop_firm_custom_updated", config=self.config)
+        return True
 
     def switch_profile(self, profile_key: str, reset: bool = False) -> bool:
         """Dynamically switch challenge profile (e.g. SharkFunded -> FTMO -> FundedNext)."""
@@ -586,7 +873,10 @@ class PropFirmManager:
             with open(self.state_file, "r") as f:
                 data = json.load(f)
             self.profile_key = data.get("profile_key", self.profile_key)
-            if self.profile_key in PROFILES:
+            if "config" in data and isinstance(data["config"], dict):
+                self.config = data["config"]
+                self.initial_balance = float(self.config.get("initial_balance", self.initial_balance))
+            elif self.profile_key in PROFILES:
                 self.config = PROFILES[self.profile_key]
                 self.initial_balance = float(self.config["initial_balance"])
             self.virtual_balance = float(data.get("virtual_balance", self.initial_balance))

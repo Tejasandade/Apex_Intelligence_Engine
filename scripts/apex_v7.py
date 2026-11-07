@@ -2496,6 +2496,23 @@ async def handle_web_action(action: str, payload: dict) -> dict:
             "metrics": prop_firm_manager.get_hud_metrics() if (PROP_FIRM_MODE and prop_firm_manager) else None
         }
 
+    elif action == "prop_firm_custom":
+        custom_cfg = payload.get("config", {})
+        reset = payload.get("reset", False)
+        enabled = payload.get("enabled")
+        if enabled is not None:
+            PROP_FIRM_MODE = bool(enabled)
+        if prop_firm_manager and custom_cfg:
+            prop_firm_manager.update_custom_config(custom_cfg, reset=reset)
+        elif reset and prop_firm_manager:
+            prop_firm_manager.reset_challenge()
+        return {
+            "success": True,
+            "enabled": PROP_FIRM_MODE,
+            "profile": prop_firm_manager.profile_key if prop_firm_manager else "DISABLED",
+            "metrics": prop_firm_manager.get_hud_metrics() if (PROP_FIRM_MODE and prop_firm_manager) else None
+        }
+
     elif action == "risk_settings":
         mt = payload.get("max_trades_day")
         if mt is not None:
@@ -2563,7 +2580,14 @@ def get_dashboard_state() -> dict:
     liq_map = {}
     try:
         for sym in TRADED_SYMBOLS:
-            liq_map[sym] = liquidity_engine.get_levels(sym)
+            lev = liquidity_engine.get_levels(sym)
+            if not lev or lev.get("pdh", 0.0) == 0.0:
+                c1d = list(symbol_candles_1d.get(sym, []))
+                c1h = list(symbol_candles_1h.get(sym, []))
+                c5m = list(symbol_candles_5m.get(sym, []))
+                if c1d or c1h or c5m:
+                    lev = liquidity_engine.update_levels(sym, candles_1d=c1d, candles_1h=c1h, candles_5m=c5m)
+            liq_map[sym] = lev or {}
     except Exception:
         pass
 
@@ -2581,6 +2605,13 @@ def get_dashboard_state() -> dict:
     except Exception:
         pass
 
+    def _safe_price(sym: str, field: str) -> float:
+        v = float(symbol_markets.get(sym, {}).get(field, 0.0))
+        if v > 0: return v
+        c_list = list(symbol_candles_5m.get(sym, []))
+        if c_list: return float(c_list[-1].get("close", 0.0))
+        return 0.0
+
     return {
         "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "halted": account.get("halted", False),
@@ -2589,9 +2620,9 @@ def get_dashboard_state() -> dict:
         "kill_zone": session.get("kill_zone", ""),
         "prop_firm_mode": PROP_FIRM_MODE,
         "market": {
-            "ltp": market.get("ltp", 0.0),
-            "bid": market.get("bid", 0.0),
-            "ask": market.get("ask", 0.0),
+            "ltp": _safe_price(PRIMARY_SYMBOL, "ltp") or market.get("ltp", 0.0),
+            "bid": _safe_price(PRIMARY_SYMBOL, "bid") or market.get("bid", 0.0),
+            "ask": _safe_price(PRIMARY_SYMBOL, "ask") or market.get("ask", 0.0),
             "ws_connected": market.get("ws_connected", False),
             "ticks": market.get("ticks", 0),
         },
@@ -2639,9 +2670,9 @@ def get_dashboard_state() -> dict:
         },
         "symbols": {
             sym: {
-                "ltp": symbol_markets.get(sym, {}).get("ltp", 0.0),
-                "bid": symbol_markets.get(sym, {}).get("bid", 0.0),
-                "ask": symbol_markets.get(sym, {}).get("ask", 0.0),
+                "ltp": _safe_price(sym, "ltp"),
+                "bid": _safe_price(sym, "bid"),
+                "ask": _safe_price(sym, "ask"),
                 "prob_long": symbol_live_probs.get(sym, {}).get("long", 0.5),
                 "prob_short": symbol_live_probs.get(sym, {}).get("short", 0.5),
                 "regime": symbol_regime_info.get(sym, {}).get("current", "UNKNOWN"),

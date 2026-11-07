@@ -1,5 +1,21 @@
 {
-  "profile_key": "sharkfunded_5k_lite_1step",
+  "profile_key": "custom_5000",
+  "config": {
+    "name": "SharkFunded $5,000 (1-Step Evaluation)",
+    "initial_balance": 5000.0,
+    "profit_target_pct": 9.0,
+    "max_daily_loss_pct": 3.0,
+    "daily_safety_buffer_pct": 2.25,
+    "max_total_loss_pct": 6.0,
+    "total_safety_buffer_pct": 4.8,
+    "base_risk_pct": 0.5,
+    "strong_risk_pct": 0.65,
+    "min_risk_pct": 0.35,
+    "max_concurrent_trades": 1,
+    "news_blackout_mins": 10,
+    "firm": "SharkFunded",
+    "phase": "1-Step Evaluation"
+  },
   "initial_balance": 5000.0,
   "virtual_balance": 5000.0,
   "peak_balance": 5000.0,
@@ -11,5 +27,6 @@
   "losses": 0,
   "total_trades": 0,
   "status": "IN_PROGRESS",
-  "halt_reason": ""
+  "halt_reason": "",
+  "last_updated": 1794082204.3224454
 }

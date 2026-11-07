@@ -2,8 +2,10 @@
 Apex Intelligence Engine — Interactive Live Web Command Center
 ==============================================================
 Embedded high-performance asynchronous web server using aiohttp.
-Provides a real-time multi-asset web UI, interactive parameter controls,
-prop firm profile switcher, emergency position manager, and JSON API.
+Provides a modern institutional multi-asset trading dashboard,
+dynamic prop firm configuration drawer (Phase 1, Phase 2, Funded,
+1-Step, and fully editable rules), emergency position manager,
+CSV audit journal exporter, and REST APIs.
 """
 
 from __future__ import annotations
@@ -13,55 +15,61 @@ import json
 import asyncio
 from typing import Callable, Any, Optional
 from aiohttp import web
-from src.core.prop_firm_manager import PROFILES
+from src.core.prop_firm_manager import PROFILES, FIRM_TEMPLATES
 
 DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>⚡ APEX INTELLIGENCE ENGINE — Command Center</title>
+  <title>APEX TRADING ENGINE — Institutional HUD</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>
     :root {
-      --bg: #0a0e17;
-      --card-bg: #111827;
-      --card-border: #1f293d;
-      --card-hover: #172236;
-      --text-main: #f3f4f6;
-      --text-muted: #9ca3af;
-      --accent-green: #10b981;
-      --accent-green-bg: rgba(16, 185, 129, 0.12);
-      --accent-red: #ef4444;
-      --accent-red-bg: rgba(239, 68, 68, 0.12);
-      --accent-cyan: #06b6d4;
-      --accent-gold: #f59e0b;
-      --accent-purple: #8b5cf6;
-      --font-mono: 'JetBrains Mono', monospace;
-      --font-sans: 'Inter', sans-serif;
+      --bg: #090d16;
+      --card-bg: #101623;
+      --card-subtle: #141c2c;
+      --card-border: #1e293b;
+      --border-subtle: rgba(255, 255, 255, 0.08);
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+      --text-dim: #64748b;
+      --green: #10b981;
+      --green-bg: rgba(16, 185, 129, 0.12);
+      --green-border: rgba(16, 185, 129, 0.25);
+      --red: #f43f5e;
+      --red-bg: rgba(244, 63, 94, 0.12);
+      --red-border: rgba(244, 63, 94, 0.25);
+      --blue: #38bdf8;
+      --amber: #f59e0b;
+      --amber-bg: rgba(245, 158, 11, 0.12);
+      --amber-border: rgba(245, 158, 11, 0.25);
+      --font-ui: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, sans-serif;
+      --font-mono: 'JetBrains Mono', 'SF Mono', 'Roboto Mono', Menlo, monospace;
     }
 
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       background-color: var(--bg);
       color: var(--text-main);
-      font-family: var(--font-sans);
+      font-family: var(--font-ui);
       padding: 16px;
       font-size: 13px;
-      line-height: 1.5;
+      line-height: 1.45;
+      -webkit-font-smoothing: antialiased;
     }
 
     .container {
-      max-width: 1320px;
+      max-width: 1380px;
       margin: 0 auto;
       display: flex;
       flex-direction: column;
-      gap: 16px;
+      gap: 14px;
     }
 
-    /* Header */
+    /* Top Navigation Bar */
     header {
       display: flex;
       justify-content: space-between;
@@ -69,144 +77,154 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       flex-wrap: wrap;
       gap: 12px;
       padding-bottom: 12px;
-      border-bottom: 1px solid var(--card-border);
+      border-bottom: 1px solid var(--border-subtle);
     }
     .brand {
       display: flex;
       align-items: center;
-      gap: 10px;
+      gap: 12px;
     }
-    .brand h1 {
-      font-size: 18px;
-      font-weight: 800;
-      letter-spacing: 0.5px;
+    .brand-title {
+      font-size: 17px;
+      font-weight: 700;
+      letter-spacing: -0.3px;
       color: var(--text-main);
       display: flex;
       align-items: center;
-      gap: 8px;
+      gap: 6px;
     }
-    .brand h1 span { color: var(--accent-cyan); }
-    .badge {
+    .brand-title .brand-dot {
+      color: var(--blue);
+    }
+    .brand-sub {
+      font-size: 11px;
+      color: var(--text-muted);
+      font-weight: 500;
+      padding-left: 8px;
+      border-left: 1px solid var(--card-border);
+    }
+    .status-pills {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .pill {
       display: inline-flex;
       align-items: center;
       gap: 6px;
       font-size: 11px;
       font-weight: 600;
-      padding: 3px 8px;
-      border-radius: 12px;
-      text-transform: uppercase;
+      padding: 4px 10px;
+      border-radius: 9999px;
       font-family: var(--font-mono);
+      border: 1px solid var(--border-subtle);
+      background: var(--card-bg);
+      color: var(--text-muted);
     }
-    .badge-live {
-      background: rgba(16, 185, 129, 0.15);
-      color: var(--accent-green);
-      border: 1px solid rgba(16, 185, 129, 0.3);
+    .pill-green {
+      background: var(--green-bg);
+      color: var(--green);
+      border-color: var(--green-border);
     }
-    .badge-kz {
-      background: rgba(139, 92, 246, 0.18);
-      color: #c4b5fd;
-      border: 1px solid rgba(139, 92, 246, 0.4);
-    }
-    .badge-halt {
-      background: rgba(239, 68, 68, 0.18);
-      color: var(--accent-red);
-      border: 1px solid rgba(239, 68, 68, 0.4);
-    }
-    .pulse-dot {
-      width: 7px;
-      height: 7px;
+    .pill-green .dot {
+      width: 6px;
+      height: 6px;
       border-radius: 50%;
-      background: var(--accent-green);
-      animation: pulse 1.5s infinite;
+      background: var(--green);
+      box-shadow: 0 0 8px var(--green);
     }
-    @keyframes pulse {
-      0% { opacity: 0.4; transform: scale(0.9); }
-      50% { opacity: 1; transform: scale(1.1); }
-      100% { opacity: 0.4; transform: scale(0.9); }
+    .pill-amber {
+      background: var(--amber-bg);
+      color: var(--amber);
+      border-color: var(--amber-border);
     }
+    .pill-red {
+      background: var(--red-bg);
+      color: var(--red);
+      border-color: var(--red-border);
+    }
+
     .header-actions {
       display: flex;
       align-items: center;
-      gap: 10px;
+      gap: 8px;
     }
-
-    /* Buttons */
     .btn {
       display: inline-flex;
       align-items: center;
       justify-content: center;
       gap: 6px;
-      font-family: var(--font-mono);
+      padding: 6px 12px;
       font-size: 12px;
       font-weight: 600;
-      padding: 6px 14px;
       border-radius: 6px;
-      border: 1px solid transparent;
       cursor: pointer;
       transition: all 0.15s ease;
-      white-space: nowrap;
-    }
-    .btn:active { transform: translateY(1px); }
-    .btn-pause {
-      background: rgba(245, 158, 11, 0.15);
-      color: var(--accent-gold);
-      border-color: rgba(245, 158, 11, 0.3);
-    }
-    .btn-pause:hover { background: rgba(245, 158, 11, 0.25); }
-    .btn-resume {
-      background: rgba(16, 185, 129, 0.15);
-      color: var(--accent-green);
-      border-color: rgba(16, 185, 129, 0.3);
-    }
-    .btn-resume:hover { background: rgba(16, 185, 129, 0.25); }
-    .btn-danger {
-      background: rgba(239, 68, 68, 0.18);
-      color: var(--accent-red);
-      border-color: rgba(239, 68, 68, 0.4);
-    }
-    .btn-danger:hover { background: rgba(239, 68, 68, 0.35); }
-    .btn-sm {
-      padding: 3px 8px;
-      font-size: 11px;
-    }
-    .btn-secondary {
-      background: #1f293d;
+      border: 1px solid var(--border-subtle);
+      background: var(--card-bg);
       color: var(--text-main);
-      border-color: #374151;
+      font-family: var(--font-ui);
+      user-select: none;
     }
-    .btn-secondary:hover { background: #374151; }
+    .btn:hover {
+      background: var(--card-subtle);
+      border-color: var(--text-muted);
+    }
+    .btn-amber {
+      border-color: var(--amber-border);
+      color: var(--amber);
+      background: var(--amber-bg);
+    }
+    .btn-amber:hover {
+      background: rgba(245, 158, 11, 0.2);
+    }
+    .btn-danger {
+      border-color: var(--red-border);
+      color: var(--red);
+      background: var(--red-bg);
+    }
+    .btn-danger:hover {
+      background: rgba(244, 63, 94, 0.2);
+    }
+    .btn-primary {
+      background: #2563eb;
+      border-color: #3b82f6;
+      color: #fff;
+    }
+    .btn-primary:hover {
+      background: #1d4ed8;
+    }
 
-    /* Card Styling */
+    /* Cards */
     .card {
       background: var(--card-bg);
-      border: 1px solid var(--card-border);
+      border: 1px solid var(--border-subtle);
       border-radius: 8px;
       padding: 14px;
       display: flex;
       flex-direction: column;
-      gap: 10px;
+      gap: 12px;
+    }
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
     }
     .card-title {
       font-size: 11px;
       font-weight: 700;
-      text-transform: uppercase;
       color: var(--text-muted);
-      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
       display: flex;
-      justify-content: space-between;
       align-items: center;
+      gap: 6px;
     }
 
-    /* Prop Firm Control Panel */
-    .prop-firm-panel {
-      background: linear-gradient(135deg, rgba(17, 24, 39, 0.95), rgba(31, 41, 61, 0.5));
-      border: 1px solid var(--card-border);
-      border-radius: 8px;
-      padding: 16px;
-      display: flex;
-      flex-direction: column;
-      gap: 14px;
-    }
+    /* Prop Firm HUD */
     .pf-header {
       display: flex;
       justify-content: space-between;
@@ -214,619 +232,786 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       flex-wrap: wrap;
       gap: 10px;
     }
+    .pf-summary {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .pf-name {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--text-main);
+    }
+    .pf-balance-tag {
+      font-family: var(--font-mono);
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--green);
+    }
     .pf-controls {
       display: flex;
       align-items: center;
       gap: 8px;
       flex-wrap: wrap;
     }
-    .select-custom {
-      background: #1e293b;
-      color: var(--text-main);
-      border: 1px solid #334155;
-      font-family: var(--font-mono);
-      font-size: 12px;
-      padding: 5px 10px;
-      border-radius: 6px;
-      cursor: pointer;
-      outline: none;
-    }
-    .select-custom:focus { border-color: var(--accent-cyan); }
-    .pf-bars-grid {
+
+    /* Progress Trackers */
+    .meters-grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
       gap: 12px;
     }
-    .pf-bar-item {
-      background: rgba(0, 0, 0, 0.25);
-      border: 1px solid rgba(255, 255, 255, 0.05);
-      padding: 10px 12px;
+    .meter-box {
+      background: var(--card-subtle);
+      border: 1px solid var(--border-subtle);
       border-radius: 6px;
+      padding: 10px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
     }
-    .pf-bar-labels {
+    .meter-top {
       display: flex;
       justify-content: space-between;
+      align-items: center;
       font-size: 11px;
-      font-family: var(--font-mono);
-      margin-bottom: 5px;
     }
-    .progress-bar-bg {
-      width: 100%;
-      height: 8px;
-      background: rgba(255, 255, 255, 0.08);
-      border-radius: 4px;
+    .meter-label {
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .meter-val {
+      font-family: var(--font-mono);
+      font-weight: 600;
+    }
+    .meter-bar {
+      height: 6px;
+      background: rgba(255, 255, 255, 0.06);
+      border-radius: 3px;
       overflow: hidden;
       position: relative;
     }
-    .progress-bar-fill {
+    .meter-fill {
       height: 100%;
-      border-radius: 4px;
+      border-radius: 3px;
       transition: width 0.3s ease;
+    }
+    .meter-fill-green { background: var(--green); }
+    .meter-fill-amber { background: var(--amber); }
+    .meter-fill-red { background: var(--red); }
+
+    /* Interactive Prop Firm Drawer */
+    #pf-drawer {
+      display: none;
+      background: #0d121c;
+      border: 1px solid #2a374a;
+      border-radius: 8px;
+      padding: 16px;
+      flex-direction: column;
+      gap: 14px;
+      margin-top: 4px;
+    }
+    .drawer-section-title {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--blue);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 6px;
+    }
+    .tab-pills {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .tab-btn {
+      padding: 6px 12px;
+      font-size: 12px;
+      font-weight: 600;
+      border-radius: 6px;
+      background: var(--card-bg);
+      border: 1px solid var(--border-subtle);
+      color: var(--text-muted);
+      cursor: pointer;
+      transition: all 0.15s ease;
+      font-family: var(--font-ui);
+    }
+    .tab-btn:hover {
+      color: var(--text-main);
+      border-color: var(--blue);
+    }
+    .tab-btn.active {
+      background: #1e293b;
+      border-color: var(--blue);
+      color: #fff;
+    }
+
+    .form-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 10px;
+    }
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .form-group label {
+      font-size: 11px;
+      color: var(--text-muted);
+      font-weight: 500;
+    }
+    .form-input {
+      background: var(--card-bg);
+      border: 1px solid var(--border-subtle);
+      border-radius: 6px;
+      padding: 6px 10px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--text-main);
+      outline: none;
+    }
+    .form-input:focus {
+      border-color: var(--blue);
     }
 
     /* Multi-Asset Grid */
     .assets-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
-      gap: 14px;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 12px;
     }
     .asset-card {
-      background: var(--card-bg);
-      border: 1px solid var(--card-border);
+      background: var(--card-subtle);
+      border: 1px solid var(--border-subtle);
       border-radius: 8px;
       padding: 14px;
       display: flex;
       flex-direction: column;
       gap: 10px;
-      transition: border-color 0.2s ease;
     }
-    .asset-card:hover { border-color: #374151; }
-    .asset-card-header {
+    .asset-head {
       display: flex;
       justify-content: space-between;
-      align-items: baseline;
+      align-items: flex-start;
+    }
+    .asset-info {
+      display: flex;
+      flex-direction: column;
     }
     .asset-sym {
-      font-size: 16px;
-      font-weight: 800;
-      font-family: var(--font-mono);
-      display: flex;
-      align-items: center;
-      gap: 6px;
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--text-main);
+      letter-spacing: -0.2px;
+    }
+    .asset-subname {
+      font-size: 11px;
+      color: var(--text-muted);
     }
     .asset-price {
       font-family: var(--font-mono);
-      font-size: 18px;
+      font-size: 17px;
       font-weight: 700;
-      color: var(--accent-cyan);
+      color: var(--text-main);
+      text-align: right;
     }
     .asset-pos-bar {
-      padding: 8px 10px;
-      border-radius: 6px;
-      font-family: var(--font-mono);
-      font-size: 12px;
       display: flex;
       justify-content: space-between;
       align-items: center;
+      padding: 6px 10px;
+      border-radius: 6px;
+      background: var(--card-bg);
+      border: 1px solid var(--border-subtle);
+      font-size: 11px;
+      font-weight: 600;
     }
-    .pos-flat { background: rgba(255, 255, 255, 0.03); color: var(--text-muted); }
-    .pos-long { background: var(--accent-green-bg); border: 1px solid rgba(16, 185, 129, 0.3); color: var(--accent-green); }
-    .pos-short { background: var(--accent-red-bg); border: 1px solid rgba(239, 68, 68, 0.3); color: var(--accent-red); }
+    .asset-pos-bar.flat {
+      color: var(--text-muted);
+    }
+    .asset-pos-bar.long {
+      background: var(--green-bg);
+      color: var(--green);
+      border-color: var(--green-border);
+    }
+    .asset-pos-bar.short {
+      background: var(--red-bg);
+      color: var(--red);
+      border-color: var(--red-border);
+    }
 
-    /* Probability Bars */
-    .prob-track {
-      background: rgba(255, 255, 255, 0.05);
-      border-radius: 4px;
-      height: 18px;
+    /* ML Dual-Split Probability Bar */
+    .prob-container {
       display: flex;
-      position: relative;
-      overflow: hidden;
-      margin: 4px 0;
+      flex-direction: column;
+      gap: 4px;
     }
-    .prob-fill-l { background: var(--accent-green); height: 100%; transition: width 0.3s; }
-    .prob-fill-s { background: var(--accent-red); height: 100%; transition: width 0.3s; margin-left: auto; }
-    .prob-label-row {
+    .prob-labels {
       display: flex;
       justify-content: space-between;
       font-size: 11px;
       font-family: var(--font-mono);
+      font-weight: 600;
+    }
+    .prob-long-lbl { color: var(--green); }
+    .prob-short-lbl { color: var(--red); }
+    .prob-bar {
+      height: 8px;
+      background: rgba(255, 255, 255, 0.05);
+      border-radius: 4px;
+      overflow: hidden;
+      display: flex;
+    }
+    .prob-bar-long {
+      height: 100%;
+      background: var(--green);
+      transition: width 0.3s ease;
+    }
+    .prob-bar-short {
+      height: 100%;
+      background: var(--red);
+      transition: width 0.3s ease;
+    }
+    .prob-meta {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 10px;
+      color: var(--text-muted);
+      margin-top: 2px;
     }
 
-    /* Diagnostics Tags */
-    .tags-row {
+    .asset-meta-row {
       display: flex;
-      flex-wrap: wrap;
-      gap: 6px;
+      justify-content: space-between;
+      align-items: center;
       font-size: 11px;
+      color: var(--text-muted);
+      padding-top: 4px;
+      border-top: 1px solid rgba(255, 255, 255, 0.05);
       font-family: var(--font-mono);
     }
-    .tag {
-      background: rgba(255, 255, 255, 0.04);
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      padding: 2px 6px;
-      border-radius: 4px;
+
+    /* 2-Column Split: Key Levels + Macro Intel */
+    .intel-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    @media (max-width: 900px) {
+      .intel-grid { grid-template-columns: 1fr; }
     }
 
-    /* Key Levels Table */
+    /* Tables */
     .table-container {
-      width: 100%;
       overflow-x: auto;
     }
     table {
       width: 100%;
       border-collapse: collapse;
-      font-family: var(--font-mono);
       font-size: 12px;
     }
-    th, td {
-      padding: 8px 10px;
-      text-align: left;
-      border-bottom: 1px solid var(--card-border);
-    }
     th {
+      text-align: left;
+      padding: 8px 10px;
+      color: var(--text-dim);
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+    td {
+      padding: 8px 10px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--text-main);
+    }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: rgba(255, 255, 255, 0.02); }
+
+    .tag-sweep {
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 700;
+      font-family: var(--font-mono);
+    }
+    .tag-sweep-bull { background: var(--green-bg); color: var(--green); }
+    .tag-sweep-bear { background: var(--red-bg); color: var(--red); }
+
+    .pnl-tag {
+      font-weight: 700;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+    }
+    .pnl-pos { background: var(--green-bg); color: var(--green); }
+    .pnl-neg { background: var(--red-bg); color: var(--red); }
+
+    /* Macro Alpha Grid */
+    .alpha-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+      gap: 8px;
+    }
+    .alpha-tile {
+      background: var(--card-subtle);
+      border: 1px solid var(--border-subtle);
+      border-radius: 6px;
+      padding: 8px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+    .alpha-title {
       font-size: 10px;
       color: var(--text-muted);
       text-transform: uppercase;
       font-weight: 600;
     }
-    tr:hover td { background: rgba(255, 255, 255, 0.02); }
-
-    /* Utility */
-    .green { color: var(--accent-green); }
-    .red { color: var(--accent-red); }
-    .cyan { color: var(--accent-cyan); }
-    .gold { color: var(--accent-gold); }
-    .muted { color: var(--text-muted); }
+    .alpha-value {
+      font-family: var(--font-mono);
+      font-weight: 600;
+      font-size: 12px;
+      color: var(--text-main);
+    }
   </style>
 </head>
 <body>
   <div class="container">
-    <!-- Header -->
+
+    <!-- Top Navigation Bar -->
     <header>
       <div class="brand">
-        <h1>⚡ <span>APEX</span> COMMAND CENTER <span style="font-size:12px; font-weight:500; color:var(--text-muted);">v7.2 Multi-Asset</span></h1>
-        <span class="badge badge-live"><span class="pulse-dot"></span> LIVE ● 3 ASSETS</span>
-        <span id="session-badge" class="badge badge-kz">SESSION: --</span>
-        <span id="halt-badge" class="badge badge-halt" style="display:none;">⛔ HALTED</span>
+        <div class="brand-title">
+          <span>⚡ APEX</span>
+          <span class="brand-dot">·</span>
+          <span>INTELLIGENCE ENGINE</span>
+        </div>
+        <div class="brand-sub">Multi-Asset v7.3</div>
+        <div class="status-pills">
+          <div class="pill pill-green" id="ws-pill">
+            <div class="dot"></div>
+            <span>3 SYMBOLS ACTIVE</span>
+          </div>
+          <div class="pill" id="session-pill">LONDON</div>
+          <div class="pill" id="kz-pill" style="display:none; color:var(--amber); border-color:var(--amber-border);">KILL ZONE</div>
+          <div class="pill" id="halt-badge" style="display:none; color:var(--red); border-color:var(--red-border);">ENGINE PAUSED</div>
+        </div>
       </div>
       <div class="header-actions">
-        <button id="btn-toggle-pause" class="btn btn-pause" onclick="togglePause()">⏸ PAUSE BOT</button>
-        <button class="btn btn-danger" onclick="closeAllPositions()">🚨 FLATTEN ALL</button>
+        <button class="btn btn-amber" id="btn-pause" onclick="togglePause()">⏸ Pause Bot</button>
+        <button class="btn btn-danger" onclick="flattenAll()">🛑 Flatten All</button>
       </div>
     </header>
 
-    <!-- Prop Firm Challenge Management Panel -->
-    <section class="prop-firm-panel">
+    <!-- Prop Firm Challenge Command Card -->
+    <section class="card" id="prop-firm-card">
       <div class="pf-header">
-        <div style="display:flex; align-items:center; gap:8px;">
-          <span style="font-size:16px;">🏆</span>
+        <div class="pf-summary">
           <div>
-            <div style="font-size:13px; font-weight:700;" id="pf-title">PROP FIRM CHALLENGE</div>
-            <div style="font-size:11px; color:var(--text-muted);" id="pf-subtitle">Managed Rule Supervisor</div>
+            <div class="pf-name" id="pf-title">Prop Firm Challenge</div>
+            <div style="font-size: 11px; color: var(--text-muted);" id="pf-subtitle">Managed Rule Supervisor</div>
           </div>
+          <div class="pf-balance-tag" id="pf-equity">$5,000.00</div>
         </div>
         <div class="pf-controls">
-          <label style="font-size:11px; font-weight:600; color:var(--text-muted);">PROFILE:</label>
-          <select id="select-profile" class="select-custom" onchange="onProfileChange(this.value)">
-            <!-- Options dynamically loaded -->
-          </select>
-          <button class="btn btn-secondary btn-sm" onclick="togglePropFirmMode()" id="btn-toggle-pf">MODE: ON</button>
-          <button class="btn btn-secondary btn-sm" onclick="resetChallenge()" title="Reset challenge metrics to 0">↺ RESET</button>
+          <button class="btn" id="btn-toggle-drawer" onclick="toggleConfigDrawer()">⚙️ Configure Challenge ▾</button>
+          <button class="btn" id="btn-mode-toggle" onclick="togglePropFirmMode()">MODE: ON</button>
+          <button class="btn" onclick="resetChallengePrompt()">🔄 Reset</button>
         </div>
       </div>
 
-      <div class="pf-bars-grid">
-        <!-- Target Progress -->
-        <div class="pf-bar-item">
-          <div class="pf-bar-labels">
-            <span>TARGET PROGRESS</span>
-            <span id="pf-target-text" class="green">+$0.00 / +$450.00 (0.0%)</span>
+      <!-- Expandable Configuration Drawer (Phase 1, Phase 2, Funded, Custom) -->
+      <div id="pf-drawer">
+        <div class="drawer-section-title">1. Select Prop Firm</div>
+        <div class="tab-pills" id="firm-tabs">
+          <button class="tab-btn active" onclick="selectFirm('sharkfunded')">SharkFunded</button>
+          <button class="tab-btn" onclick="selectFirm('ftmo')">FTMO</button>
+          <button class="tab-btn" onclick="selectFirm('fundednext')">FundedNext</button>
+          <button class="tab-btn" onclick="selectFirm('the5ers')">The 5%ers</button>
+          <button class="tab-btn" onclick="selectFirm('funding_pips')">Funding Pips</button>
+          <button class="tab-btn" onclick="selectFirm('custom')">Custom Setup</button>
+        </div>
+
+        <div class="drawer-section-title" style="margin-top: 6px;">2. Challenge Size</div>
+        <div class="tab-pills" id="size-pills">
+          <!-- Dynamically populated based on chosen firm -->
+        </div>
+
+        <div class="drawer-section-title" style="margin-top: 6px;">3. Challenge Phase / Mode</div>
+        <div class="tab-pills" id="phase-pills">
+          <!-- Dynamically populated based on chosen firm -->
+        </div>
+
+        <div class="drawer-section-title" style="margin-top: 8px;">4. Fine-Tune Parameters (Editable)</div>
+        <div class="form-grid">
+          <div class="form-group">
+            <label>Initial Balance ($)</label>
+            <input type="number" class="form-input" id="cfg-balance" value="5000">
           </div>
-          <div class="progress-bar-bg">
-            <div id="pf-target-bar" class="progress-bar-fill" style="background:var(--accent-green); width:0%;"></div>
+          <div class="form-group">
+            <label>Profit Target (%)</label>
+            <input type="number" step="0.5" class="form-input" id="cfg-target" value="9.0">
+          </div>
+          <div class="form-group">
+            <label>Daily Loss Limit (%)</label>
+            <input type="number" step="0.25" class="form-input" id="cfg-daily-loss" value="3.0">
+          </div>
+          <div class="form-group">
+            <label>Daily Buffer (%)</label>
+            <input type="number" step="0.25" class="form-input" id="cfg-daily-buffer" value="2.25">
+          </div>
+          <div class="form-group">
+            <label>Max Total Loss (%)</label>
+            <input type="number" step="0.5" class="form-input" id="cfg-max-loss" value="6.0">
+          </div>
+          <div class="form-group">
+            <label>Total Buffer (%)</label>
+            <input type="number" step="0.5" class="form-input" id="cfg-max-buffer" value="4.8">
+          </div>
+          <div class="form-group">
+            <label>Base Risk (%)</label>
+            <input type="number" step="0.05" class="form-input" id="cfg-risk" value="0.5">
+          </div>
+          <div class="form-group">
+            <label>Max Concurrent</label>
+            <input type="number" class="form-input" id="cfg-concurrent" value="1">
           </div>
         </div>
 
-        <!-- Daily Loss Drawdown -->
-        <div class="pf-bar-item">
-          <div class="pf-bar-labels">
-            <span>DAILY LOSS BUFFER</span>
-            <span id="pf-daily-text" class="gold">-$0.00 / -$150.00 (0% used)</span>
+        <div style="display:flex; justify-content: flex-end; gap: 8px; margin-top: 6px;">
+          <button class="btn" onclick="toggleConfigDrawer()">Cancel</button>
+          <button class="btn btn-primary" onclick="applyCustomConfig()">✓ Save & Apply Rules</button>
+        </div>
+      </div>
+
+      <!-- Live Target & Drawdown Meters -->
+      <div class="meters-grid">
+        <div class="meter-box">
+          <div class="meter-top">
+            <span class="meter-label">Profit Target</span>
+            <span class="meter-val" id="pf-target-text" style="color:var(--green);">+$0.00 / +$450.00 (0.0%)</span>
           </div>
-          <div class="progress-bar-bg">
-            <div id="pf-daily-bar" class="progress-bar-fill" style="background:var(--accent-gold); width:0%;"></div>
+          <div class="meter-bar">
+            <div class="meter-fill meter-fill-green" id="pf-target-fill" style="width: 0%;"></div>
           </div>
         </div>
 
-        <!-- Max Overall Drawdown -->
-        <div class="pf-bar-item">
-          <div class="pf-bar-labels">
-            <span>MAX DRAWDOWN HARD STOP</span>
-            <span id="pf-maxdd-text" class="red">-$0.00 / -$300.00 (0% used)</span>
+        <div class="meter-box">
+          <div class="meter-top">
+            <span class="meter-label">Daily Loss Buffer</span>
+            <span class="meter-val" id="pf-daily-text" style="color:var(--amber);">-$0.00 / -$150.00 (0% used)</span>
           </div>
-          <div class="progress-bar-bg">
-            <div id="pf-maxdd-bar" class="progress-bar-fill" style="background:var(--accent-red); width:0%;"></div>
+          <div class="meter-bar">
+            <div class="meter-fill meter-fill-amber" id="pf-daily-fill" style="width: 0%;"></div>
+          </div>
+        </div>
+
+        <div class="meter-box">
+          <div class="meter-top">
+            <span class="meter-label">Max Drawdown Stop</span>
+            <span class="meter-val" id="pf-maxdd-text" style="color:var(--red);">-$0.00 / -$300.00 (0.0%)</span>
+          </div>
+          <div class="meter-bar">
+            <div class="meter-fill meter-fill-red" id="pf-maxdd-fill" style="width: 0%;"></div>
           </div>
         </div>
       </div>
     </section>
 
-    <!-- Concurrent Multi-Asset Cards -->
+    <!-- Multi-Asset Live Cards -->
     <section>
-      <div style="font-size:11px; font-weight:700; text-transform:uppercase; color:var(--text-muted); margin-bottom:8px; display:flex; justify-content:space-between;">
-        <span>CONCURRENT MULTI-ASSET MATRIX</span>
-        <span id="risk-pool-text" class="cyan">Open Risk: $0.00 / $50.00 (0/2 max)</span>
+      <div class="card-title" style="margin-bottom: 8px;">
+        <span>Multi-Asset Execution Core</span>
+        <span class="pill" id="open-risk-pill">OPEN RISK: $0.00 / $50.00 (0/2 MAX)</span>
       </div>
-      <div class="assets-grid" id="assets-container">
-        <!-- Asset cards rendered dynamically -->
+      <div class="assets-grid" id="assets-grid">
+        <!-- Rendered dynamically for BTC, ETH, and PAXG (Gold) -->
       </div>
     </section>
 
-    <!-- Institutional Market Intelligence & Key Levels -->
-    <section style="display:grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap:14px;">
-      <!-- Key Levels Table -->
-      <div class="card">
-        <div class="card-title">
-          <span>INSTITUTIONAL LIQUIDITY & KEY LEVELS</span>
-          <span class="muted">PDH / PDL / ASIAN / SWEEPS</span>
+    <!-- 2-Column Split: Key Levels & Macro Intelligence -->
+    <div class="intel-grid">
+
+      <!-- Institutional Liquidity Levels -->
+      <section class="card">
+        <div class="card-header">
+          <div class="card-title">Institutional Liquidity & Key Levels</div>
+          <div style="font-size:11px; color:var(--text-muted);">PDH / PDL / Asian / Fix</div>
         </div>
         <div class="table-container">
-          <table id="levels-table">
+          <table>
             <thead>
               <tr>
-                <th>SYMBOL</th>
-                <th>PREV DAY HIGH</th>
-                <th>PREV DAY LOW</th>
-                <th>ASIAN RANGE</th>
-                <th>SWEEP / FVG</th>
+                <th>Symbol</th>
+                <th>Prev Day High</th>
+                <th>Prev Day Low</th>
+                <th>Asian Range</th>
+                <th>Sweep / Benchmark</th>
               </tr>
             </thead>
-            <tbody id="levels-tbody">
-              <!-- Populated dynamically -->
+            <tbody id="liq-tbody">
+              <!-- Rendered dynamically -->
             </tbody>
           </table>
         </div>
-      </div>
+      </section>
 
-      <!-- Macro Sentiment & Cross-Market -->
-      <div class="card">
-        <div class="card-title">
-          <span>MACRO INTELLIGENCE & CROSS-ASSET ALPHA</span>
-          <span id="news-status" class="green">✓ NEWS CLEAR</span>
+      <!-- Macro Alpha & Retrain Status -->
+      <section class="card">
+        <div class="card-header">
+          <div class="card-title">Macro Alpha & Intelligence</div>
+          <div class="pill pill-green" id="news-pill">NEWS: CLEAR</div>
         </div>
-        <div style="display:flex; flex-direction:column; gap:8px;">
-          <div class="tags-row">
-            <div class="tag">F&G: <span id="fg-val" class="green">50 (Neutral)</span></div>
-            <div class="tag">Macro DXY: <span id="dxy-val" class="muted">USD_NEUTRAL</span></div>
-            <div class="tag">ETH Spillover: <span id="spill-val" class="muted">NEUTRAL</span></div>
-            <div class="tag">Gold Bias: <span id="gold-bias-val" class="muted">NEUTRAL</span></div>
+        <div class="alpha-grid">
+          <div class="alpha-tile">
+            <div class="alpha-title">Fear & Greed</div>
+            <div class="alpha-value" id="fg-val">50 (Neutral)</div>
           </div>
-          <div style="font-size:11px; color:var(--text-muted);" id="next-event-text">Next Macro Event: Checking...</div>
-          <div style="margin-top:6px;">
-            <div style="font-size:10px; color:var(--text-muted); font-weight:700; text-transform:uppercase; margin-bottom:4px;">Multi-Asset Walk-Forward Retrain Cycles</div>
-            <div class="tags-row" id="retrain-tags">
-              <!-- Populated dynamically -->
-            </div>
+          <div class="alpha-tile">
+            <div class="alpha-title">Macro DXY Trend</div>
+            <div class="alpha-value" id="dxy-val">USD_NEUTRAL</div>
+          </div>
+          <div class="alpha-tile">
+            <div class="alpha-title">ETH Spillover Bias</div>
+            <div class="alpha-value" id="spill-val">NEUTRAL</div>
+          </div>
+          <div class="alpha-tile">
+            <div class="alpha-title">Gold London Fix Bias</div>
+            <div class="alpha-value" id="gold-bias-val">NEUTRAL</div>
           </div>
         </div>
-      </div>
-    </section>
+        <div style="font-size: 11px; color: var(--text-muted); display:flex; justify-content:space-between; align-items:center; margin-top: 4px;">
+          <span id="next-event-text">High-Impact Macro Event in 6800+ mins</span>
+          <span id="retrain-text" style="font-family:var(--font-mono);">WF Retrain: Active</span>
+        </div>
+      </section>
 
-    <!-- Real-Time Trade Journal Table -->
+    </div>
+
+    <!-- Trade Execution Journal -->
     <section class="card">
-      <div class="card-title">
-        <span>TRADE EXECUTION JOURNAL</span>
-        <div style="display:flex; align-items:center; gap:10px;">
-          <span class="muted" id="journal-stats">0 Trades | 0W / 0L</span>
-          <a href="/api/export/journal" download="apex_trade_journal.csv" class="btn" style="text-decoration:none; padding:3px 8px; font-size:11px; background:#1e293b; color:#38bdf8; border:1px solid #334155; border-radius:4px;">📥 Export CSV</a>
+      <div class="card-header">
+        <div class="card-title">
+          <span>Trade Execution Journal</span>
+          <span id="journal-stats" style="color:var(--text-muted); font-size:11px; font-weight:500;">0 Trades · 0W / 0L</span>
         </div>
+        <a href="/api/export/journal" download="apex_trade_journal.csv" class="btn" style="text-decoration:none; padding: 4px 10px; font-size:11px;">📥 Export CSV</a>
       </div>
       <div class="table-container">
         <table>
           <thead>
             <tr>
               <th>ID</th>
-              <th>TIME (UTC)</th>
-              <th>SYMBOL</th>
-              <th>ACTION</th>
-              <th>ENTRY</th>
-              <th>EXIT</th>
-              <th>PNL ($)</th>
-              <th>EXIT REASON</th>
+              <th>Time (UTC)</th>
+              <th>Action</th>
+              <th>Entry Price</th>
+              <th>Exit Price</th>
+              <th>PnL ($)</th>
+              <th>Exit Reason</th>
             </tr>
           </thead>
           <tbody id="journal-tbody">
-            <tr><td colspan="8" class="muted" style="text-align:center;">Monitoring live market for high-conviction entries...</td></tr>
+            <!-- Rendered dynamically -->
           </tbody>
         </table>
       </div>
     </section>
+
   </div>
 
   <script>
+    let firmTemplates = {};
+    let currentFirm = 'sharkfunded';
+    let currentSize = 5000;
+    let currentPhase = '1-step';
+    let lastKnownPrices = { 'BTCUSDT': 0, 'ETHUSDT': 0, 'PAXGUSDT': 0 };
     let isHalted = false;
     let propFirmMode = true;
-    let profilesList = {};
 
-    async function fetchProfiles() {
+    // Load templates on boot
+    async function loadTemplates() {
       try {
-        const res = await fetch('/api/profiles');
-        profilesList = await res.json();
-        const sel = document.getElementById('select-profile');
-        sel.innerHTML = Object.keys(profilesList).map(k => {
-          return `<option value="${k}">${profilesList[k].name}</option>`;
-        }).join('');
+        const res = await fetch('/api/prop_firm/templates');
+        firmTemplates = await res.json();
+        renderFirmTabs();
+        selectFirm('sharkfunded');
       } catch (e) {
-        console.error('Failed to load profiles:', e);
+        console.error('Failed to load templates:', e);
       }
     }
 
-    async function updateDashboard() {
-      try {
-        const res = await fetch('/api/state');
-        const data = await res.json();
-        renderHeader(data);
-        renderPropFirm(data);
-        renderAssets(data);
-        renderIntelligence(data);
-        renderJournal(data);
-      } catch (err) {
-        console.error('State poll error:', err);
+    function renderFirmTabs() {
+      const container = document.getElementById('firm-tabs');
+      if (!container || !firmTemplates) return;
+      container.innerHTML = '';
+      for (const [key, firm] of Object.entries(firmTemplates)) {
+        const btn = document.createElement('button');
+        btn.className = `tab-btn ${key === currentFirm ? 'active' : ''}`;
+        btn.textContent = firm.name;
+        btn.onclick = () => selectFirm(key);
+        container.appendChild(btn);
       }
     }
 
-    function renderHeader(data) {
-      isHalted = data.halted || false;
-      const haltBadge = document.getElementById('halt-badge');
-      const pauseBtn = document.getElementById('btn-toggle-pause');
-      if (isHalted) {
-        haltBadge.style.display = 'inline-flex';
-        haltBadge.textContent = '⛔ ' + (data.halt_reason || 'HALTED');
-        pauseBtn.className = 'btn btn-resume';
-        pauseBtn.textContent = '▶ RESUME BOT';
+    function selectFirm(key) {
+      currentFirm = key;
+      renderFirmTabs();
+      const firm = firmTemplates[key];
+      if (!firm) return;
+
+      // Render sizes
+      const sizeContainer = document.getElementById('size-pills');
+      sizeContainer.innerHTML = '';
+      firm.sizes.forEach(sz => {
+        const btn = document.createElement('button');
+        btn.className = `tab-btn ${sz === currentSize ? 'active' : ''}`;
+        btn.textContent = `$${sz.toLocaleString()}`;
+        btn.onclick = () => selectSize(sz);
+        sizeContainer.appendChild(btn);
+      });
+      if (!firm.sizes.includes(currentSize)) {
+        currentSize = firm.default_size || firm.sizes[0];
+      }
+
+      // Render phases
+      const phaseContainer = document.getElementById('phase-pills');
+      phaseContainer.innerHTML = '';
+      const phaseKeys = Object.keys(firm.phases);
+      phaseKeys.forEach(pk => {
+        const pObj = firm.phases[pk];
+        const btn = document.createElement('button');
+        btn.className = `tab-btn ${pk === currentPhase ? 'active' : ''}`;
+        btn.textContent = pObj.name;
+        btn.onclick = () => selectPhase(pk);
+        phaseContainer.appendChild(btn);
+      });
+      if (!firm.phases[currentPhase]) {
+        currentPhase = phaseKeys[0];
+      }
+
+      updateFormFields();
+    }
+
+    function selectSize(sz) {
+      currentSize = sz;
+      selectFirm(currentFirm);
+    }
+
+    function selectPhase(pk) {
+      currentPhase = pk;
+      selectFirm(currentFirm);
+    }
+
+    function updateFormFields() {
+      const firm = firmTemplates[currentFirm];
+      if (!firm) return;
+      const phase = firm.phases[currentPhase];
+      if (!phase) return;
+
+      document.getElementById('cfg-balance').value = currentSize;
+      document.getElementById('cfg-target').value = phase.profit_target_pct;
+      document.getElementById('cfg-daily-loss').value = phase.max_daily_loss_pct;
+      document.getElementById('cfg-daily-buffer').value = phase.daily_safety_buffer_pct;
+      document.getElementById('cfg-max-loss').value = phase.max_total_loss_pct;
+      document.getElementById('cfg-max-buffer').value = phase.total_safety_buffer_pct;
+      document.getElementById('cfg-risk').value = phase.base_risk_pct;
+      document.getElementById('cfg-concurrent').value = phase.max_concurrent_trades;
+    }
+
+    function toggleConfigDrawer() {
+      const d = document.getElementById('pf-drawer');
+      const btn = document.getElementById('btn-toggle-drawer');
+      if (d.style.display === 'flex') {
+        d.style.display = 'none';
+        btn.textContent = '⚙️ Configure Challenge ▾';
       } else {
-        haltBadge.style.display = 'none';
-        pauseBtn.className = 'btn btn-pause';
-        pauseBtn.textContent = '⏸ PAUSE BOT';
+        d.style.display = 'flex';
+        btn.textContent = '✕ Close Configurator ▴';
       }
-
-      const sess = data.session_name || 'LONDON';
-      const kz = data.kill_zone ? ` [${data.kill_zone.replace('_KZ', '')}]` : '';
-      document.getElementById('session-badge').textContent = `SESSION: ${sess}${kz}`;
     }
 
-    function renderPropFirm(data) {
-      const pf = data.prop_firm;
-      propFirmMode = data.prop_firm_mode !== false;
-      document.getElementById('btn-toggle-pf').textContent = propFirmMode ? 'MODE: ON' : 'MODE: OFF';
-      document.getElementById('btn-toggle-pf').style.color = propFirmMode ? 'var(--accent-green)' : 'var(--text-muted)';
+    async function applyCustomConfig() {
+      const cfg = {
+        firm: firmTemplates[currentFirm]?.name || currentFirm,
+        phase: firmTemplates[currentFirm]?.phases[currentPhase]?.name || currentPhase,
+        initial_balance: parseFloat(document.getElementById('cfg-balance').value),
+        profit_target_pct: parseFloat(document.getElementById('cfg-target').value),
+        max_daily_loss_pct: parseFloat(document.getElementById('cfg-daily-loss').value),
+        daily_safety_buffer_pct: parseFloat(document.getElementById('cfg-daily-buffer').value),
+        max_total_loss_pct: parseFloat(document.getElementById('cfg-max-loss').value),
+        total_safety_buffer_pct: parseFloat(document.getElementById('cfg-max-buffer').value),
+        base_risk_pct: parseFloat(document.getElementById('cfg-risk').value),
+        max_concurrent_trades: parseInt(document.getElementById('cfg-concurrent').value, 10),
+      };
 
-      if (!pf) {
-        document.getElementById('pf-title').textContent = 'PERSONAL ACCOUNT MODE';
-        document.getElementById('pf-subtitle').textContent = 'Risk scaled to real account balance';
-        return;
-      }
-
-      document.getElementById('pf-title').textContent = pf.challenge_name || 'PROP FIRM CHALLENGE';
-      const sel = document.getElementById('select-profile');
-      if (sel && sel.value !== pf.profile_key) {
-        sel.value = pf.profile_key;
-      }
-
-      // Target
-      const targetPct = Math.min(100, Math.max(0, pf.progress_pct || 0));
-      document.getElementById('pf-target-bar').style.width = targetPct + '%';
-      document.getElementById('pf-target-text').textContent = `+$${pf.current_profit_usd.toFixed(2)} / +$${pf.target_usd.toFixed(2)} (${targetPct.toFixed(1)}%)`;
-
-      // Daily
-      const dailyPct = Math.min(100, Math.max(0, pf.daily_loss_used_pct || 0));
-      document.getElementById('pf-daily-bar').style.width = dailyPct + '%';
-      document.getElementById('pf-daily-text').textContent = `-$${Math.abs(Math.min(0, pf.daily_pnl_usd)).toFixed(2)} / -$${pf.daily_limit_usd.toFixed(2)} (${dailyPct.toFixed(0)}% used)`;
-
-      // Max DD
-      const maxDDPct = Math.min(100, Math.max(0, (pf.total_dd_usd / pf.max_dd_usd) * 100));
-      document.getElementById('pf-maxdd-bar').style.width = maxDDPct + '%';
-      document.getElementById('pf-maxdd-text').textContent = `-$${pf.total_dd_usd.toFixed(2)} / -$${pf.max_dd_usd.toFixed(2)} (${pf.total_dd_pct.toFixed(1)}%)`;
-    }
-
-    function renderAssets(data) {
-      const cont = document.getElementById('assets-container');
-      const syms = data.symbols || {};
-      let totalOpen = 0;
-      let totalRisk = 0;
-
-      let html = '';
-      for (const [sym, info] of Object.entries(syms)) {
-        const isPos = info.position === 'OPEN';
-        if (isPos) {
-          totalOpen++;
-          totalRisk += 25.0; // standard parity
+      try {
+        const res = await fetch('/api/settings/prop_firm_custom', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ config: cfg, enabled: true })
+        });
+        const data = await res.json();
+        if (data.success) {
+          toggleConfigDrawer();
+          updateDashboard();
+        } else {
+          alert('Failed to apply config: ' + JSON.stringify(data));
         }
-
-        const isLong = info.direction === 'LONG';
-        const pClass = isPos ? (isLong ? 'pos-long' : 'pos-short') : 'pos-flat';
-        const pnl = Number(info.unrealized_pnl || 0);
-        const pnlStr = (pnl >= 0 ? '+$' : '-$') + Math.abs(pnl).toFixed(2);
-
-        const pL = (Number(info.prob_long || 0.5) * 100).toFixed(1);
-        const pS = (Number(info.prob_short || 0.5) * 100).toFixed(1);
-
-        html += `
-          <div class="asset-card">
-            <div class="asset-card-header">
-              <div class="asset-sym">${sym}</div>
-              <div class="asset-price">$${Number(info.ltp || 0).toLocaleString()}</div>
-            </div>
-            <div class="asset-pos-bar ${pClass}">
-              <span>${isPos ? `${info.direction} (${pnlStr})` : 'FLAT'}</span>
-              ${isPos ? `<button class="btn btn-danger btn-sm" onclick="closeSymbol('${sym}')">CLOSE</button>` : `<span class="muted">Scanning 5m...</span>`}
-            </div>
-            <div>
-              <div class="prob-label-row">
-                <span class="green">LONG ${pL}%</span>
-                <span class="red">SHORT ${pS}%</span>
-              </div>
-              <div class="prob-track">
-                <div class="prob-fill-l" style="width:${pL}%;"></div>
-                <div class="prob-fill-s" style="width:${pS}%;"></div>
-              </div>
-            </div>
-            <div class="tags-row">
-              <div class="tag">REGIME: <span>${info.regime || 'UNKNOWN'}</span></div>
-              <div class="tag">ATR: <span>$${Number(info.atr || 0).toFixed(1)}</span></div>
-            </div>
-          </div>
-        `;
+      } catch (e) {
+        alert('Network error applying config: ' + e);
       }
-      cont.innerHTML = html;
-      document.getElementById('risk-pool-text').textContent = `Open Risk: $${totalRisk.toFixed(2)} / $50.00 (${totalOpen}/2 max)`;
     }
 
-    function renderIntelligence(data) {
-      // Key levels table
-      const tbody = document.getElementById('levels-tbody');
-      const liq = data.liquidity || {};
-      let rows = '';
-      for (const [sym, lev] of Object.entries(liq)) {
-        const pdh = lev.pdh ? `$${lev.pdh.toLocaleString()}` : '$0';
-        const pdl = lev.pdl ? `$${lev.pdl.toLocaleString()}` : '$0';
-        const asian = (lev.ash && lev.asl) ? `$${lev.asl.toLocaleString()} - $${lev.ash.toLocaleString()}` : '$0 - $0';
-        let sweepTag = '<span class="muted">NONE</span>';
-        if (lev.sweep_bullish) sweepTag = `<span class="green">SWEEP_BULL (${lev.sweep_level})</span>`;
-        else if (lev.sweep_bearish) sweepTag = `<span class="red">SWEEP_BEAR (${lev.sweep_level})</span>`;
-        else if (lev.fvg_bullish) sweepTag = '<span class="cyan">FVG_BULL</span>';
-        else if (lev.fvg_bearish) sweepTag = '<span class="gold">FVG_BEAR</span>';
-
-        rows += `
-          <tr>
-            <td style="font-weight:700;">${sym}</td>
-            <td class="green">${pdh}</td>
-            <td class="red">${pdl}</td>
-            <td>${asian}</td>
-            <td>${sweepTag}</td>
-          </tr>
-        `;
-      }
-      tbody.innerHTML = rows || '<tr><td colspan="5" class="muted">Calculating key liquidity levels...</td></tr>';
-
-      // Cross market
-      if (data.cross_market) {
-        document.getElementById('dxy-val').textContent = data.cross_market.dxy_trend || 'USD_NEUTRAL';
-      }
-      if (data.lead_lag) {
-        document.getElementById('spill-val').textContent = data.lead_lag.eth_spillover_bias || 'NEUTRAL';
-        document.getElementById('gold-bias-val').textContent = data.lead_lag.gold_dxy_bias || 'NEUTRAL';
-      }
-      if (data.intel) {
-        document.getElementById('fg-val').textContent = `${data.intel.fear_greed} (${data.intel.fear_greed_label})`;
-        if (data.intel.next_event_min) {
-          document.getElementById('next-event-text').textContent = `High-Impact Macro Event in ${data.intel.next_event_min} mins`;
-        }
-      }
-
-      // Retrain tags
-      const rTags = document.getElementById('retrain-tags');
-      const rSched = data.retrain_status || {};
-      rTags.innerHTML = Object.entries(rSched).map(([s, stat]) => {
-        const nxt = stat.is_retraining ? 'RETRAINING' : `${stat.next_retrain_in}c`;
-        return `<div class="tag">${s}: <span class="cyan">${nxt}</span> (#${stat.candles_accumulated || 0})</div>`;
-      }).join('');
-    }
-
-    function renderJournal(data) {
-      const tbody = document.getElementById('journal-tbody');
-      const list = data.journal || [];
-      if (list.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="8" class="muted" style="text-align:center;">Monitoring live market for high-conviction entries...</td></tr>';
-        return;
-      }
-
-      tbody.innerHTML = list.slice(0, 15).map(t => {
-        const p = Number(t.pnl_usd || 0);
-        const pCol = p > 0 ? 'green' : (p < 0 ? 'red' : 'muted');
-        const sign = p > 0 ? '+' : '';
-        const sym = t.symbol || 'BTCUSDT';
-        return `
-          <tr>
-            <td>#${t.id || 1}</td>
-            <td>${t.open_ts || '--:--'}</td>
-            <td style="font-weight:700;">${sym}</td>
-            <td class="${t.action === 'BUY' ? 'green' : 'red'}" style="font-weight:700;">${t.action}</td>
-            <td>$${Number(t.entry_price || 0).toLocaleString()}</td>
-            <td>$${Number(t.exit_price || 0).toLocaleString()}</td>
-            <td class="${pCol}">${sign}$${p.toFixed(2)}</td>
-            <td class="muted">${t.exit_reason || 'TAKE PROFIT'}</td>
-          </tr>
-        `;
-      }).join('');
-    }
-
-    // Action API Calls
     async function togglePause() {
       try {
         const res = await fetch('/api/action/toggle_pause', { method: 'POST' });
-        const d = await res.json();
-        updateDashboard();
+        const data = await res.json();
+        isHalted = data.halted;
+        updatePauseButton();
       } catch (e) {
-        alert('Failed to toggle bot pause: ' + e);
+        alert('Error toggling pause: ' + e);
       }
     }
 
-    async function closeAllPositions() {
-      if (!confirm('Are you sure you want to FLATTEN ALL open positions across all assets?')) return;
-      try {
-        const res = await fetch('/api/action/close_all', { method: 'POST' });
-        const d = await res.json();
-        alert('All positions closed: ' + d.message);
-        updateDashboard();
-      } catch (e) {
-        alert('Error closing positions: ' + e);
-      }
-    }
-
-    async function closeSymbol(sym) {
-      if (!confirm(`Close ${sym} position immediately?`)) return;
-      try {
-        const res = await fetch('/api/action/close_symbol', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ symbol: sym })
-        });
-        const d = await res.json();
-        updateDashboard();
-      } catch (e) {
-        alert('Error closing ' + sym + ': ' + e);
-      }
-    }
-
-    async function onProfileChange(val) {
-      try {
-        await fetch('/api/settings/prop_firm', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ profile: val, enabled: true })
-        });
-        updateDashboard();
-      } catch (e) {
-        alert('Failed to change profile: ' + e);
+    function updatePauseButton() {
+      const btn = document.getElementById('btn-pause');
+      const badge = document.getElementById('halt-badge');
+      if (isHalted) {
+        btn.textContent = '▶ Resume Bot';
+        btn.className = 'btn btn-primary';
+        badge.style.display = 'inline-flex';
+      } else {
+        btn.textContent = '⏸ Pause Bot';
+        btn.className = 'btn btn-amber';
+        badge.style.display = 'none';
       }
     }
 
     async function togglePropFirmMode() {
       try {
-        await fetch('/api/settings/prop_firm', {
+        const res = await fetch('/api/settings/prop_firm', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ enabled: !propFirmMode })
         });
-        updateDashboard();
+        const data = await res.json();
+        propFirmMode = data.enabled;
+        document.getElementById('btn-mode-toggle').textContent = propFirmMode ? 'MODE: ON' : 'MODE: OFF';
       } catch (e) {
         alert('Failed to toggle prop firm mode: ' + e);
       }
     }
 
-    async function resetChallenge() {
-      if (!confirm('Reset challenge balance and stats to initial baseline?')) return;
+    async function resetChallengePrompt() {
+      if (!confirm('Are you sure you want to RESET the challenge to initial balance ($0 profit / $0 drawdown)?')) return;
       try {
         await fetch('/api/settings/prop_firm', {
           method: 'POST',
@@ -839,8 +1024,241 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       }
     }
 
+    async function flattenAll() {
+      if (!confirm('EMERGENCY FLATTEN: Close ALL open positions immediately across all symbols?')) return;
+      try {
+        await fetch('/api/action/close_all', { method: 'POST' });
+        updateDashboard();
+      } catch (e) {
+        alert('Failed to close positions: ' + e);
+      }
+    }
+
+    async function closeSymbol(sym) {
+      if (!confirm(`Close ${sym} open position at market price?`)) return;
+      try {
+        await fetch('/api/action/close_symbol', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ symbol: sym })
+        });
+        updateDashboard();
+      } catch (e) {
+        alert('Failed to close ' + sym + ': ' + e);
+      }
+    }
+
+    // Main Update Loop
+    async function updateDashboard() {
+      try {
+        const res = await fetch('/api/state');
+        if (!res.ok) return;
+        const data = await res.json();
+
+        // 1. Session & Engine Status
+        isHalted = data.halted || false;
+        updatePauseButton();
+        document.getElementById('session-pill').textContent = data.session_name || 'LONDON';
+        const kzPill = document.getElementById('kz-pill');
+        if (data.kill_zone) {
+          kzPill.textContent = data.kill_zone.replace('_KZ', '') + ' KZ';
+          kzPill.style.display = 'inline-flex';
+        } else {
+          kzPill.style.display = 'none';
+        }
+
+        // 2. Prop Firm HUD
+        const pf = data.prop_firm;
+        propFirmMode = data.prop_firm_mode !== false;
+        document.getElementById('btn-mode-toggle').textContent = propFirmMode ? 'MODE: ON' : 'MODE: OFF';
+
+        if (pf && propFirmMode) {
+          document.getElementById('pf-title').textContent = pf.challenge_name || 'Prop Firm Challenge';
+          document.getElementById('pf-subtitle').textContent = `Target: +${pf.profit_target_pct}% | Daily: -${pf.max_daily_loss_pct}% | Max DD: -${pf.max_dd_limit_pct}%`;
+          document.getElementById('pf-equity').textContent = `$${(pf.virtual_balance || pf.initial_balance).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+          const targetPct = Math.min(100, Math.max(0, pf.progress_pct || 0));
+          document.getElementById('pf-target-fill').style.width = `${targetPct}%`;
+          document.getElementById('pf-target-text').textContent = `+$${(pf.current_profit_usd || 0).toFixed(2)} / +$${(pf.target_usd || 0).toFixed(2)} (${targetPct.toFixed(1)}%)`;
+
+          const dailyUsedPct = Math.min(100, Math.max(0, pf.daily_loss_used_pct || 0));
+          document.getElementById('pf-daily-fill').style.width = `${dailyUsedPct}%`;
+          document.getElementById('pf-daily-text').textContent = `-$${Math.abs(Math.min(0, pf.daily_pnl_usd || 0)).toFixed(2)} / -$${(pf.daily_limit_usd || 0).toFixed(2)} (${dailyUsedPct.toFixed(0)}% used)`;
+
+          const maxDdPct = Math.min(100, Math.max(0, pf.total_dd_pct || 0));
+          document.getElementById('pf-maxdd-fill').style.width = `${(maxDdPct / (pf.max_dd_limit_pct || 10)) * 100}%`;
+          document.getElementById('pf-maxdd-text').textContent = `-$${(pf.total_dd_usd || 0).toFixed(2)} / -$${(pf.max_dd_usd || 0).toFixed(2)} (${maxDdPct.toFixed(1)}%)`;
+        } else {
+          document.getElementById('pf-title').textContent = 'Personal Account Mode';
+          document.getElementById('pf-subtitle').textContent = 'Prop firm risk limits disabled · Running live portfolio risk';
+          document.getElementById('pf-equity').textContent = `$${(data.account?.balance || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
+        }
+
+        // 3. Multi-Asset Cards
+        const syms = data.symbols || {};
+        const assetsContainer = document.getElementById('assets-grid');
+        assetsContainer.innerHTML = '';
+
+        let openPositionsCount = 0;
+        let totalOpenRisk = 0;
+
+        for (const [sym, info] of Object.entries(syms)) {
+          // Never let LTP flicker to $0
+          if (info.ltp && info.ltp > 0) {
+            lastKnownPrices[sym] = info.ltp;
+          }
+          const displayPrice = lastKnownPrices[sym] > 0 ? lastKnownPrices[sym] : (info.ltp || 0);
+
+          const isPosition = info.position === 'OPEN';
+          if (isPosition) openPositionsCount++;
+
+          const pClass = isPosition ? (info.direction === 'LONG' ? 'long' : 'short') : 'flat';
+          const pLabel = isPosition ? `${info.direction} @ $${Number(info.entry_price || 0).toLocaleString()}` : 'FLAT';
+          const pnlVal = info.unrealized_pnl || 0;
+          const pnlSign = pnlVal >= 0 ? '+' : '';
+          const pnlText = isPosition ? `PnL: ${pnlSign}$${pnlVal.toFixed(2)}` : 'Scanning 5m...';
+
+          const pLong = Math.round((info.prob_long || 0.5) * 100);
+          const pShort = 100 - pLong;
+
+          let biasTag = 'NEUTRAL';
+          if (pLong >= 58) biasTag = 'BULLISH BIAS';
+          else if (pShort >= 58) biasTag = 'BEARISH BIAS';
+
+          const subNames = { 'BTCUSDT': 'Bitcoin', 'ETHUSDT': 'Ethereum', 'PAXGUSDT': 'Physical Gold' };
+
+          const card = document.createElement('div');
+          card.className = 'asset-card';
+          card.innerHTML = `
+            <div class="asset-head">
+              <div class="asset-info">
+                <div class="asset-sym">${sym}</div>
+                <div class="asset-subname">${subNames[sym] || 'Perpetual'}</div>
+              </div>
+              <div class="asset-price">$${Number(displayPrice).toLocaleString(undefined, { minimumFractionDigits: (sym === 'BTCUSDT' ? 1 : 2), maximumFractionDigits: 2 })}</div>
+            </div>
+
+            <div class="asset-pos-bar ${pClass}">
+              <span>${pLabel}</span>
+              <div style="display:flex; align-items:center; gap:8px;">
+                <span>${pnlText}</span>
+                ${isPosition ? `<button class="btn btn-danger" style="padding:2px 6px; font-size:10px;" onclick="closeSymbol('${sym}')">Close</button>` : ''}
+              </div>
+            </div>
+
+            <div class="prob-container">
+              <div class="prob-labels">
+                <span class="prob-long-lbl">Long ${pLong}%</span>
+                <span class="prob-short-lbl">Short ${pShort}%</span>
+              </div>
+              <div class="prob-bar">
+                <div class="prob-bar-long" style="width: ${pLong}%;"></div>
+                <div class="prob-bar-short" style="width: ${pShort}%;"></div>
+              </div>
+              <div class="prob-meta">
+                <span>Ensemble Consensus</span>
+                <span style="font-weight:600; color:${biasTag.includes('BULL') ? 'var(--green)' : biasTag.includes('BEAR') ? 'var(--red)' : 'var(--text-muted)'};">${biasTag}</span>
+              </div>
+            </div>
+
+            <div class="asset-meta-row">
+              <span>REGIME: ${info.regime || 'TRENDING'}</span>
+              <span>ATR: $${(info.atr || 0).toFixed(1)}</span>
+            </div>
+          `;
+          assetsContainer.appendChild(card);
+        }
+
+        document.getElementById('open-risk-pill').textContent = `POSITIONS: ${openPositionsCount}/2 MAX`;
+
+        // 4. Institutional Liquidity & Key Levels Table
+        const liq = data.liquidity || {};
+        const liqBody = document.getElementById('liq-tbody');
+        liqBody.innerHTML = '';
+
+        for (const [sym, l] of Object.entries(liq)) {
+          const pdh = l.pdh > 0 ? `$${l.pdh.toLocaleString()}` : '—';
+          const pdl = l.pdl > 0 ? `$${l.pdl.toLocaleString()}` : '—';
+          const asian = (l.ash > 0 && l.asl > 0) ? `$${l.asl.toLocaleString()} – $${l.ash.toLocaleString()}` : '—';
+
+          let sweepBadge = '<span style="color:var(--text-dim);">None</span>';
+          if (l.sweep_bullish) {
+            sweepBadge = `<span class="tag-sweep tag-sweep-bull">SWEEP BULL (${l.sweep_level || 'PDL'})</span>`;
+          } else if (l.sweep_bearish) {
+            sweepBadge = `<span class="tag-sweep tag-sweep-bear">SWEEP BEAR (${l.sweep_level || 'PDH'})</span>`;
+          } else if (l.lbma_pm_fix > 0) {
+            sweepBadge = `<span style="color:var(--blue); font-size:11px;">Fix $${l.lbma_pm_fix.toFixed(1)}</span>`;
+          }
+
+          const row = document.createElement('tr');
+          row.innerHTML = `
+            <td style="font-weight:700;">${sym}</td>
+            <td style="color:var(--green);">${pdh}</td>
+            <td style="color:var(--red);">${pdl}</td>
+            <td>${asian}</td>
+            <td>${sweepBadge}</td>
+          `;
+          liqBody.appendChild(row);
+        }
+
+        // 5. Macro Intel & Retrain Status
+        if (data.intel) {
+          document.getElementById('fg-val').textContent = `${data.intel.fear_greed} (${data.intel.fear_greed_label})`;
+          if (data.intel.next_event_min) {
+            document.getElementById('next-event-text').textContent = `High-Impact Macro Event in ${data.intel.next_event_min} mins`;
+          }
+        }
+        if (data.cross_market) {
+          document.getElementById('dxy-val').textContent = data.cross_market.dxy_trend || 'USD_NEUTRAL';
+        }
+        if (data.lead_lag) {
+          document.getElementById('spill-val').textContent = data.lead_lag.eth_spillover_bias || 'NEUTRAL';
+          document.getElementById('gold-bias-val').textContent = data.lead_lag.gold_dxy_bias || 'NEUTRAL';
+        }
+
+        // Retrain status
+        const rSched = data.retrain_status || {};
+        const rParts = [];
+        for (const [s, st] of Object.entries(rSched)) {
+          rParts.push(`${s.replace('USDT', '')}: ${st.next_retrain_in || 2000}c`);
+        }
+        if (rParts.length > 0) {
+          document.getElementById('retrain-text').textContent = `Retrain in ${rParts.join(' · ')}`;
+        }
+
+        // 6. Trade Journal
+        const jList = data.journal || [];
+        document.getElementById('journal-stats').textContent = `${data.account?.total || jList.length} Trades · ${data.account?.wins || 0}W / ${data.account?.losses || 0}L`;
+
+        const jBody = document.getElementById('journal-tbody');
+        jBody.innerHTML = '';
+        if (jList.length === 0) {
+          jBody.innerHTML = '<tr><td colspan="7" style="text-align:center; color:var(--text-dim); padding:16px;">No closed trades recorded yet.</td></tr>';
+        } else {
+          jList.slice(0, 15).forEach(t => {
+            const pnl = Number(t.pnl_usd || 0);
+            const pnlTag = pnl >= 0 ? `<span class="pnl-tag pnl-pos">+$${pnl.toFixed(2)}</span>` : `<span class="pnl-tag pnl-neg">-$${Math.abs(pnl).toFixed(2)}</span>`;
+            const row = document.createElement('tr');
+            row.innerHTML = `
+              <td>#${t.id}</td>
+              <td style="color:var(--text-muted);">${t.open_ts}</td>
+              <td style="font-weight:600;">${t.action}</td>
+              <td>$${Number(t.entry_price).toLocaleString()}</td>
+              <td>$${Number(t.exit_price).toLocaleString()}</td>
+              <td>${pnlTag}</td>
+              <td style="color:var(--text-muted); font-size:11px;">${t.exit_reason || ''}</td>
+            `;
+            jBody.appendChild(row);
+          });
+        }
+
+      } catch (e) {
+        console.error('Update loop error:', e);
+      }
+    }
+
     // Startup
-    fetchProfiles();
+    loadTemplates();
     setInterval(updateDashboard, 1500);
     updateDashboard();
   </script>
@@ -872,10 +1290,12 @@ class ApexWebServer:
         self.app.router.add_get("/", self.handle_index)
         self.app.router.add_get("/api/state", self.handle_api_state)
         self.app.router.add_get("/api/profiles", self.handle_api_profiles)
+        self.app.router.add_get("/api/prop_firm/templates", self.handle_api_templates)
         self.app.router.add_post("/api/action/close_all", self.handle_close_all)
         self.app.router.add_post("/api/action/close_symbol", self.handle_close_symbol)
         self.app.router.add_post("/api/action/toggle_pause", self.handle_toggle_pause)
         self.app.router.add_post("/api/settings/prop_firm", self.handle_prop_firm_settings)
+        self.app.router.add_post("/api/settings/prop_firm_custom", self.handle_prop_firm_custom)
         self.app.router.add_post("/api/settings/risk", self.handle_risk_settings)
         self.app.router.add_get("/api/export/journal", self.handle_export_journal)
         self.app.router.add_get("/health", self.handle_health)
@@ -893,6 +1313,12 @@ class ApexWebServer:
     async def handle_api_profiles(self, request: web.Request) -> web.Response:
         try:
             return web.json_response(PROFILES)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def handle_api_templates(self, request: web.Request) -> web.Response:
+        try:
+            return web.json_response(FIRM_TEMPLATES)
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
 
@@ -925,6 +1351,16 @@ class ApexWebServer:
             except Exception:
                 data = {}
             res = await self.action_handler("prop_firm_settings", data)
+            return web.json_response(res)
+        return web.json_response({"error": "No action handler configured"}, status=501)
+
+    async def handle_prop_firm_custom(self, request: web.Request) -> web.Response:
+        if self.action_handler:
+            try:
+                data = await request.json()
+            except Exception:
+                data = {}
+            res = await self.action_handler("prop_firm_custom", data)
             return web.json_response(res)
         return web.json_response({"error": "No action handler configured"}, status=501)
 
