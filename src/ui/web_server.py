@@ -22,127 +22,180 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>APEX TRADING ENGINE — Institutional HUD</title>
+  <title>APEX Institutional Trading Core</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>
     :root {
-      --bg: #090d16;
-      --card-bg: #101623;
-      --card-subtle: #141c2c;
-      --card-border: #1e293b;
-      --border-subtle: rgba(255, 255, 255, 0.08);
-      --text-main: #f8fafc;
-      --text-muted: #94a3b8;
-      --text-dim: #64748b;
-      --green: #10b981;
-      --green-bg: rgba(16, 185, 129, 0.12);
-      --green-border: rgba(16, 185, 129, 0.25);
-      --red: #f43f5e;
-      --red-bg: rgba(244, 63, 94, 0.12);
-      --red-border: rgba(244, 63, 94, 0.25);
-      --blue: #38bdf8;
+      /* Surface & Canvas Tokens (True Obsidian Dark Palette - Impeccable Standard) */
+      --canvas: #090b0e;
+      --surface: #0f1217;
+      --surface-subtle: #141820;
+      --surface-elevated: #1a202c;
+      --surface-hover: #1f2634;
+      
+      /* Hairline Structural Borders (No Fuzzy AI Halo Glow) */
+      --border-hairline: rgba(255, 255, 255, 0.06);
+      --border-subtle: rgba(255, 255, 255, 0.10);
+      --border-focus: #2962ff;
+      
+      /* Typography */
+      --font-ui: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      --font-mono: 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace;
+      
+      --text-primary: #f0f3f6;
+      --text-secondary: #8c96a5;
+      --text-muted: #525c6a;
+      --text-dim: #3b434e;
+      
+      /* Institutional TradingView-Calibrated Status Accents */
+      --green: #089981;
+      --green-soft: rgba(8, 153, 129, 0.12);
+      --green-border: rgba(8, 153, 129, 0.25);
+      
+      --red: #f23645;
+      --red-soft: rgba(242, 54, 69, 0.12);
+      --red-border: rgba(242, 54, 69, 0.25);
+      
       --amber: #f59e0b;
-      --amber-bg: rgba(245, 158, 11, 0.12);
+      --amber-soft: rgba(245, 158, 11, 0.12);
       --amber-border: rgba(245, 158, 11, 0.25);
-      --font-ui: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, sans-serif;
-      --font-mono: 'JetBrains Mono', 'SF Mono', 'Roboto Mono', Menlo, monospace;
+      
+      --blue: #2962ff;
+      --blue-soft: rgba(41, 98, 255, 0.12);
+      
+      /* Concentric Geometry (make-interfaces-feel-better principle) */
+      --radius-lg: 8px;
+      --radius-md: 6px;
+      --radius-sm: 4px;
+      
+      /* Layered Elevation Shadow */
+      --shadow-surface: 0 1px 3px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.03);
+      --shadow-dropdown: 0 12px 28px rgba(0, 0, 0, 0.65), 0 0 0 1px var(--border-hairline);
     }
 
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      background-color: var(--bg);
-      color: var(--text-main);
-      font-family: var(--font-ui);
-      padding: 16px;
-      font-size: 13px;
-      line-height: 1.45;
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
       -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    body {
+      background-color: var(--canvas);
+      color: var(--text-primary);
+      font-family: var(--font-ui);
+      font-size: 13px;
+      line-height: 1.5;
+      padding: 16px 20px 32px 20px;
+    }
+
+    /* Tabular numbers for stability across all numbers */
+    .tabular, .num, td, input, .metric-val, .badge-mono {
+      font-family: var(--font-mono);
+      font-variant-numeric: tabular-nums;
     }
 
     .container {
-      max-width: 1380px;
+      max-width: 1400px;
       margin: 0 auto;
       display: flex;
       flex-direction: column;
       gap: 14px;
     }
 
-    /* Top Navigation Bar */
+    /* SVG Icon Utility */
+    .icon {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 14px;
+      height: 14px;
+      flex-shrink: 0;
+      stroke: currentColor;
+      fill: none;
+      vertical-align: middle;
+    }
+
+    /* Top Masthead */
     header {
       display: flex;
       justify-content: space-between;
       align-items: center;
+      padding: 4px 0 14px 0;
+      border-bottom: 1px solid var(--border-hairline);
       flex-wrap: wrap;
       gap: 12px;
-      padding-bottom: 12px;
-      border-bottom: 1px solid var(--border-subtle);
     }
     .brand {
       display: flex;
       align-items: center;
-      gap: 12px;
+      gap: 10px;
+    }
+    .brand-mark {
+      width: 24px;
+      height: 24px;
+      background: var(--surface-subtle);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-sm);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--blue);
     }
     .brand-title {
-      font-size: 17px;
+      font-size: 14px;
       font-weight: 700;
-      letter-spacing: -0.3px;
-      color: var(--text-main);
+      letter-spacing: -0.2px;
+      color: var(--text-primary);
       display: flex;
       align-items: center;
       gap: 6px;
     }
-    .brand-title .brand-dot {
-      color: var(--blue);
+    .brand-title span.sub {
+      font-weight: 400;
+      color: var(--text-secondary);
     }
-    .brand-sub {
+    .brand-version {
       font-size: 11px;
+      padding: 2px 6px;
+      border-radius: var(--radius-sm);
+      background: var(--surface-subtle);
+      border: 1px solid var(--border-hairline);
       color: var(--text-muted);
-      font-weight: 500;
-      padding-left: 8px;
-      border-left: 1px solid var(--card-border);
+      font-family: var(--font-mono);
     }
-    .status-pills {
+
+    .status-group {
       display: flex;
       align-items: center;
       gap: 8px;
-      flex-wrap: wrap;
     }
-    .pill {
+    .status-badge {
       display: inline-flex;
       align-items: center;
       gap: 6px;
       font-size: 11px;
-      font-weight: 600;
-      padding: 4px 10px;
-      border-radius: 9999px;
-      font-family: var(--font-mono);
-      border: 1px solid var(--border-subtle);
-      background: var(--card-bg);
-      color: var(--text-muted);
+      font-weight: 500;
+      padding: 3px 8px;
+      border-radius: var(--radius-sm);
+      background: var(--surface);
+      border: 1px solid var(--border-hairline);
+      color: var(--text-secondary);
     }
-    .pill-green {
-      background: var(--green-bg);
+    .status-badge.live {
       color: var(--green);
+      background: var(--green-soft);
       border-color: var(--green-border);
     }
-    .pill-green .dot {
+    .pulse-dot {
       width: 6px;
       height: 6px;
       border-radius: 50%;
-      background: var(--green);
-      box-shadow: 0 0 8px var(--green);
-    }
-    .pill-amber {
-      background: var(--amber-bg);
-      color: var(--amber);
-      border-color: var(--amber-border);
-    }
-    .pill-red {
-      background: var(--red-bg);
-      color: var(--red);
-      border-color: var(--red-border);
+      background: currentColor;
+      box-shadow: 0 0 6px currentColor;
     }
 
     .header-actions {
@@ -150,6 +203,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       align-items: center;
       gap: 8px;
     }
+
+    /* Buttons with tactile active scale (make-interfaces-feel-better rule: scale 0.97) */
     .btn {
       display: inline-flex;
       align-items: center;
@@ -157,224 +212,245 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       gap: 6px;
       padding: 6px 12px;
       font-size: 12px;
-      font-weight: 600;
-      border-radius: 6px;
+      font-weight: 500;
+      border-radius: var(--radius-md);
       cursor: pointer;
-      transition: all 0.15s ease;
-      border: 1px solid var(--border-subtle);
-      background: var(--card-bg);
-      color: var(--text-main);
+      border: 1px solid var(--border-hairline);
+      background: var(--surface);
+      color: var(--text-primary);
       font-family: var(--font-ui);
       user-select: none;
+      transition: background-color 0.15s ease, border-color 0.15s ease, transform 0.08s cubic-bezier(0.16, 1, 0.3, 1);
     }
     .btn:hover {
-      background: var(--card-subtle);
-      border-color: var(--text-muted);
+      background: var(--surface-hover);
+      border-color: var(--border-subtle);
+    }
+    .btn:active {
+      transform: scale(0.97);
     }
     .btn-amber {
-      border-color: var(--amber-border);
       color: var(--amber);
-      background: var(--amber-bg);
+      background: var(--amber-soft);
+      border-color: var(--amber-border);
     }
     .btn-amber:hover {
       background: rgba(245, 158, 11, 0.2);
     }
     .btn-danger {
-      border-color: var(--red-border);
       color: var(--red);
-      background: var(--red-bg);
+      background: var(--red-soft);
+      border-color: var(--red-border);
     }
     .btn-danger:hover {
-      background: rgba(244, 63, 94, 0.2);
+      background: rgba(242, 54, 69, 0.2);
     }
     .btn-primary {
-      background: #2563eb;
-      border-color: #3b82f6;
+      background: var(--blue);
+      border-color: #3b71fe;
       color: #fff;
     }
     .btn-primary:hover {
-      background: #1d4ed8;
+      background: #1b52e8;
     }
 
-    /* Cards */
-    .card {
-      background: var(--card-bg);
-      border: 1px solid var(--border-subtle);
-      border-radius: 8px;
-      padding: 14px;
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
+    /* Surfaces / Panels (No Lazy Nested Cards) */
+    .surface-panel {
+      background: var(--surface);
+      border: 1px solid var(--border-hairline);
+      border-radius: var(--radius-lg);
+      box-shadow: var(--shadow-surface);
+      overflow: hidden;
     }
-    .card-header {
+
+    /* Section Subheaders */
+    .section-header {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      flex-wrap: wrap;
-      gap: 8px;
+      padding: 0 2px 2px 2px;
     }
-    .card-title {
+    .section-label {
       font-size: 11px;
-      font-weight: 700;
-      color: var(--text-muted);
+      font-weight: 600;
       text-transform: uppercase;
-      letter-spacing: 0.6px;
+      letter-spacing: 0.4px;
+      color: var(--text-muted);
       display: flex;
       align-items: center;
       gap: 6px;
     }
 
-    /* Prop Firm HUD */
-    .pf-header {
+    /* Institutional Prop Firm Cockpit Bar */
+    .cockpit-bar {
+      display: flex;
+      flex-direction: column;
+    }
+    .cockpit-top {
       display: flex;
       justify-content: space-between;
       align-items: center;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border-hairline);
       flex-wrap: wrap;
-      gap: 10px;
+      gap: 12px;
+      background: var(--surface-subtle);
     }
-    .pf-summary {
+    .cockpit-info {
       display: flex;
       align-items: center;
-      gap: 12px;
+      gap: 14px;
     }
-    .pf-name {
-      font-size: 15px;
-      font-weight: 700;
-      color: var(--text-main);
+    .cockpit-name {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text-primary);
     }
-    .pf-balance-tag {
+    .cockpit-rules {
+      font-size: 11px;
+      color: var(--text-secondary);
+      font-family: var(--font-mono);
+    }
+    .cockpit-equity {
       font-family: var(--font-mono);
       font-size: 14px;
-      font-weight: 700;
+      font-weight: 600;
       color: var(--green);
+      background: var(--green-soft);
+      padding: 3px 8px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--green-border);
     }
-    .pf-controls {
+    .cockpit-controls {
       display: flex;
       align-items: center;
       gap: 8px;
-      flex-wrap: wrap;
     }
 
-    /* Progress Trackers */
-    .meters-grid {
+    /* Unified Horizontal Metric Columns (Divided by crisp hairlines, NOT nested boxes) */
+    .cockpit-metrics {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-      gap: 12px;
+      grid-template-columns: repeat(3, 1fr);
     }
-    .meter-box {
-      background: var(--card-subtle);
-      border: 1px solid var(--border-subtle);
-      border-radius: 6px;
-      padding: 10px 12px;
+    @media (max-width: 820px) {
+      .cockpit-metrics { grid-template-columns: 1fr; }
+      .metric-col { border-right: none !important; border-bottom: 1px solid var(--border-hairline); }
+    }
+    .metric-col {
+      padding: 12px 16px;
       display: flex;
       flex-direction: column;
       gap: 6px;
+      border-right: 1px solid var(--border-hairline);
     }
-    .meter-top {
+    .metric-col:last-child {
+      border-right: none;
+    }
+    .metric-top {
       display: flex;
       justify-content: space-between;
       align-items: center;
       font-size: 11px;
     }
-    .meter-label {
-      font-weight: 600;
-      color: var(--text-muted);
+    .metric-label {
+      font-weight: 500;
+      color: var(--text-secondary);
       text-transform: uppercase;
-      letter-spacing: 0.5px;
+      letter-spacing: 0.3px;
     }
-    .meter-val {
-      font-family: var(--font-mono);
+    .metric-val {
       font-weight: 600;
     }
-    .meter-bar {
-      height: 6px;
+    .meter-track {
+      height: 3px;
       background: rgba(255, 255, 255, 0.06);
-      border-radius: 3px;
+      border-radius: 2px;
       overflow: hidden;
       position: relative;
     }
     .meter-fill {
       height: 100%;
-      border-radius: 3px;
-      transition: width 0.3s ease;
+      border-radius: 2px;
+      transition: width 0.4s cubic-bezier(0.16, 1, 0.3, 1);
     }
-    .meter-fill-green { background: var(--green); }
-    .meter-fill-amber { background: var(--amber); }
-    .meter-fill-red { background: var(--red); }
 
-    /* Interactive Prop Firm Drawer */
+    /* Accordion Configurator Drawer */
     #pf-drawer {
       display: none;
-      background: #0d121c;
-      border: 1px solid #2a374a;
-      border-radius: 8px;
       padding: 16px;
+      background: #0b0e13;
+      border-bottom: 1px solid var(--border-hairline);
       flex-direction: column;
       gap: 14px;
-      margin-top: 4px;
+      animation: drawerSlide 0.2s cubic-bezier(0.16, 1, 0.3, 1);
     }
-    .drawer-section-title {
+    @keyframes drawerSlide {
+      from { opacity: 0; transform: translateY(-6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .drawer-label {
       font-size: 11px;
-      font-weight: 700;
-      color: var(--blue);
+      font-weight: 600;
+      color: var(--text-secondary);
       text-transform: uppercase;
-      letter-spacing: 0.5px;
+      letter-spacing: 0.3px;
       margin-bottom: 6px;
     }
-    .tab-pills {
+    .segment-group {
       display: flex;
       gap: 6px;
       flex-wrap: wrap;
     }
-    .tab-btn {
-      padding: 6px 12px;
+    .segment-btn {
+      padding: 5px 12px;
       font-size: 12px;
-      font-weight: 600;
-      border-radius: 6px;
-      background: var(--card-bg);
-      border: 1px solid var(--border-subtle);
-      color: var(--text-muted);
+      font-weight: 500;
+      border-radius: var(--radius-sm);
+      background: var(--surface-subtle);
+      border: 1px solid var(--border-hairline);
+      color: var(--text-secondary);
       cursor: pointer;
-      transition: all 0.15s ease;
+      transition: color 0.15s ease, border-color 0.15s ease, background-color 0.15s ease;
       font-family: var(--font-ui);
     }
-    .tab-btn:hover {
-      color: var(--text-main);
-      border-color: var(--blue);
+    .segment-btn:hover {
+      color: var(--text-primary);
+      border-color: var(--border-subtle);
     }
-    .tab-btn.active {
-      background: #1e293b;
+    .segment-btn.active {
+      background: var(--surface-elevated);
       border-color: var(--blue);
       color: #fff;
     }
 
     .form-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
       gap: 10px;
     }
-    .form-group {
+    .form-item {
       display: flex;
       flex-direction: column;
       gap: 4px;
     }
-    .form-group label {
+    .form-item label {
       font-size: 11px;
       color: var(--text-muted);
       font-weight: 500;
     }
     .form-input {
-      background: var(--card-bg);
-      border: 1px solid var(--border-subtle);
-      border-radius: 6px;
-      padding: 6px 10px;
-      font-family: var(--font-mono);
+      background: var(--surface-subtle);
+      border: 1px solid var(--border-hairline);
+      border-radius: var(--radius-sm);
+      padding: 6px 8px;
       font-size: 12px;
-      color: var(--text-main);
+      color: var(--text-primary);
       outline: none;
+      transition: border-color 0.15s ease, box-shadow 0.15s ease;
     }
     .form-input:focus {
       border-color: var(--blue);
+      box-shadow: 0 0 0 2px var(--blue-soft);
     }
 
     /* Multi-Asset Grid */
@@ -384,115 +460,138 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       gap: 12px;
     }
     .asset-card {
-      background: var(--card-subtle);
-      border: 1px solid var(--border-subtle);
-      border-radius: 8px;
-      padding: 14px;
+      background: var(--surface);
+      border: 1px solid var(--border-hairline);
+      border-radius: var(--radius-lg);
+      box-shadow: var(--shadow-surface);
+      padding: 14px 16px;
       display: flex;
       flex-direction: column;
-      gap: 10px;
+      gap: 12px;
+      transition: border-color 0.15s ease;
     }
-    .asset-head {
+    .asset-card:hover {
+      border-color: var(--border-subtle);
+    }
+    .asset-header {
       display: flex;
       justify-content: space-between;
       align-items: flex-start;
     }
-    .asset-info {
-      display: flex;
-      flex-direction: column;
-    }
-    .asset-sym {
-      font-size: 15px;
+    .asset-title {
+      font-size: 14px;
       font-weight: 700;
-      color: var(--text-main);
+      color: var(--text-primary);
       letter-spacing: -0.2px;
     }
-    .asset-subname {
+    .asset-desc {
       font-size: 11px;
       color: var(--text-muted);
     }
     .asset-price {
-      font-family: var(--font-mono);
-      font-size: 17px;
-      font-weight: 700;
-      color: var(--text-main);
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--text-primary);
       text-align: right;
     }
-    .asset-pos-bar {
+
+    /* Position Status Strip */
+    .pos-strip {
       display: flex;
       justify-content: space-between;
       align-items: center;
       padding: 6px 10px;
-      border-radius: 6px;
-      background: var(--card-bg);
-      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-md);
+      background: var(--surface-subtle);
+      border: 1px solid var(--border-hairline);
       font-size: 11px;
-      font-weight: 600;
+      font-weight: 500;
     }
-    .asset-pos-bar.flat {
+    .pos-strip.flat {
       color: var(--text-muted);
     }
-    .asset-pos-bar.long {
-      background: var(--green-bg);
+    .pos-strip.long {
+      background: var(--green-soft);
       color: var(--green);
       border-color: var(--green-border);
     }
-    .asset-pos-bar.short {
-      background: var(--red-bg);
+    .pos-strip.short {
+      background: var(--red-soft);
       color: var(--red);
       border-color: var(--red-border);
     }
 
-    /* ML Dual-Split Probability Bar */
-    .prob-container {
+    /* Quant Center-Zero Delta Gauge */
+    .conviction-module {
       display: flex;
       flex-direction: column;
-      gap: 4px;
+      gap: 5px;
     }
-    .prob-labels {
+    .conviction-header {
       display: flex;
       justify-content: space-between;
       font-size: 11px;
-      font-family: var(--font-mono);
+    }
+    .conviction-label {
+      color: var(--text-secondary);
+      font-weight: 500;
+    }
+    .conviction-tag {
       font-weight: 600;
+      font-family: var(--font-mono);
+      font-size: 11px;
     }
-    .prob-long-lbl { color: var(--green); }
-    .prob-short-lbl { color: var(--red); }
-    .prob-bar {
-      height: 8px;
-      background: rgba(255, 255, 255, 0.05);
-      border-radius: 4px;
+    .delta-gauge-container {
+      position: relative;
+      height: 4px;
+      background: rgba(255, 255, 255, 0.06);
+      border-radius: 2px;
       overflow: hidden;
-      display: flex;
     }
-    .prob-bar-long {
-      height: 100%;
+    .delta-center-line {
+      position: absolute;
+      left: 50%;
+      top: 0;
+      bottom: 0;
+      width: 2px;
+      background: rgba(255, 255, 255, 0.2);
+      transform: translateX(-50%);
+      z-index: 2;
+    }
+    .delta-bar-long {
+      position: absolute;
+      left: 50%;
+      top: 0;
+      bottom: 0;
       background: var(--green);
-      transition: width 0.3s ease;
+      border-radius: 0 2px 2px 0;
+      transition: width 0.3s cubic-bezier(0.16, 1, 0.3, 1);
     }
-    .prob-bar-short {
-      height: 100%;
+    .delta-bar-short {
+      position: absolute;
+      right: 50%;
+      top: 0;
+      bottom: 0;
       background: var(--red);
-      transition: width 0.3s ease;
+      border-radius: 2px 0 0 2px;
+      transition: width 0.3s cubic-bezier(0.16, 1, 0.3, 1);
     }
-    .prob-meta {
+    .conviction-footer {
       display: flex;
       justify-content: space-between;
-      align-items: center;
       font-size: 10px;
       color: var(--text-muted);
-      margin-top: 2px;
+      font-family: var(--font-mono);
     }
 
-    .asset-meta-row {
+    .asset-footer {
       display: flex;
       justify-content: space-between;
       align-items: center;
+      padding-top: 8px;
+      border-top: 1px solid var(--border-hairline);
       font-size: 11px;
       color: var(--text-muted);
-      padding-top: 4px;
-      border-top: 1px solid rgba(255, 255, 255, 0.05);
-      font-family: var(--font-mono);
     }
 
     /* 2-Column Split: Key Levels + Macro Intel */
@@ -505,7 +604,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       .intel-grid { grid-template-columns: 1fr; }
     }
 
-    /* Tables */
+    /* Tables with Tabular Figures */
     .table-container {
       overflow-x: auto;
     }
@@ -516,235 +615,257 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
     th {
       text-align: left;
-      padding: 8px 10px;
-      color: var(--text-dim);
+      padding: 9px 14px;
+      color: var(--text-muted);
       font-size: 11px;
-      font-weight: 600;
+      font-weight: 500;
       text-transform: uppercase;
-      letter-spacing: 0.5px;
-      border-bottom: 1px solid var(--border-subtle);
+      letter-spacing: 0.3px;
+      border-bottom: 1px solid var(--border-hairline);
+      background: var(--surface-subtle);
     }
     td {
-      padding: 8px 10px;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.04);
-      font-family: var(--font-mono);
+      padding: 9px 14px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+      color: var(--text-primary);
       font-size: 12px;
-      color: var(--text-main);
     }
-    tr:last-child td { border-bottom: none; }
-    tr:hover td { background: rgba(255, 255, 255, 0.02); }
-
-    .tag-sweep {
-      padding: 2px 6px;
-      border-radius: 4px;
-      font-size: 10px;
-      font-weight: 700;
-      font-family: var(--font-mono);
+    tr:last-child td {
+      border-bottom: none;
     }
-    .tag-sweep-bull { background: var(--green-bg); color: var(--green); }
-    .tag-sweep-bear { background: var(--red-bg); color: var(--red); }
+    tr:hover td {
+      background: rgba(255, 255, 255, 0.02);
+    }
 
-    .pnl-tag {
-      font-weight: 700;
+    .pill-tag {
       padding: 2px 6px;
-      border-radius: 4px;
-      font-family: var(--font-mono);
+      border-radius: var(--radius-sm);
       font-size: 11px;
+      font-weight: 500;
+      display: inline-block;
     }
-    .pnl-pos { background: var(--green-bg); color: var(--green); }
-    .pnl-neg { background: var(--red-bg); color: var(--red); }
+    .pill-tag.bull {
+      background: var(--green-soft);
+      color: var(--green);
+    }
+    .pill-tag.bear {
+      background: var(--red-soft);
+      color: var(--red);
+    }
 
     /* Macro Alpha Grid */
     .alpha-grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
       gap: 8px;
+      padding: 14px 16px;
     }
-    .alpha-tile {
-      background: var(--card-subtle);
-      border: 1px solid var(--border-subtle);
-      border-radius: 6px;
-      padding: 8px 10px;
+    .alpha-card {
+      background: var(--surface-subtle);
+      border: 1px solid var(--border-hairline);
+      border-radius: var(--radius-md);
+      padding: 10px 12px;
       display: flex;
       flex-direction: column;
-      gap: 3px;
+      gap: 4px;
     }
     .alpha-title {
       font-size: 10px;
       color: var(--text-muted);
       text-transform: uppercase;
-      font-weight: 600;
+      font-weight: 500;
     }
-    .alpha-value {
-      font-family: var(--font-mono);
-      font-weight: 600;
+    .alpha-data {
       font-size: 12px;
-      color: var(--text-main);
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+    .alpha-footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 16px;
+      border-top: 1px solid var(--border-hairline);
+      font-size: 11px;
+      color: var(--text-secondary);
+      background: var(--surface-subtle);
     }
   </style>
 </head>
 <body>
   <div class="container">
 
-    <!-- Top Navigation Bar -->
+    <!-- Top Masthead -->
     <header>
       <div class="brand">
-        <div class="brand-title">
-          <span>⚡ APEX</span>
-          <span class="brand-dot">·</span>
-          <span>INTELLIGENCE ENGINE</span>
+        <div class="brand-mark">
+          <svg class="icon" viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
         </div>
-        <div class="brand-sub">Multi-Asset v7.3</div>
-        <div class="status-pills">
-          <div class="pill pill-green" id="ws-pill">
-            <div class="dot"></div>
-            <span>3 SYMBOLS ACTIVE</span>
+        <div class="brand-title">
+          <span>APEX</span>
+          <span class="sub">INTELLIGENCE ENGINE</span>
+        </div>
+        <div class="brand-version">v7.3</div>
+        <div class="status-group">
+          <div class="status-badge live" id="ws-badge">
+            <div class="pulse-dot"></div>
+            <span>3 ASSETS LIVE</span>
           </div>
-          <div class="pill" id="session-pill">LONDON</div>
-          <div class="pill" id="kz-pill" style="display:none; color:var(--amber); border-color:var(--amber-border);">KILL ZONE</div>
-          <div class="pill" id="halt-badge" style="display:none; color:var(--red); border-color:var(--red-border);">ENGINE PAUSED</div>
+          <div class="status-badge" id="session-badge">LONDON</div>
+          <div class="status-badge" id="kz-badge" style="display:none; color:var(--amber); border-color:var(--amber-border);">KILL ZONE</div>
+          <div class="status-badge" id="halt-badge" style="display:none; color:var(--red); border-color:var(--red-border);">ENGINE PAUSED</div>
         </div>
       </div>
       <div class="header-actions">
-        <button class="btn btn-amber" id="btn-pause" onclick="togglePause()">⏸ Pause Bot</button>
-        <button class="btn btn-danger" onclick="flattenAll()">🛑 Flatten All</button>
+        <button class="btn btn-amber" id="btn-pause" onclick="togglePause()">
+          <svg class="icon" id="pause-icon" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"></rect><rect x="14" y="4" width="4" height="16" rx="1"></rect></svg>
+          <span id="pause-text">Pause Bot</span>
+        </button>
+        <button class="btn btn-danger" onclick="flattenAll()">
+          <svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"></line></svg>
+          <span>Flatten All</span>
+        </button>
       </div>
     </header>
 
-    <!-- Prop Firm Challenge Command Card -->
-    <section class="card" id="prop-firm-card">
-      <div class="pf-header">
-        <div class="pf-summary">
+    <!-- Prop Firm Cockpit Bar (Unified, NO nested cards) -->
+    <section class="surface-panel cockpit-bar" id="prop-firm-card">
+      <div class="cockpit-top">
+        <div class="cockpit-info">
           <div>
-            <div class="pf-name" id="pf-title">Prop Firm Challenge</div>
-            <div style="font-size: 11px; color: var(--text-muted);" id="pf-subtitle">Managed Rule Supervisor</div>
+            <div class="cockpit-name" id="pf-title">Prop Firm Challenge</div>
+            <div class="cockpit-rules" id="pf-subtitle">Target: +9% | Daily: -3% | Max DD: -6%</div>
           </div>
-          <div class="pf-balance-tag" id="pf-equity">$5,000.00</div>
+          <div class="cockpit-equity" id="pf-equity">$5,000.00</div>
         </div>
-        <div class="pf-controls">
-          <button class="btn" id="btn-toggle-drawer" onclick="toggleConfigDrawer()">⚙️ Configure Challenge ▾</button>
+        <div class="cockpit-controls">
+          <button class="btn" id="btn-toggle-drawer" onclick="toggleConfigDrawer()">
+            <svg class="icon" viewBox="0 0 24 24"><line x1="4" y1="21" x2="4" y2="14"></line><line x1="4" y1="10" x2="4" y2="3"></line><line x1="12" y1="21" x2="12" y2="12"></line><line x1="12" y1="8" x2="12" y2="3"></line><line x1="20" y1="21" x2="20" y2="16"></line><line x1="20" y1="12" x2="20" y2="3"></line><line x1="1" y1="14" x2="7" y2="14"></line><line x1="9" y1="8" x2="15" y2="8"></line><line x1="17" y1="16" x2="23" y2="16"></line></svg>
+            <span id="drawer-btn-text">Configure Challenge</span>
+            <svg class="icon" style="width:10px; height:10px;" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"></polyline></svg>
+          </button>
           <button class="btn" id="btn-mode-toggle" onclick="togglePropFirmMode()">MODE: ON</button>
-          <button class="btn" onclick="resetChallengePrompt()">🔄 Reset</button>
+          <button class="btn" onclick="resetChallengePrompt()">
+            <svg class="icon" viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
+            <span>Reset</span>
+          </button>
         </div>
       </div>
 
-      <!-- Expandable Configuration Drawer (Phase 1, Phase 2, Funded, Custom) -->
+      <!-- Expandable Challenge Configurator Drawer -->
       <div id="pf-drawer">
-        <div class="drawer-section-title">1. Select Prop Firm</div>
-        <div class="tab-pills" id="firm-tabs">
-          <button class="tab-btn active" onclick="selectFirm('sharkfunded')">SharkFunded</button>
-          <button class="tab-btn" onclick="selectFirm('ftmo')">FTMO</button>
-          <button class="tab-btn" onclick="selectFirm('fundednext')">FundedNext</button>
-          <button class="tab-btn" onclick="selectFirm('the5ers')">The 5%ers</button>
-          <button class="tab-btn" onclick="selectFirm('funding_pips')">Funding Pips</button>
-          <button class="tab-btn" onclick="selectFirm('custom')">Custom Setup</button>
+        <div class="drawer-label">1. Select Prop Firm</div>
+        <div class="segment-group" id="firm-tabs">
+          <!-- Dynamically populated -->
         </div>
 
-        <div class="drawer-section-title" style="margin-top: 6px;">2. Challenge Size</div>
-        <div class="tab-pills" id="size-pills">
-          <!-- Dynamically populated based on chosen firm -->
+        <div class="drawer-label" style="margin-top: 4px;">2. Challenge Size</div>
+        <div class="segment-group" id="size-pills">
+          <!-- Dynamically populated -->
         </div>
 
-        <div class="drawer-section-title" style="margin-top: 6px;">3. Challenge Phase / Mode</div>
-        <div class="tab-pills" id="phase-pills">
-          <!-- Dynamically populated based on chosen firm -->
+        <div class="drawer-label" style="margin-top: 4px;">3. Challenge Phase / Tier</div>
+        <div class="segment-group" id="phase-pills">
+          <!-- Dynamically populated -->
         </div>
 
-        <div class="drawer-section-title" style="margin-top: 8px;">4. Fine-Tune Parameters (Editable)</div>
+        <div class="drawer-label" style="margin-top: 6px;">4. Exact Rule Parameters (Editable)</div>
         <div class="form-grid">
-          <div class="form-group">
+          <div class="form-item">
             <label>Initial Balance ($)</label>
-            <input type="number" class="form-input" id="cfg-balance" value="5000">
+            <input type="number" class="form-input tabular" id="cfg-balance" value="5000">
           </div>
-          <div class="form-group">
+          <div class="form-item">
             <label>Profit Target (%)</label>
-            <input type="number" step="0.5" class="form-input" id="cfg-target" value="9.0">
+            <input type="number" step="0.5" class="form-input tabular" id="cfg-target" value="9.0">
           </div>
-          <div class="form-group">
+          <div class="form-item">
             <label>Daily Loss Limit (%)</label>
-            <input type="number" step="0.25" class="form-input" id="cfg-daily-loss" value="3.0">
+            <input type="number" step="0.25" class="form-input tabular" id="cfg-daily-loss" value="3.0">
           </div>
-          <div class="form-group">
+          <div class="form-item">
             <label>Daily Buffer (%)</label>
-            <input type="number" step="0.25" class="form-input" id="cfg-daily-buffer" value="2.25">
+            <input type="number" step="0.25" class="form-input tabular" id="cfg-daily-buffer" value="2.25">
           </div>
-          <div class="form-group">
+          <div class="form-item">
             <label>Max Total Loss (%)</label>
-            <input type="number" step="0.5" class="form-input" id="cfg-max-loss" value="6.0">
+            <input type="number" step="0.5" class="form-input tabular" id="cfg-max-loss" value="6.0">
           </div>
-          <div class="form-group">
+          <div class="form-item">
             <label>Total Buffer (%)</label>
-            <input type="number" step="0.5" class="form-input" id="cfg-max-buffer" value="4.8">
+            <input type="number" step="0.5" class="form-input tabular" id="cfg-max-buffer" value="4.8">
           </div>
-          <div class="form-group">
+          <div class="form-item">
             <label>Base Risk (%)</label>
-            <input type="number" step="0.05" class="form-input" id="cfg-risk" value="0.5">
+            <input type="number" step="0.05" class="form-input tabular" id="cfg-risk" value="0.5">
           </div>
-          <div class="form-group">
+          <div class="form-item">
             <label>Max Concurrent</label>
-            <input type="number" class="form-input" id="cfg-concurrent" value="1">
+            <input type="number" class="form-input tabular" id="cfg-concurrent" value="1">
           </div>
         </div>
 
-        <div style="display:flex; justify-content: flex-end; gap: 8px; margin-top: 6px;">
+        <div style="display:flex; justify-content: flex-end; gap: 8px; margin-top: 4px;">
           <button class="btn" onclick="toggleConfigDrawer()">Cancel</button>
-          <button class="btn btn-primary" onclick="applyCustomConfig()">✓ Save & Apply Rules</button>
+          <button class="btn btn-primary" onclick="applyCustomConfig()">Save & Apply Rules</button>
         </div>
       </div>
 
-      <!-- Live Target & Drawdown Meters -->
-      <div class="meters-grid">
-        <div class="meter-box">
-          <div class="meter-top">
-            <span class="meter-label">Profit Target</span>
-            <span class="meter-val" id="pf-target-text" style="color:var(--green);">+$0.00 / +$450.00 (0.0%)</span>
+      <!-- Unified 3-Column Metrics (Hairline Dividers, Clean Typographic Hierarchy) -->
+      <div class="cockpit-metrics">
+        <div class="metric-col">
+          <div class="metric-top">
+            <span class="metric-label">Profit Target</span>
+            <span class="metric-val tabular" id="pf-target-text" style="color:var(--green);">+$0.00 / +$450.00 (0.0%)</span>
           </div>
-          <div class="meter-bar">
-            <div class="meter-fill meter-fill-green" id="pf-target-fill" style="width: 0%;"></div>
-          </div>
-        </div>
-
-        <div class="meter-box">
-          <div class="meter-top">
-            <span class="meter-label">Daily Loss Buffer</span>
-            <span class="meter-val" id="pf-daily-text" style="color:var(--amber);">-$0.00 / -$150.00 (0% used)</span>
-          </div>
-          <div class="meter-bar">
-            <div class="meter-fill meter-fill-amber" id="pf-daily-fill" style="width: 0%;"></div>
+          <div class="meter-track">
+            <div class="meter-fill" id="pf-target-fill" style="width: 0%; background: var(--green);"></div>
           </div>
         </div>
 
-        <div class="meter-box">
-          <div class="meter-top">
-            <span class="meter-label">Max Drawdown Stop</span>
-            <span class="meter-val" id="pf-maxdd-text" style="color:var(--red);">-$0.00 / -$300.00 (0.0%)</span>
+        <div class="metric-col">
+          <div class="metric-top">
+            <span class="metric-label">Daily Loss Buffer</span>
+            <span class="metric-val tabular" id="pf-daily-text" style="color:var(--amber);">-$0.00 / -$150.00 (0% used)</span>
           </div>
-          <div class="meter-bar">
-            <div class="meter-fill meter-fill-red" id="pf-maxdd-fill" style="width: 0%;"></div>
+          <div class="meter-track">
+            <div class="meter-fill" id="pf-daily-fill" style="width: 0%; background: var(--amber);"></div>
+          </div>
+        </div>
+
+        <div class="metric-col">
+          <div class="metric-top">
+            <span class="metric-label">Max Drawdown Stop</span>
+            <span class="metric-val tabular" id="pf-maxdd-text" style="color:var(--red);">-$0.00 / -$300.00 (0.0%)</span>
+          </div>
+          <div class="meter-track">
+            <div class="meter-fill" id="pf-maxdd-fill" style="width: 0%; background: var(--red);"></div>
           </div>
         </div>
       </div>
     </section>
 
-    <!-- Multi-Asset Live Cards -->
+    <!-- Multi-Asset Execution Core -->
     <section>
-      <div class="card-title" style="margin-bottom: 8px;">
-        <span>Multi-Asset Execution Core</span>
-        <span class="pill" id="open-risk-pill">OPEN RISK: $0.00 / $50.00 (0/2 MAX)</span>
+      <div class="section-header" style="margin-bottom: 8px;">
+        <div class="section-label">
+          <span>Multi-Asset Execution Core</span>
+        </div>
+        <div class="status-badge tabular" id="open-risk-badge">POSITIONS: 0/2 MAX</div>
       </div>
       <div class="assets-grid" id="assets-grid">
-        <!-- Rendered dynamically for BTC, ETH, and PAXG (Gold) -->
+        <!-- Rendered reactively (BTC, ETH, PAXG) without wiping innerHTML -->
       </div>
     </section>
 
-    <!-- 2-Column Split: Key Levels & Macro Intelligence -->
+    <!-- 2-Column Split: Key Levels + Macro Intelligence -->
     <div class="intel-grid">
 
-      <!-- Institutional Liquidity Levels -->
-      <section class="card">
-        <div class="card-header">
-          <div class="card-title">Institutional Liquidity & Key Levels</div>
-          <div style="font-size:11px; color:var(--text-muted);">PDH / PDL / Asian / Fix</div>
+      <!-- Institutional Liquidity & Key Levels -->
+      <section class="surface-panel">
+        <div style="padding: 12px 16px; border-bottom: 1px solid var(--border-hairline); display:flex; justify-content:space-between; align-items:center;">
+          <div class="section-label">Institutional Key Levels & Liquidity</div>
+          <div style="font-size:11px; color:var(--text-muted); font-family:var(--font-mono);">PDH / PDL / Asian / Fix</div>
         </div>
         <div class="table-container">
           <table>
@@ -758,52 +879,57 @@ DASHBOARD_HTML = """<!DOCTYPE html>
               </tr>
             </thead>
             <tbody id="liq-tbody">
-              <!-- Rendered dynamically -->
+              <!-- Rendered reactively -->
             </tbody>
           </table>
         </div>
       </section>
 
       <!-- Macro Alpha & Retrain Status -->
-      <section class="card">
-        <div class="card-header">
-          <div class="card-title">Macro Alpha & Intelligence</div>
-          <div class="pill pill-green" id="news-pill">NEWS: CLEAR</div>
+      <section class="surface-panel" style="display:flex; flex-direction:column; justify-content:space-between;">
+        <div>
+          <div style="padding: 12px 16px; border-bottom: 1px solid var(--border-hairline); display:flex; justify-content:space-between; align-items:center;">
+            <div class="section-label">Macro Alpha & Intelligence</div>
+            <div class="status-badge live" id="news-badge">NEWS: CLEAR</div>
+          </div>
+          <div class="alpha-grid">
+            <div class="alpha-card">
+              <div class="alpha-title">Fear & Greed</div>
+              <div class="alpha-data tabular" id="fg-val">50 (Neutral)</div>
+            </div>
+            <div class="alpha-card">
+              <div class="alpha-title">Macro DXY Trend</div>
+              <div class="alpha-data tabular" id="dxy-val">USD_NEUTRAL</div>
+            </div>
+            <div class="alpha-card">
+              <div class="alpha-title">ETH Spillover Bias</div>
+              <div class="alpha-data tabular" id="spill-val">NEUTRAL</div>
+            </div>
+            <div class="alpha-card">
+              <div class="alpha-title">Gold London Fix Bias</div>
+              <div class="alpha-data tabular" id="gold-bias-val">NEUTRAL</div>
+            </div>
+          </div>
         </div>
-        <div class="alpha-grid">
-          <div class="alpha-tile">
-            <div class="alpha-title">Fear & Greed</div>
-            <div class="alpha-value" id="fg-val">50 (Neutral)</div>
-          </div>
-          <div class="alpha-tile">
-            <div class="alpha-title">Macro DXY Trend</div>
-            <div class="alpha-value" id="dxy-val">USD_NEUTRAL</div>
-          </div>
-          <div class="alpha-tile">
-            <div class="alpha-title">ETH Spillover Bias</div>
-            <div class="alpha-value" id="spill-val">NEUTRAL</div>
-          </div>
-          <div class="alpha-tile">
-            <div class="alpha-title">Gold London Fix Bias</div>
-            <div class="alpha-value" id="gold-bias-val">NEUTRAL</div>
-          </div>
-        </div>
-        <div style="font-size: 11px; color: var(--text-muted); display:flex; justify-content:space-between; align-items:center; margin-top: 4px;">
-          <span id="next-event-text">High-Impact Macro Event in 6800+ mins</span>
-          <span id="retrain-text" style="font-family:var(--font-mono);">WF Retrain: Active</span>
+        <div class="alpha-footer">
+          <span id="next-event-text">High-Impact Event: None scheduled</span>
+          <span id="retrain-text" class="tabular">WF Retrain: Active</span>
         </div>
       </section>
 
     </div>
 
     <!-- Trade Execution Journal -->
-    <section class="card">
-      <div class="card-header">
-        <div class="card-title">
+    <section class="surface-panel">
+      <div style="padding: 12px 16px; border-bottom: 1px solid var(--border-hairline); display:flex; justify-content:space-between; align-items:center;">
+        <div class="section-label">
           <span>Trade Execution Journal</span>
-          <span id="journal-stats" style="color:var(--text-muted); font-size:11px; font-weight:500;">0 Trades · 0W / 0L</span>
+          <span id="journal-stats" style="color:var(--text-muted); font-size:11px; font-weight:400; margin-left:6px;" class="tabular">0 Trades · 0W / 0L</span>
         </div>
-        <a href="/api/export/journal" download="apex_trade_journal.csv" class="btn" style="text-decoration:none; padding: 4px 10px; font-size:11px;">📥 Export CSV</a>
+        <a href="/api/export/journal" download="apex_trade_journal.csv" class="btn" style="text-decoration:none; padding: 4px 10px; font-size:11px;">
+          <svg class="icon" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+          <span>Export CSV</span>
+        </a>
       </div>
       <div class="table-container">
         <table>
@@ -819,7 +945,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             </tr>
           </thead>
           <tbody id="journal-tbody">
-            <!-- Rendered dynamically -->
+            <!-- Rendered reactively -->
           </tbody>
         </table>
       </div>
@@ -854,7 +980,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       container.innerHTML = '';
       for (const [key, firm] of Object.entries(firmTemplates)) {
         const btn = document.createElement('button');
-        btn.className = `tab-btn ${key === currentFirm ? 'active' : ''}`;
+        btn.className = `segment-btn ${key === currentFirm ? 'active' : ''}`;
         btn.textContent = firm.name;
         btn.onclick = () => selectFirm(key);
         container.appendChild(btn);
@@ -872,7 +998,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       sizeContainer.innerHTML = '';
       firm.sizes.forEach(sz => {
         const btn = document.createElement('button');
-        btn.className = `tab-btn ${sz === currentSize ? 'active' : ''}`;
+        btn.className = `segment-btn ${sz === currentSize ? 'active' : ''}`;
         btn.textContent = `$${sz.toLocaleString()}`;
         btn.onclick = () => selectSize(sz);
         sizeContainer.appendChild(btn);
@@ -888,7 +1014,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       phaseKeys.forEach(pk => {
         const pObj = firm.phases[pk];
         const btn = document.createElement('button');
-        btn.className = `tab-btn ${pk === currentPhase ? 'active' : ''}`;
+        btn.className = `segment-btn ${pk === currentPhase ? 'active' : ''}`;
         btn.textContent = pObj.name;
         btn.onclick = () => selectPhase(pk);
         phaseContainer.appendChild(btn);
@@ -928,13 +1054,13 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     function toggleConfigDrawer() {
       const d = document.getElementById('pf-drawer');
-      const btn = document.getElementById('btn-toggle-drawer');
+      const text = document.getElementById('drawer-btn-text');
       if (d.style.display === 'flex') {
         d.style.display = 'none';
-        btn.textContent = '⚙️ Configure Challenge ▾';
+        text.textContent = 'Configure Challenge';
       } else {
         d.style.display = 'flex';
-        btn.textContent = '✕ Close Configurator ▴';
+        text.textContent = 'Close Configurator';
       }
     }
 
@@ -983,14 +1109,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
     function updatePauseButton() {
       const btn = document.getElementById('btn-pause');
+      const text = document.getElementById('pause-text');
+      const icon = document.getElementById('pause-icon');
       const badge = document.getElementById('halt-badge');
       if (isHalted) {
-        btn.textContent = '▶ Resume Bot';
+        text.textContent = 'Resume Bot';
         btn.className = 'btn btn-primary';
+        icon.innerHTML = '<polygon points="5 3 19 12 5 21 5 3"></polygon>';
         badge.style.display = 'inline-flex';
       } else {
-        btn.textContent = '⏸ Pause Bot';
+        text.textContent = 'Pause Bot';
         btn.className = 'btn btn-amber';
+        icon.innerHTML = '<rect x="6" y="4" width="4" height="16" rx="1"></rect><rect x="14" y="4" width="4" height="16" rx="1"></rect>';
         badge.style.display = 'none';
       }
     }
@@ -1048,7 +1178,61 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       }
     }
 
-    // Main Update Loop
+    // Reactive Asset Card Map (Prevents innerHTML wiping!)
+    const renderedCards = {};
+
+    function getOrCreateAssetCard(sym, container) {
+      if (renderedCards[sym]) return renderedCards[sym];
+
+      const subNames = { 'BTCUSDT': 'Bitcoin Perpetual', 'ETHUSDT': 'Ethereum Perpetual', 'PAXGUSDT': 'Physical Gold Spot/Perp' };
+      const card = document.createElement('div');
+      card.className = 'asset-card';
+      card.id = `card-${sym}`;
+      card.innerHTML = `
+        <div class="asset-header">
+          <div>
+            <div class="asset-title">${sym}</div>
+            <div class="asset-desc">${subNames[sym] || 'Perpetual'}</div>
+          </div>
+          <div class="asset-price tabular" id="price-${sym}">$0.00</div>
+        </div>
+
+        <div class="pos-strip flat" id="pos-strip-${sym}">
+          <span id="pos-label-${sym}">FLAT</span>
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span id="pos-pnl-${sym}" class="tabular">Scanning 5m...</span>
+            <button class="btn btn-danger" id="pos-close-${sym}" style="display:none; padding:2px 6px; font-size:10px;" onclick="closeSymbol('${sym}')">Close</button>
+          </div>
+        </div>
+
+        <!-- Center-Zero Delta Bias Gauge -->
+        <div class="conviction-module">
+          <div class="conviction-header">
+            <span class="conviction-label">Model Convexity & Order Flow</span>
+            <span class="conviction-tag" id="bias-tag-${sym}">NEUTRAL</span>
+          </div>
+          <div class="delta-gauge-container">
+            <div class="delta-center-line"></div>
+            <div class="delta-bar-long" id="gauge-long-${sym}" style="width: 0%;"></div>
+            <div class="delta-bar-short" id="gauge-short-${sym}" style="width: 0%;"></div>
+          </div>
+          <div class="conviction-footer">
+            <span id="prob-long-${sym}">P(L) 0.50</span>
+            <span id="prob-short-${sym}">P(S) 0.50</span>
+          </div>
+        </div>
+
+        <div class="asset-footer">
+          <span id="regime-${sym}" class="tabular">REGIME: TRENDING</span>
+          <span id="atr-${sym}" class="tabular">ATR: $0.0</span>
+        </div>
+      `;
+      container.appendChild(card);
+      renderedCards[sym] = card;
+      return card;
+    }
+
+    // Main Reactive Update Loop
     async function updateDashboard() {
       try {
         const res = await fetch('/api/state');
@@ -1058,16 +1242,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         // 1. Session & Engine Status
         isHalted = data.halted || false;
         updatePauseButton();
-        document.getElementById('session-pill').textContent = data.session_name || 'LONDON';
-        const kzPill = document.getElementById('kz-pill');
+        document.getElementById('session-badge').textContent = data.session_name || 'LONDON';
+        const kzBadge = document.getElementById('kz-badge');
         if (data.kill_zone) {
-          kzPill.textContent = data.kill_zone.replace('_KZ', '') + ' KZ';
-          kzPill.style.display = 'inline-flex';
+          kzBadge.textContent = data.kill_zone.replace('_KZ', '') + ' KZ';
+          kzBadge.style.display = 'inline-flex';
         } else {
-          kzPill.style.display = 'none';
+          kzBadge.style.display = 'none';
         }
 
-        // 2. Prop Firm HUD
+        // 2. Prop Firm Cockpit HUD
         const pf = data.prop_firm;
         propFirmMode = data.prop_firm_mode !== false;
         document.getElementById('btn-mode-toggle').textContent = propFirmMode ? 'MODE: ON' : 'MODE: OFF';
@@ -1094,82 +1278,66 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           document.getElementById('pf-equity').textContent = `$${(data.account?.balance || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
         }
 
-        // 3. Multi-Asset Cards
+        // 3. Multi-Asset Reactive In-Place Updates
         const syms = data.symbols || {};
         const assetsContainer = document.getElementById('assets-grid');
-        assetsContainer.innerHTML = '';
-
         let openPositionsCount = 0;
-        let totalOpenRisk = 0;
 
         for (const [sym, info] of Object.entries(syms)) {
-          // Never let LTP flicker to $0
+          getOrCreateAssetCard(sym, assetsContainer);
+
           if (info.ltp && info.ltp > 0) {
             lastKnownPrices[sym] = info.ltp;
           }
           const displayPrice = lastKnownPrices[sym] > 0 ? lastKnownPrices[sym] : (info.ltp || 0);
+          document.getElementById(`price-${sym}`).textContent = `$${Number(displayPrice).toLocaleString(undefined, { minimumFractionDigits: (sym === 'BTCUSDT' ? 1 : 2), maximumFractionDigits: 2 })}`;
 
           const isPosition = info.position === 'OPEN';
           if (isPosition) openPositionsCount++;
 
-          const pClass = isPosition ? (info.direction === 'LONG' ? 'long' : 'short') : 'flat';
-          const pLabel = isPosition ? `${info.direction} @ $${Number(info.entry_price || 0).toLocaleString()}` : 'FLAT';
+          const posStrip = document.getElementById(`pos-strip-${sym}`);
+          posStrip.className = `pos-strip ${isPosition ? (info.direction === 'LONG' ? 'long' : 'short') : 'flat'}`;
+          document.getElementById(`pos-label-${sym}`).textContent = isPosition ? `${info.direction} @ $${Number(info.entry_price || 0).toLocaleString()}` : 'FLAT';
+
           const pnlVal = info.unrealized_pnl || 0;
           const pnlSign = pnlVal >= 0 ? '+' : '';
-          const pnlText = isPosition ? `PnL: ${pnlSign}$${pnlVal.toFixed(2)}` : 'Scanning 5m...';
+          document.getElementById(`pos-pnl-${sym}`).textContent = isPosition ? `PnL: ${pnlSign}$${pnlVal.toFixed(2)}` : 'Scanning 5m setup...';
+          document.getElementById(`pos-close-${sym}`).style.display = isPosition ? 'inline-block' : 'none';
 
-          const pLong = Math.round((info.prob_long || 0.5) * 100);
-          const pShort = 100 - pLong;
+          // Quant Center-Zero Delta Gauge
+          const pLong = (info.prob_long || 0.5);
+          const pShort = 1.0 - pLong;
+          document.getElementById(`prob-long-${sym}`).textContent = `P(L) ${pLong.toFixed(2)}`;
+          document.getElementById(`prob-short-${sym}`).textContent = `P(S) ${pShort.toFixed(2)}`;
 
-          let biasTag = 'NEUTRAL';
-          if (pLong >= 58) biasTag = 'BULLISH BIAS';
-          else if (pShort >= 58) biasTag = 'BEARISH BIAS';
+          const gLong = document.getElementById(`gauge-long-${sym}`);
+          const gShort = document.getElementById(`gauge-short-${sym}`);
+          const bTag = document.getElementById(`bias-tag-${sym}`);
 
-          const subNames = { 'BTCUSDT': 'Bitcoin', 'ETHUSDT': 'Ethereum', 'PAXGUSDT': 'Physical Gold' };
+          if (pLong >= 0.54) {
+            const deltaPct = Math.min(50, (pLong - 0.50) * 200); // 0% to 50%
+            gLong.style.width = `${deltaPct}%`;
+            gShort.style.width = `0%`;
+            bTag.textContent = `+${Math.round(deltaPct * 2)}% BULLISH BIAS`;
+            bTag.style.color = 'var(--green)';
+          } else if (pShort >= 0.54) {
+            const deltaPct = Math.min(50, (pShort - 0.50) * 200);
+            gShort.style.width = `${deltaPct}%`;
+            gLong.style.width = `0%`;
+            bTag.textContent = `-${Math.round(deltaPct * 2)}% BEARISH BIAS`;
+            bTag.style.color = 'var(--red)';
+          } else {
+            gLong.style.width = `0%`;
+            gShort.style.width = `0%`;
+            bTag.textContent = 'NEUTRAL CONSENSUS';
+            bTag.style.color = 'var(--text-muted)';
+          }
 
-          const card = document.createElement('div');
-          card.className = 'asset-card';
-          card.innerHTML = `
-            <div class="asset-head">
-              <div class="asset-info">
-                <div class="asset-sym">${sym}</div>
-                <div class="asset-subname">${subNames[sym] || 'Perpetual'}</div>
-              </div>
-              <div class="asset-price">$${Number(displayPrice).toLocaleString(undefined, { minimumFractionDigits: (sym === 'BTCUSDT' ? 1 : 2), maximumFractionDigits: 2 })}</div>
-            </div>
-
-            <div class="asset-pos-bar ${pClass}">
-              <span>${pLabel}</span>
-              <div style="display:flex; align-items:center; gap:8px;">
-                <span>${pnlText}</span>
-                ${isPosition ? `<button class="btn btn-danger" style="padding:2px 6px; font-size:10px;" onclick="closeSymbol('${sym}')">Close</button>` : ''}
-              </div>
-            </div>
-
-            <div class="prob-container">
-              <div class="prob-labels">
-                <span class="prob-long-lbl">Long ${pLong}%</span>
-                <span class="prob-short-lbl">Short ${pShort}%</span>
-              </div>
-              <div class="prob-bar">
-                <div class="prob-bar-long" style="width: ${pLong}%;"></div>
-                <div class="prob-bar-short" style="width: ${pShort}%;"></div>
-              </div>
-              <div class="prob-meta">
-                <span>Ensemble Consensus</span>
-                <span style="font-weight:600; color:${biasTag.includes('BULL') ? 'var(--green)' : biasTag.includes('BEAR') ? 'var(--red)' : 'var(--text-muted)'};">${biasTag}</span>
-              </div>
-            </div>
-
-            <div class="asset-meta-row">
-              <span>REGIME: ${info.regime || 'TRENDING'}</span>
-              <span>ATR: $${(info.atr || 0).toFixed(1)}</span>
-            </div>
-          `;
-          assetsContainer.appendChild(card);
+          document.getElementById(`regime-${sym}`).textContent = `REGIME: ${info.regime || 'TRENDING'}`;
+          document.getElementById(`atr-${sym}`).textContent = `ATR: $${(info.atr || 0).toFixed(1)}`;
         }
 
-        document.getElementById('open-risk-pill').textContent = `POSITIONS: ${openPositionsCount}/2 MAX`;
+        document.getElementById('open-risk-badge').textContent = `POSITIONS: ${openPositionsCount}/2 MAX`;
 
         // 4. Institutional Liquidity & Key Levels Table
         const liq = data.liquidity || {};
@@ -1183,16 +1351,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
           let sweepBadge = '<span style="color:var(--text-dim);">None</span>';
           if (l.sweep_bullish) {
-            sweepBadge = `<span class="tag-sweep tag-sweep-bull">SWEEP BULL (${l.sweep_level || 'PDL'})</span>`;
+            sweepBadge = `<span class="pill-tag bull">Sweep Bull (${l.sweep_level || 'PDL'})</span>`;
           } else if (l.sweep_bearish) {
-            sweepBadge = `<span class="tag-sweep tag-sweep-bear">SWEEP BEAR (${l.sweep_level || 'PDH'})</span>`;
+            sweepBadge = `<span class="pill-tag bear">Sweep Bear (${l.sweep_level || 'PDH'})</span>`;
           } else if (l.lbma_pm_fix > 0) {
-            sweepBadge = `<span style="color:var(--blue); font-size:11px;">Fix $${l.lbma_pm_fix.toFixed(1)}</span>`;
+            sweepBadge = `<span style="color:var(--blue); font-size:11px;" class="tabular">Fix $${l.lbma_pm_fix.toFixed(1)}</span>`;
           }
 
           const row = document.createElement('tr');
           row.innerHTML = `
-            <td style="font-weight:700;">${sym}</td>
+            <td style="font-weight:600;">${sym}</td>
             <td style="color:var(--green);">${pdh}</td>
             <td style="color:var(--red);">${pdl}</td>
             <td>${asian}</td>
@@ -1205,7 +1373,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         if (data.intel) {
           document.getElementById('fg-val').textContent = `${data.intel.fear_greed} (${data.intel.fear_greed_label})`;
           if (data.intel.next_event_min) {
-            document.getElementById('next-event-text').textContent = `High-Impact Macro Event in ${data.intel.next_event_min} mins`;
+            document.getElementById('next-event-text').textContent = `High-Impact Event in ${data.intel.next_event_min} mins`;
           }
         }
         if (data.cross_market) {
@@ -1237,16 +1405,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         } else {
           jList.slice(0, 15).forEach(t => {
             const pnl = Number(t.pnl_usd || 0);
-            const pnlTag = pnl >= 0 ? `<span class="pnl-tag pnl-pos">+$${pnl.toFixed(2)}</span>` : `<span class="pnl-tag pnl-neg">-$${Math.abs(pnl).toFixed(2)}</span>`;
+            const pnlTag = pnl >= 0 ? `<span class="pill-tag bull">+$${pnl.toFixed(2)}</span>` : `<span class="pill-tag bear">-$${Math.abs(pnl).toFixed(2)}</span>`;
             const row = document.createElement('tr');
             row.innerHTML = `
-              <td>#${t.id}</td>
-              <td style="color:var(--text-muted);">${t.open_ts}</td>
+              <td style="color:var(--text-muted);">#${t.id}</td>
+              <td style="color:var(--text-secondary);">${t.open_ts}</td>
               <td style="font-weight:600;">${t.action}</td>
               <td>$${Number(t.entry_price).toLocaleString()}</td>
               <td>$${Number(t.exit_price).toLocaleString()}</td>
               <td>${pnlTag}</td>
-              <td style="color:var(--text-muted); font-size:11px;">${t.exit_reason || ''}</td>
+              <td style="color:var(--text-secondary); font-size:11px;">${t.exit_reason || ''}</td>
             `;
             jBody.appendChild(row);
           });
@@ -1263,8 +1431,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     updateDashboard();
   </script>
 </body>
-</html>
-"""
+</html>"""
 
 class ApexWebServer:
     """
