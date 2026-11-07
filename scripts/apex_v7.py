@@ -55,6 +55,7 @@ from src.data.providers.funding_rate import FundingRateMonitor
 from src.data.providers.sentiment import SentimentMonitor
 from src.data.providers.cross_market import CrossMarketMonitor
 from src.core.state_manager import StateManager
+from src.core.prop_firm_manager import PropFirmManager
 from src.models.training.retrain_scheduler import RetrainScheduler
 
 # ─── ANSI ────────────────────────────────────────────────────────────────────
@@ -69,6 +70,11 @@ INITIAL_CAPITAL = float(os.getenv("APEX_INITIAL_CAPITAL", "1000.0"))  # APEX v7.
 # Multi-symbol support — add symbols here, models will be loaded per-symbol
 SYMBOLS = ["BTCUSDT"]  # APEX v7.1 — Track A: Extend: ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 MODEL_DIR       = Path("data/models")
+
+# ─── PROP FIRM MODE (SharkFunded Lite 5k 1-Step Challenge) ────────────────────
+PROP_FIRM_MODE    = os.getenv("APEX_PROP_FIRM_MODE", "true").lower() == "true"
+PROP_FIRM_PROFILE = os.getenv("APEX_PROP_FIRM_PROFILE", "sharkfunded_5k_lite_1step")
+prop_firm_manager = PropFirmManager(profile_key=PROP_FIRM_PROFILE) if PROP_FIRM_MODE else None
 
 # ─── RISK CONFIG (loaded from configs/risk.yaml, with safe defaults) ─────────────────────
 def _load_risk_yaml():
@@ -161,11 +167,13 @@ retrain_scheduler: RetrainScheduler | None = None   # set in prewarm()
 candles_5m   = deque(maxlen=210)
 candles_15m  = deque(maxlen=100)
 candles_1h   = deque(maxlen=168)
+candles_4h   = deque(maxlen=50)
 live_candle = {"open": 0.0, "high": 0.0, "low": 0.0, "close": 0.0, "volume": 0.0, "timestamp": 0}
 cur_min_ts  = 0
 acc_1m      = []   # accumulate into 5m
 acc_5m_15m  = []   # accumulate 5m into 15m
 acc_15m_1h  = []   # accumulate 15m into 1h
+acc_1h_4h   = []   # accumulate 1h into 4h
 
 # Async queue for safely passing 5m candles from sync tick handler → async ML loop
 # Instantiated inside main() after the event loop is running
@@ -193,6 +201,9 @@ portfolio = {
     "entry_price": 0.0, "entry_time": 0.0,
     "sl_price": 0.0, "sl_distance": 0.0,
     "tp1_price": 0.0, "tp2_price": 0.0,
+    "tp1_rr": 1.8, "tp2_rr": 3.5,
+    "risk_tier": 0,       # 0=initial, 1=risk reduced to -0.25R, 2=BE locked, 3=TP1 locked
+    "entry_lots": 0.0,
     "notional": 0.0, "initial_notional": 0.0,
     "unrealized_pnl": 0.0, "banked_pnl": 0.0,
     "phase": 0,
@@ -355,6 +366,11 @@ def update_session():
 
 def can_trade() -> tuple[bool, str]:
     now = time.time()
+    # Prop Firm Challenge Circuit Breakers (SharkFunded Lite 5k)
+    if PROP_FIRM_MODE and prop_firm_manager:
+        pf_ok, pf_reason = prop_firm_manager.can_trade()
+        if not pf_ok:
+            return False, f"PROP_FIRM: {pf_reason}"
     if account["halted"]:
         if account["halt_until"] <= now:
             account["halted"] = False; account["halt_reason"] = ""
@@ -383,10 +399,20 @@ def can_trade() -> tuple[bool, str]:
 # ─── STRUCTURAL SL ────────────────────────────────────────────────────────────
 def find_sl(direction: str, entry: float) -> tuple[float, float]:
     atr = max(regime_info["atr"], 80.0)
-    min_sl = max(MIN_SL_USD, atr * 2.0)
-    max_sl = min(MAX_SL_USD, atr * 5.0)
+    # Dynamic ATR bounds: tighter during low vol, giving better R:R and lot capacity
+    min_sl = max(160.0, atr * 1.5)
+    max_sl = min(550.0, atr * 3.5)
 
     candidates = []
+    # Check 15m candles for major structural swing points
+    data_15m = list(candles_15m)[-25:]
+    if len(data_15m) >= 5:
+        if direction == "LONG":
+            candidates.append(min(c["low"] for c in data_15m[-12:]))
+        else:
+            candidates.append(max(c["high"] for c in data_15m[-12:]))
+
+    # Check 5m candles for recent swing points
     data = list(candles_5m)[-40:]
     if len(data) >= 10:
         if direction == "LONG":
@@ -398,11 +424,11 @@ def find_sl(direction: str, entry: float) -> tuple[float, float]:
 
     if direction == "LONG":
         valid = [c for c in candidates if c < entry and (entry - c) >= min_sl]
-        sl_price = max(valid) - atr * 0.3 if valid else entry - min_sl
+        sl_price = max(valid) - atr * 0.25 if valid else entry - min_sl
         sl_dist = entry - sl_price
     else:
         valid = [c for c in candidates if c > entry and (c - entry) >= min_sl]
-        sl_price = min(valid) + atr * 0.3 if valid else entry + min_sl
+        sl_price = min(valid) + atr * 0.25 if valid else entry + min_sl
         sl_dist = sl_price - entry
 
     sl_dist = float(np.clip(sl_dist, min_sl, max_sl))
@@ -411,6 +437,20 @@ def find_sl(direction: str, entry: float) -> tuple[float, float]:
 
 # ─── SIZING ───────────────────────────────────────────────────────────────────
 def size_position(sl_dist: float, prob: float, entry: float, council_score: float = 0.7, direction: str = "LONG") -> tuple[float, float]:
+    # ── PROP FIRM MODE: Size directly to Challenge Target & Drawdown Limits ──
+    if PROP_FIRM_MODE and prop_firm_manager:
+        consec = account.get("consecutive_losses", 0)
+        lots, risk_usd = prop_firm_manager.calculate_lot_size(
+            sl_distance=sl_dist,
+            price=entry,
+            conviction=prob,
+            council_score=council_score,
+            consecutive_losses=consec,
+        )
+        notional = round(lots * entry, 2)
+        return notional, risk_usd
+
+    # ── STANDARD BALANCE SIZING ──
     if prob >= STRONG_PROB or council_score >= 0.80:
         risk_pct = MAX_RISK_PCT
     elif prob >= MIN_PROB + 0.04:
@@ -469,9 +509,17 @@ def execute_signal(signal: TradingSignal):
     sl_price, sl_dist = find_sl(direction, entry)
     if sl_dist <= 0: return
 
-    rr = 3.5 if council >= 0.85 else (3.0 if council >= 0.70 else MIN_RR)
-    tp1 = entry + sl_dist * 2.0 if direction == "LONG" else entry - sl_dist * 2.0
-    tp2 = entry + sl_dist * rr  if direction == "LONG" else entry - sl_dist * rr
+    # Dynamic Regime-Adaptive TP Brackets
+    is_ranging = "ranging" in str(signal.regime).lower()
+    if is_ranging:
+        tp1_rr = 1.6
+        tp2_rr = 2.4
+    else:
+        tp1_rr = 1.8 if council < 0.75 else 2.0
+        tp2_rr = 3.5 if council >= 0.85 else (3.0 if council >= 0.70 else MIN_RR)
+
+    tp1 = entry + sl_dist * tp1_rr if direction == "LONG" else entry - sl_dist * tp1_rr
+    tp2 = entry + sl_dist * tp2_rr if direction == "LONG" else entry - sl_dist * tp2_rr
 
     # APEX v7.2: Snap TP2 to nearest Volume Profile HVN / VPOC level
     try:
@@ -497,6 +545,8 @@ def execute_signal(signal: TradingSignal):
     notional, risk_usd = size_position(sl_dist, prob, entry, council, direction)
     if notional <= 0: return
 
+    entry_lots = round(notional / entry, 2)
+
     now_t   = time.time()
     now_str = datetime.datetime.now().strftime("%H:%M:%S")
     action  = "BUY" if direction == "LONG" else "SELL"
@@ -506,6 +556,9 @@ def execute_signal(signal: TradingSignal):
         "entry_price": entry, "entry_time": now_t,
         "sl_price": sl_price, "sl_distance": sl_dist,
         "tp1_price": tp1, "tp2_price": tp2,
+        "tp1_rr": tp1_rr, "tp2_rr": tp2_rr,
+        "risk_tier": 0,
+        "entry_lots": entry_lots,
         "notional": notional, "initial_notional": notional,
         "unrealized_pnl": 0.0, "banked_pnl": 0.0, "phase": 1,
         "signal_id": signal.signal_id,
@@ -521,8 +574,8 @@ def execute_signal(signal: TradingSignal):
 
     council_str = f"Council:{council:.2f}" if signal.council_approved else f"Council:OVERRIDE({council:.2f})"
     log = (f"[{now_str}] OPEN {action} @${entry:,.1f} | "
-           f"SL:${sl_price:,.1f}(${sl_dist:.0f}) TP2:${tp2:,.1f}({rr:.1f}R) | "
-           f"Prob:{prob:.3f} {council_str} Risk:${risk_usd:.2f}")
+           f"SL:${sl_price:,.1f}(${sl_dist:.0f}) TP2:${tp2:,.1f}({tp2_rr:.1f}R) | "
+           f"Prob:{prob:.3f} {council_str} Risk:${risk_usd:.2f} ({entry_lots:.2f} lots)")
     trade_log.append(log)
     if HEADLESS: print(f"\n🔥 TRADE EVENT: {log}", flush=True)
     telegram(f"APEX OPEN {action} @${entry:,.0f} | SL:${sl_price:,.0f} TP2:${tp2:,.0f} | p={prob:.3f} Council:{council:.2f} | Risk:${risk_usd:.2f}")
@@ -533,6 +586,7 @@ def execute_signal(signal: TradingSignal):
         "action": action, "entry_price": entry,
         "sl_price": sl_price, "tp1_price": tp1, "tp2_price": tp2,
         "sl_dist": sl_dist, "notional": notional, "risk_usd": risk_usd,
+        "lots": entry_lots,
         "leverage": round(notional/account["balance"], 2),
         "prob": prob, "council_score": council,
         "regime": signal.regime, "signal_id": signal.signal_id,
@@ -548,7 +602,7 @@ def execute_signal(signal: TradingSignal):
         async def _place():
             b_name = BROKER_TYPE.upper()
             try:
-                qty = max(round(notional / entry, 3), 0.001)   # BTC quantity
+                qty = entry_lots if entry_lots > 0 else max(round(notional / entry, 2), 0.01)   # BTC quantity
                 side = "Buy" if direction == "LONG" else "Sell"
                 oid = await _active_broker.place_order_with_stops(
                     symbol=SYMBOL,
@@ -635,6 +689,10 @@ def check_exits():
         if is_win and signal_engine and portfolio["signal_id"]:
             signal_engine.resolve_signal(portfolio["signal_id"], True, total)
 
+        # Update prop firm challenge progress
+        if PROP_FIRM_MODE and prop_firm_manager:
+            prop_firm_manager.on_trade_closed(total, reason)
+
         account["total"]   += 1
         account["win_rate"] = round(account["wins"]/account["total"]*100, 1) if account["total"] > 0 else 0
         account["avg_win"]  = round(account["total_wins_usd"]/account["wins"],   2) if account["wins"]   > 0 else 0
@@ -688,13 +746,75 @@ def check_exits():
     tp1 = portfolio["tp1_price"]
     tp2 = portfolio["tp2_price"]
     atr = max(regime_info["atr"], 80.0)
+    sl_dist = max(portfolio.get("sl_distance", 1.0), 1.0)
+    fav_dist = (cur - entry) if direction == "LONG" else (entry - cur)
+    r_mult = fav_dist / sl_dist
+    t_id = portfolio.get("broker_ticket")
+    now_str = datetime.datetime.now().strftime("%H:%M:%S")
 
     # 1. SL (Delegated to broker matching engine when active; otherwise managed in memory)
     if not (DEMO_MODE and portfolio.get("broker_ticket")):
         if direction == "LONG" and cur <= sl: close(cur, "STOP LOSS"); return
         if direction == "SHORT" and cur >= sl: close(cur, "STOP LOSS"); return
 
-    # 2. Partial TP at 2R
+    # ── DYNAMIC TIER 1: Risk Reduction at +1.0R (Tighten SL from -1.0R to -0.25R) ──
+    if portfolio.get("risk_tier", 0) < 1 and r_mult >= 1.0:
+        new_sl = entry - sl_dist * 0.25 if direction == "LONG" else entry + sl_dist * 0.25
+        portfolio["sl_price"] = round(new_sl, 1)
+        portfolio["risk_tier"] = 1
+        log_msg = f"[{now_str}] DYNAMIC TIER 1 (+1.0R): Risk reduced 75% | SL tightened to -0.25R @${new_sl:,.1f}"
+        trade_log.append(log_msg)
+        if HEADLESS: print(f"  ⚡ {log_msg}", flush=True)
+        if DEMO_MODE and _active_broker is not None and t_id:
+            async def _exec_modify_t1(ticket_id, sl_v, tp_v):
+                try:
+                    if hasattr(_active_broker, "modify_position_stops"):
+                        await _active_broker.modify_position_stops(int(ticket_id), new_sl=sl_v, new_tp=tp_v)
+                except Exception:
+                    pass
+            try:
+                import asyncio as _aio
+                _aio.get_event_loop().create_task(_exec_modify_t1(t_id, portfolio["sl_price"], portfolio["tp2_price"]))
+            except Exception:
+                pass
+
+    # ── DYNAMIC TIER 2: Break-Even Lock at +1.5R ──
+    if portfolio.get("risk_tier", 0) < 2 and r_mult >= 1.5:
+        fee_buf = entry * (ROUNDTRIP_BPS * 1.5 / 10000.0)
+        new_sl = entry + fee_buf if direction == "LONG" else entry - fee_buf
+        portfolio["sl_price"] = round(new_sl, 1)
+        portfolio["risk_tier"] = 2
+        log_msg = f"[{now_str}] DYNAMIC TIER 2 (+1.5R): SL moved to Break-Even + fees @${new_sl:,.1f} | RISK FREE"
+        trade_log.append(log_msg)
+        if HEADLESS: print(f"  ⚡ {log_msg}", flush=True)
+        if DEMO_MODE and _active_broker is not None and t_id:
+            async def _exec_modify_t2(ticket_id, sl_v, tp_v):
+                try:
+                    if hasattr(_active_broker, "modify_position_stops"):
+                        await _active_broker.modify_position_stops(int(ticket_id), new_sl=sl_v, new_tp=tp_v)
+                except Exception:
+                    pass
+            try:
+                import asyncio as _aio
+                _aio.get_event_loop().create_task(_exec_modify_t2(t_id, portfolio["sl_price"], portfolio["tp2_price"]))
+            except Exception:
+                pass
+
+    # ── DYNAMIC EARLY PROFIT HARVEST: Violent OFI Reversal Protection ──
+    if r_mult >= 1.0:
+        try:
+            mom_d = momentum_eng.get_diagnostics()
+            ofi_v = float(mom_d.get("ofi", 0.0))
+            if direction == "LONG" and ofi_v <= -0.75:
+                close(cur, f"OFI REVERSAL HARVEST (OFI {ofi_v:+.2f} at +{r_mult:.1f}R)")
+                return
+            elif direction == "SHORT" and ofi_v >= 0.75:
+                close(cur, f"OFI REVERSAL HARVEST (OFI {ofi_v:+.2f} at +{r_mult:.1f}R)")
+                return
+        except Exception:
+            pass
+
+    # ── DYNAMIC TIER 3: Partial TP at TP1 ──
     if portfolio["phase"] == 1:
         hit = (direction=="LONG" and cur>=tp1) or (direction=="SHORT" and cur<=tp1)
         if hit:
@@ -706,36 +826,73 @@ def check_exits():
             fee_buf = entry * (ROUNDTRIP_BPS * 1.5 / 10000.0)
             portfolio["sl_price"] = entry + fee_buf if direction=="LONG" else entry - fee_buf
             portfolio["phase"] = 2
-            trade_log.append(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] "
-                             f"2R TP1 +${partial:.2f} | 50% locked, SL→BE")
-            # ── Modify physical broker SL to Break-Even ──
-            if DEMO_MODE and _active_broker is not None and portfolio.get("broker_ticket"):
-                t_id = portfolio["broker_ticket"]
+            portfolio["risk_tier"] = 3
+            if PROP_FIRM_MODE and prop_firm_manager:
+                prop_firm_manager.on_trade_closed(partial, "TP1 PARTIAL")
+
+            log_msg = f"[{now_str}] TP1 HIT (+{portfolio.get('tp1_rr', 2.0):.1f}R) +${partial:.2f} | 50% locked, SL→BE"
+            trade_log.append(log_msg)
+            if HEADLESS: print(f"  ⚡ {log_msg}", flush=True)
+
+            # ── Execute Physical Partial Close on Broker (MT5) ──
+            if DEMO_MODE and _active_broker is not None and t_id:
+                cur_vol = portfolio.get("entry_lots", 0.0)
+                part_vol = round(cur_vol * 0.50, 2)
                 new_be_sl = portfolio["sl_price"]
                 new_tp2 = portfolio["tp2_price"]
-                async def _exec_broker_be(ticket_id, sl_v, tp_v):
+                async def _exec_broker_partial(ticket_id, vol, sl_v, tp_v):
                     try:
+                        if hasattr(_active_broker, "partial_close_position") and vol >= 0.01:
+                            await _active_broker.partial_close_position(int(ticket_id), volume=vol)
                         if hasattr(_active_broker, "modify_position_stops"):
                             await _active_broker.modify_position_stops(int(ticket_id), new_sl=sl_v, new_tp=tp_v)
-                    except Exception:
-                        pass
+                    except Exception as _e:
+                        trade_log.append(f"[{BROKER_TYPE.upper()}] TP1 sync err: {_e}")
                 try:
                     import asyncio as _aio
-                    _aio.get_event_loop().create_task(_exec_broker_be(t_id, new_be_sl, new_tp2))
+                    _aio.get_event_loop().create_task(_exec_broker_partial(t_id, part_vol, new_be_sl, new_tp2))
                 except Exception:
                     pass
 
-    # 3. Runner trail + full TP
+    # ── DYNAMIC TIER 4: Dynamic Runner Chandelier Trail + Full TP2 ──
     if portfolio["phase"] == 2:
-        trail_buf = atr * 2.5
+        trail_buf = max(atr * 2.0, 160.0)
         if direction == "LONG":
             new_sl = cur - trail_buf
-            if new_sl > portfolio["sl_price"]: portfolio["sl_price"] = new_sl
-            if cur >= tp2: close(cur, "FULL TP"); return
+            if new_sl > portfolio["sl_price"]:
+                old_sl = portfolio["sl_price"]
+                portfolio["sl_price"] = round(new_sl, 1)
+                if (new_sl - old_sl) >= 25.0 and DEMO_MODE and _active_broker is not None and t_id:
+                    async def _ratchet_sl(ticket_id, sl_v, tp_v):
+                        try:
+                            if hasattr(_active_broker, "modify_position_stops"):
+                                await _active_broker.modify_position_stops(int(ticket_id), new_sl=sl_v, new_tp=tp_v)
+                        except Exception:
+                            pass
+                    try:
+                        import asyncio as _aio
+                        _aio.get_event_loop().create_task(_ratchet_sl(t_id, portfolio["sl_price"], portfolio["tp2_price"]))
+                    except Exception:
+                        pass
+            if cur >= tp2: close(cur, f"FULL TP2 ({portfolio.get('tp2_rr', 3.5):.1f}R)"); return
         else:
             new_sl = cur + trail_buf
-            if new_sl < portfolio["sl_price"]: portfolio["sl_price"] = new_sl
-            if cur <= tp2: close(cur, "FULL TP"); return
+            if new_sl < portfolio["sl_price"]:
+                old_sl = portfolio["sl_price"]
+                portfolio["sl_price"] = round(new_sl, 1)
+                if (old_sl - new_sl) >= 25.0 and DEMO_MODE and _active_broker is not None and t_id:
+                    async def _ratchet_sl(ticket_id, sl_v, tp_v):
+                        try:
+                            if hasattr(_active_broker, "modify_position_stops"):
+                                await _active_broker.modify_position_stops(int(ticket_id), new_sl=sl_v, new_tp=tp_v)
+                        except Exception:
+                            pass
+                    try:
+                        import asyncio as _aio
+                        _aio.get_event_loop().create_task(_ratchet_sl(t_id, portfolio["sl_price"], portfolio["tp2_price"]))
+                    except Exception:
+                        pass
+            if cur <= tp2: close(cur, f"FULL TP2 ({portfolio.get('tp2_rr', 3.5):.1f}R)"); return
 
     # 4. Time decay
     if dur_min > 360: close(cur, "MAX DURATION 6h"); return
@@ -830,6 +987,20 @@ def process_tick(price: float, qty: float, is_buyer_maker: bool):
                        "volume": sum(x["volume"] for x in acc_5m_15m), "timestamp": int(now * 1000)}
                 acc_5m_15m.clear()
                 candles_15m.append(dict(c15))
+                acc_15m_1h.append(dict(c15))
+                if len(acc_15m_1h) >= 4:
+                    c1h = {"open": acc_15m_1h[0]["open"], "high": max(x["high"] for x in acc_15m_1h),
+                           "low": min(x["low"] for x in acc_15m_1h), "close": acc_15m_1h[-1]["close"],
+                           "volume": sum(x["volume"] for x in acc_15m_1h), "timestamp": int(now * 1000)}
+                    acc_15m_1h.clear()
+                    candles_1h.append(dict(c1h))
+                    acc_1h_4h.append(dict(c1h))
+                    if len(acc_1h_4h) >= 4:
+                        c4h = {"open": acc_1h_4h[0]["open"], "high": max(x["high"] for x in acc_1h_4h),
+                               "low": min(x["low"] for x in acc_1h_4h), "close": acc_1h_4h[-1]["close"],
+                               "volume": sum(x["volume"] for x in acc_1h_4h), "timestamp": int(now * 1000)}
+                        acc_1h_4h.clear()
+                        candles_4h.append(dict(c4h))
             if _candle_queue is not None:
                 try:
                     _candle_queue.put_nowait(c5)
@@ -1005,11 +1176,12 @@ def prewarm():
     )
     print(f"  ✓ LiveSignalEngine created (ensemble + council + monitor)")
 
-    # 3. Warm up with historical 5m, 15m, and 1h data (robust multi-exchange fetch)
-    print("  Fetching historical 5m, 15m, and 1h candles...")
+    # 3. Warm up with historical 5m, 15m, 1h, and 4h data (robust multi-exchange fetch)
+    print("  Fetching historical 5m, 15m, 1h, and 4h candles...")
     raw5m = fetch_klines(SYMBOL, "5m", 210)
     raw15m = fetch_klines(SYMBOL, "15m", 100)
     raw1h = fetch_klines(SYMBOL, "1h", 72)
+    raw4h = fetch_klines(SYMBOL, "4h", 40)
 
     if not raw5m:
         print("  ⚠️ Warning: Could not fetch 5m candles from any exchange, starting with empty buffer")
@@ -1018,13 +1190,14 @@ def prewarm():
         hist = pd.DataFrame(raw5m)
         df_15 = pd.DataFrame(raw15m) if raw15m else None
         df_1h = pd.DataFrame(raw1h) if raw1h else None
-        signal_engine.warm_up(hist[["timestamp","open","high","low","close","volume"]], df_15m=df_15, df_1h=df_1h)
+        df_4h = pd.DataFrame(raw4h) if raw4h else None
+        signal_engine.warm_up(hist[["timestamp","open","high","low","close","volume"]], df_15m=df_15, df_1h=df_1h, df_4h=df_4h)
         print(f"  ✓ Signal engine warmed up: {signal_engine.live_store.buffer_length} candles")
         for c in raw5m:
             candles_5m.append(c)
         prewarm.replay_candles = raw5m[-3:]
 
-    # Populate 15m & 1h buffers
+    # Populate 15m, 1h & 4h buffers
     for c in (raw15m or []):
         candles_15m.append(c)
     print(f"  ✓ 15M candles loaded: {len(candles_15m)}")
@@ -1032,6 +1205,10 @@ def prewarm():
     for c in (raw1h or []):
         candles_1h.append(c)
     print(f"  ✓ 1H candles loaded: {len(candles_1h)}")
+
+    for c in (raw4h or []):
+        candles_4h.append(c)
+    print(f"  ✓ 4H candles loaded: {len(candles_4h)}")
 
     if raw5m:
         market["ltp"] = float(raw5m[-1]["close"])
@@ -1152,6 +1329,15 @@ def render():
     if account["halted"]: buf.append(row(f" {RED}{BOLD}⛔ {account['halt_reason']}{R}"))
     elif not ok:          buf.append(row(f" {YLW}⏸  {reason}{R}"))
     else:                 buf.append(row(f" {GRN}✓  ALL GATES CLEAR  │  Trades today: {account['trades_today']}/{MAX_TRADES_DAY}{R}"))
+    if PROP_FIRM_MODE and prop_firm_manager:
+        pf = prop_firm_manager.get_hud_metrics()
+        pf_st_c = GRN if pf["status"] in ("IN_PROGRESS", "PHASE_1_PASSED") else RED
+        target_str = f"+${pf['current_profit_usd']:.2f} / +${pf['target_usd']:.0f} ({pf['progress_pct']:.1f}%)"
+        daily_loss_str = f"-${abs(min(0.0, pf['daily_pnl_usd'])):.2f} / -${pf['daily_limit_usd']:.0f} ({pf['daily_loss_used_pct']:.0f}% used)"
+        dd_str = f"-${pf['total_dd_usd']:.2f} / -${pf['max_dd_usd']:.0f} ({pf['total_dd_pct']:.1f}%)"
+        buf.append(DIV)
+        buf.append(row(f"{BOLD}{YLW}🏆 PROP FIRM CHALLENGE [{pf['challenge_name']}]:{R}  Status: {pf_st_c}{pf['status']}{R}"))
+        buf.append(row(f" Virtual Equity: {BOLD}${pf['virtual_balance']:,.2f}{R}  │  Target: {GRN}{target_str}{R}  │  Daily Loss: {daily_loss_str}  │  Max DD: {dd_str}"))
     buf.append(DIV)
 
     # Signal Engine status
@@ -1310,6 +1496,27 @@ async def binance_ws():
                                 "timestamp": int(k["t"]),
                             }
                             candles_5m.append(dict(c5))
+                            acc_5m_15m.append(dict(c5))
+                            if len(acc_5m_15m) >= 3:
+                                c15 = {"open": acc_5m_15m[0]["open"], "high": max(x["high"] for x in acc_5m_15m),
+                                       "low": min(x["low"] for x in acc_5m_15m), "close": acc_5m_15m[-1]["close"],
+                                       "volume": sum(x["volume"] for x in acc_5m_15m), "timestamp": int(k["t"])}
+                                acc_5m_15m.clear()
+                                candles_15m.append(dict(c15))
+                                acc_15m_1h.append(dict(c15))
+                                if len(acc_15m_1h) >= 4:
+                                    c1h = {"open": acc_15m_1h[0]["open"], "high": max(x["high"] for x in acc_15m_1h),
+                                           "low": min(x["low"] for x in acc_15m_1h), "close": acc_15m_1h[-1]["close"],
+                                           "volume": sum(x["volume"] for x in acc_15m_1h), "timestamp": int(k["t"])}
+                                    acc_15m_1h.clear()
+                                    candles_1h.append(dict(c1h))
+                                    acc_1h_4h.append(dict(c1h))
+                                    if len(acc_1h_4h) >= 4:
+                                        c4h = {"open": acc_1h_4h[0]["open"], "high": max(x["high"] for x in acc_1h_4h),
+                                               "low": min(x["low"] for x in acc_1h_4h), "close": acc_1h_4h[-1]["close"],
+                                               "volume": sum(x["volume"] for x in acc_1h_4h), "timestamp": int(k["t"])}
+                                        acc_1h_4h.clear()
+                                        candles_4h.append(dict(c4h))
                             if _candle_queue is not None:
                                 try:
                                     _candle_queue.put_nowait(c5)
@@ -1497,6 +1704,7 @@ def get_dashboard_state() -> dict:
             "duration_min": dur_min,
             "broker_ticket": portfolio.get("broker_ticket", ""),
         },
+        "prop_firm": prop_firm_manager.get_hud_metrics() if (PROP_FIRM_MODE and prop_firm_manager) else None,
         "journal": journal_ui,
     }
 
@@ -1521,6 +1729,8 @@ async def _broker_sync_loop():
                     if pos:
                         # Position is alive on MT5: sync real broker unrealized PnL
                         portfolio["broker_pnl"] = float(pos.get("profit", 0.0))
+                        if PROP_FIRM_MODE and prop_firm_manager:
+                            prop_firm_manager.update_floating_pnl(portfolio["broker_pnl"])
                     else:
                         # Position is NO LONGER open on broker (hit native SL/TP or closed)
                         deal = None
@@ -1546,6 +1756,8 @@ async def _broker_sync_loop():
                                 is_win = exit_profit > 0
                                 account["balance"] += exit_profit
                                 update_health()
+                                if PROP_FIRM_MODE and prop_firm_manager:
+                                    prop_firm_manager.on_trade_closed(exit_profit, reason)
                                 if is_win:
                                     account["wins"] += 1
                                     account["consecutive_losses"] = 0

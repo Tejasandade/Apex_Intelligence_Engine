@@ -486,9 +486,14 @@ class MT5Broker:
     async def close_position_by_ticket(self, ticket: int) -> bool:
         """Close an exact position by ticket at market price."""
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, self._close_position_by_ticket_sync, ticket)
+        return await loop.run_in_executor(None, self._close_position_by_ticket_sync, ticket, None)
 
-    def _close_position_by_ticket_sync(self, ticket: int) -> bool:
+    async def partial_close_position(self, ticket: int, volume: float) -> bool:
+        """Partially close an open position by ticket, banking profit on that portion."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._close_position_by_ticket_sync, ticket, volume)
+
+    def _close_position_by_ticket_sync(self, ticket: int, volume: Optional[float] = None) -> bool:
         if not self._ensure_connected():
             return False
 
@@ -507,6 +512,15 @@ class MT5Broker:
         price = tick.bid if close_type == mt5.ORDER_TYPE_SELL else tick.ask
 
         sym_info = mt5.symbol_info(p.symbol)
+        close_vol = p.volume
+        if volume is not None and 0.0 < float(volume) < p.volume:
+            step = getattr(sym_info, "volume_step", 0.01) if sym_info else 0.01
+            min_v = getattr(sym_info, "volume_min", 0.01) if sym_info else 0.01
+            close_vol = max(min_v, round(float(volume) / step) * step)
+            close_vol = round(close_vol, 4)
+            if (p.volume - close_vol) < min_v:
+                close_vol = p.volume
+
         filling = mt5.ORDER_FILLING_IOC
         if sym_info and hasattr(sym_info, "filling_mode"):
             if sym_info.filling_mode & 2:
@@ -520,12 +534,12 @@ class MT5Broker:
             "action": mt5.TRADE_ACTION_DEAL,
             "position": p.ticket,
             "symbol": p.symbol,
-            "volume": p.volume,
+            "volume": close_vol,
             "type": close_type,
             "price": price,
             "deviation": 20,
             "magic": p.magic,
-            "comment": "Apex Exit",
+            "comment": "Apex Partial Exit" if close_vol < p.volume else "Apex Exit",
             "type_time": mt5.ORDER_TIME_GTC,
             "type_filling": filling,
         }
@@ -536,7 +550,7 @@ class MT5Broker:
             logger.error("mt5_close_failed", ticket=ticket, error=err)
             return False
 
-        logger.info("mt5_position_closed_success", ticket=ticket, exit_price=price)
+        logger.info("mt5_position_closed_success", ticket=ticket, volume=close_vol, exit_price=price)
         return True
 
     async def get_closed_deal(self, ticket: int) -> Optional[dict]:

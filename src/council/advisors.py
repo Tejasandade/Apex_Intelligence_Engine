@@ -142,9 +142,10 @@ class StructureAdvisor(BaseAdvisor):
         factors = 0
         reasons = []
 
-        # ── 1. Higher-Timeframe (15m / 1h) Structure & Liquidity Engine ──
+        # ── 1. Higher-Timeframe (15m / 1h / 4h) Structure & Liquidity Engine ──
         df_15m = kwargs.get("df_15m")
         df_1h = kwargs.get("df_1h")
+        df_4h = kwargs.get("df_4h")
         df_5m = kwargs.get("df_5m")
 
         # Derive 15m from 5m if 15m is not provided directly
@@ -275,6 +276,16 @@ class StructureAdvisor(BaseAdvisor):
             elif direction == "SELL" and current_price >= bb_upper * 0.998:
                 factors += 1
                 reasons.append("At 5m BB upper (premium zone)")
+
+        # 4H Macro Trend Confluence
+        if df_4h is not None and len(df_4h) >= 5:
+            ema_4h = df_4h["close"].ewm(span=min(20, len(df_4h))).mean().iloc[-1]
+            if direction == "BUY" and price > ema_4h:
+                factors += 1.0
+                reasons.append("4H Macro Trend Aligned (Bullish)")
+            elif direction == "SELL" and price < ema_4h:
+                factors += 1.0
+                reasons.append("4H Macro Trend Aligned (Bearish)")
 
         # Strict HTF Trend Veto if no confirmed smart-money liquidity sweep
         if htf_macro_counter and not liquidity_sweep_confirmed:

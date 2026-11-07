@@ -27,6 +27,7 @@ class MultiTimeframeBuffer:
         self._df_5m: pd.DataFrame = pd.DataFrame()
         self._df_15m: pd.DataFrame = pd.DataFrame()
         self._df_1h: pd.DataFrame = pd.DataFrame()
+        self._df_4h: pd.DataFrame = pd.DataFrame()
         self._ready = False
 
     def add_candle(self, candle: dict) -> None:
@@ -79,14 +80,19 @@ class MultiTimeframeBuffer:
         """Get the current 1h DataFrame."""
         return self._df_1h
 
+    def get_4h_df(self) -> pd.DataFrame:
+        """Get the current 4h DataFrame."""
+        return self._df_4h
+
     def seed_direct(
         self,
         df_5m: pd.DataFrame | None = None,
         df_15m: pd.DataFrame | None = None,
         df_1h: pd.DataFrame | None = None,
+        df_4h: pd.DataFrame | None = None,
     ) -> bool:
         """
-        Directly populate 5m, 15m, and 1h buffers from pre-fetched historical klines.
+        Directly populate 5m, 15m, 1h, and 4h buffers from pre-fetched historical klines.
         Eliminates the multi-candle warmup wait at startup.
         """
         if df_5m is not None and not df_5m.empty:
@@ -129,6 +135,23 @@ class MultiTimeframeBuffer:
                 "timestamp": "last",
             }
             self._df_1h = self._df_15m.resample("1h").agg(agg_dict).dropna()
+
+        if df_4h is not None and not df_4h.empty:
+            d4h = df_4h.copy()
+            if "datetime" not in d4h.columns and "timestamp" in d4h.columns:
+                d4h["datetime"] = pd.to_datetime(d4h["timestamp"], unit="ms")
+                d4h.set_index("datetime", inplace=True)
+            self._df_4h = d4h
+        elif self._df_1h is not None and len(self._df_1h) >= 4:
+            agg_dict = {
+                "open": "first",
+                "high": "max",
+                "low": "min",
+                "close": "last",
+                "volume": "sum",
+                "timestamp": "last",
+            }
+            self._df_4h = self._df_1h.resample("4h").agg(agg_dict).dropna()
 
         self._ready = len(self._df_5m) >= 10 or len(self._df_15m) >= 5
         return self._ready

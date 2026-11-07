@@ -345,6 +345,57 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
     </div>
 
+    <!-- Prop Firm Challenge Card (SharkFunded Lite 5K) -->
+    <div id="prop-firm-card" class="card" style="display: none; border-left: 4px solid var(--accent-gold);">
+      <div class="card-title">
+        <span style="display: flex; align-items: center; gap: 8px;">
+          <span style="color: var(--accent-gold); font-size: 16px;">🏆</span>
+          <span id="pf-title" style="font-weight: 700; color: #fff;">SharkFunded Lite 5K (1-Step Challenge)</span>
+        </span>
+        <span class="badge" id="pf-status-badge" style="background: rgba(0, 240, 144, 0.15); color: var(--accent-green); border: 1px solid rgba(0, 240, 144, 0.3);">IN PROGRESS</span>
+      </div>
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; margin-top: 10px;">
+        <div style="background:#0d121c; padding: 12px; border-radius: 6px;">
+          <div style="font-size: 11px; color: var(--text-muted); text-transform: uppercase;">Virtual Challenge Equity</div>
+          <div style="font-size: 20px; font-weight: 700; font-family: var(--font-mono); color: #fff;" id="pf-balance">$5,000.00</div>
+          <div style="font-size: 11px; color: var(--text-muted); margin-top: 2px;">Baseline: $5,000 &bull; Target: $5,450 (+9.0%)</div>
+        </div>
+
+        <div style="background:#0d121c; padding: 12px; border-radius: 6px;">
+          <div style="font-size: 11px; color: var(--text-muted); text-transform: uppercase; display: flex; justify-content: space-between;">
+            <span>Target Progress</span>
+            <span id="pf-target-text" class="green" style="font-weight: 600;">$0 / $450 (0.0%)</span>
+          </div>
+          <div class="prob-track" style="margin-top: 6px; height: 8px;">
+            <div id="pf-target-bar" class="prob-fill-long" style="width: 0%;"></div>
+          </div>
+          <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">Remaining: <span id="pf-target-rem" class="cyan">$450.00</span></div>
+        </div>
+
+        <div style="background:#0d121c; padding: 12px; border-radius: 6px;">
+          <div style="font-size: 11px; color: var(--text-muted); text-transform: uppercase; display: flex; justify-content: space-between;">
+            <span>Daily Drawdown (3% max)</span>
+            <span id="pf-daily-loss" class="green" style="font-weight: 600;">-$0 / -$150</span>
+          </div>
+          <div class="prob-track" style="margin-top: 6px; height: 8px;">
+            <div id="pf-daily-bar" class="prob-fill-short" style="width: 0%;"></div>
+          </div>
+          <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">Circuit Breaker: <span class="cyan">-$112.50 (2.25%)</span></div>
+        </div>
+
+        <div style="background:#0d121c; padding: 12px; border-radius: 6px;">
+          <div style="font-size: 11px; color: var(--text-muted); text-transform: uppercase; display: flex; justify-content: space-between;">
+            <span>Max Drawdown (6% max)</span>
+            <span id="pf-total-dd" class="green" style="font-weight: 600;">-$0 / -$300</span>
+          </div>
+          <div class="prob-track" style="margin-top: 6px; height: 8px;">
+            <div id="pf-total-bar" class="prob-fill-short" style="width: 0%;"></div>
+          </div>
+          <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">Breach Floor: <span class="red">$4,700.00</span></div>
+        </div>
+      </div>
+    </div>
+
     <!-- Active Position Banner -->
     <div id="position-container">
       <!-- Populated dynamically -->
@@ -476,6 +527,59 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         document.getElementById('profit-factor').textContent = data.account.profit_factor.toFixed(2);
         document.getElementById('trades-today').textContent = `${data.account.trades_today} / ${data.account.max_trades_day}`;
         document.getElementById('models-active').textContent = `${data.ml.models_count} Active Models`;
+
+        // Prop Firm Challenge Data
+        if (data.prop_firm) {
+          const pf = data.prop_firm;
+          const pfCard = document.getElementById('prop-firm-card');
+          if (pfCard) {
+            pfCard.style.display = 'block';
+            document.getElementById('pf-title').textContent = pf.challenge_name || 'SharkFunded Lite 5K';
+
+            const badge = document.getElementById('pf-status-badge');
+            badge.textContent = pf.status;
+            if (pf.status === 'PHASE_1_PASSED') {
+              badge.style.background = 'rgba(0, 240, 144, 0.2)';
+              badge.style.color = 'var(--accent-green)';
+            } else if (pf.status === 'DAILY_HALT' || pf.status === 'BREACHED') {
+              badge.style.background = 'rgba(255, 77, 77, 0.2)';
+              badge.style.color = 'var(--accent-red)';
+            } else {
+              badge.style.background = 'rgba(0, 216, 255, 0.15)';
+              badge.style.color = 'var(--accent-cyan)';
+            }
+
+            document.getElementById('pf-balance').textContent = '$' + Number(pf.virtual_balance).toLocaleString(undefined, {minimumFractionDigits: 2});
+
+            // Target
+            const curProf = Number(pf.current_profit_usd || 0);
+            const tgtUsd = Number(pf.target_usd || 450);
+            const progPct = Number(pf.progress_pct || 0);
+            document.getElementById('pf-target-text').textContent = `${curProf >= 0 ? '+$' : '-$'}${Math.abs(curProf).toFixed(2)} / +$${tgtUsd.toFixed(0)} (${progPct.toFixed(1)}%)`;
+            document.getElementById('pf-target-bar').style.width = Math.min(100, Math.max(0, progPct)) + '%';
+            const remUsd = Math.max(0, tgtUsd - curProf);
+            document.getElementById('pf-target-rem').textContent = '$' + remUsd.toFixed(2);
+
+            // Daily Drawdown
+            const dLoss = Math.abs(Math.min(0, Number(pf.daily_pnl_usd || 0)));
+            const dLimit = Number(pf.daily_limit_usd || 150);
+            const dUsedPct = Number(pf.daily_loss_used_pct || 0);
+            const dElem = document.getElementById('pf-daily-loss');
+            dElem.textContent = `-$${dLoss.toFixed(2)} / -$${dLimit.toFixed(0)} (${dUsedPct.toFixed(1)}%)`;
+            dElem.className = dUsedPct > 60 ? 'red' : (dUsedPct > 30 ? 'gold' : 'green');
+            document.getElementById('pf-daily-bar').style.width = Math.min(100, Math.max(0, dUsedPct)) + '%';
+
+            // Total Drawdown
+            const totDd = Number(pf.total_dd_usd || 0);
+            const maxDd = Number(pf.max_dd_usd || 300);
+            const totDdPct = Number(pf.total_dd_pct || 0);
+            const tElem = document.getElementById('pf-total-dd');
+            tElem.textContent = `-$${totDd.toFixed(2)} / -$${maxDd.toFixed(0)} (${totDdPct.toFixed(1)}%)`;
+            const ddBarPct = Math.min(100, (totDd / maxDd) * 100);
+            tElem.className = ddBarPct > 60 ? 'red' : (ddBarPct > 30 ? 'gold' : 'green');
+            document.getElementById('pf-total-bar').style.width = Math.min(100, Math.max(0, ddBarPct)) + '%';
+          }
+        }
 
         // ML Bars
         const pLong = Number(data.ml.prob_long || 0.5) * 100;

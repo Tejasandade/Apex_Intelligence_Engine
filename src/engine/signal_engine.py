@@ -226,10 +226,11 @@ class LiveSignalEngine:
         historical_data: pd.DataFrame,
         df_15m: pd.DataFrame | None = None,
         df_1h: pd.DataFrame | None = None,
+        df_4h: pd.DataFrame | None = None,
     ) -> None:
         """Prime the feature store, MTF buffer, and retrainer with historical data."""
         self.live_store.warm_up(historical_data)
-        self.mtf_buffer.seed_direct(df_5m=historical_data, df_15m=df_15m, df_1h=df_1h)
+        self.mtf_buffer.seed_direct(df_5m=historical_data, df_15m=df_15m, df_1h=df_1h, df_4h=df_4h)
 
         # Warm up HTF EMAs using the historical data (O(N) initial pass)
         if not historical_data.empty and "close" in historical_data.columns:
@@ -479,6 +480,7 @@ class LiveSignalEngine:
                 df_5m=self.mtf_buffer.get_5m_df() if self.mtf_buffer.is_ready() else None,
                 df_15m=self.mtf_buffer.get_15m_df() if self.mtf_buffer.is_ready() else None,
                 df_1h=self.mtf_buffer.get_1h_df() if self.mtf_buffer.is_ready() else None,
+                df_4h=self.mtf_buffer.get_4h_df() if self.mtf_buffer.is_ready() else None,
                 mtf_ready=self.mtf_buffer.is_ready(),
                 oracle_levels=oracle_levels or [],
                 strategy_type=strat_type,
