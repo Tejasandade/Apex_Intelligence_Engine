@@ -2612,82 +2612,111 @@ def get_dashboard_state() -> dict:
         if c_list: return float(c_list[-1].get("close", 0.0))
         return 0.0
 
+    # Build symbols payload with MTF trends and sparkline closes
+    symbols_payload = {}
+    for sym in TRADED_SYMBOLS:
+        c5 = list(symbol_candles_5m.get(sym, []))
+        ms = symbol_macro_structure.get(sym, {})
+        trend_5m = "BULL" if (len(c5) >= 2 and float(c5[-1].get("close", 0)) >= float(c5[-2].get("close", 0))) else "BEAR"
+        spark = [round(float(c.get("close", 0.0)), 2) for c in c5[-16:]]
+        if not spark and _safe_price(sym, "ltp") > 0:
+            spark = [_safe_price(sym, "ltp")]
+
+        symbols_payload[sym] = {
+            "ltp": _safe_price(sym, "ltp"),
+            "bid": _safe_price(sym, "bid"),
+            "ask": _safe_price(sym, "ask"),
+            "prob_long": symbol_live_probs.get(sym, {}).get("long", 0.5),
+            "prob_short": symbol_live_probs.get(sym, {}).get("short", 0.5),
+            "regime": symbol_regime_info.get(sym, {}).get("current", "UNKNOWN"),
+            "atr": symbol_regime_info.get(sym, {}).get("atr", 0.0),
+            "position": portfolios.get(sym, {}).get("position", "FLAT"),
+            "direction": portfolios.get(sym, {}).get("direction"),
+            "entry_price": portfolios.get(sym, {}).get("entry_price", 0.0),
+            "sl_price": portfolios.get(sym, {}).get("sl_price", 0.0),
+            "tp1_price": portfolios.get(sym, {}).get("tp1_price", 0.0),
+            "unrealized_pnl": portfolios.get(sym, {}).get("broker_pnl") if portfolios.get(sym, {}).get("broker_ticket") else portfolios.get(sym, {}).get("unrealized_pnl", 0.0),
+            "sparkline": spark,
+            "mtf": {
+                "1d": "BULL" if "BULL" in ms.get("trend_1d", "") else ("BEAR" if "BEAR" in ms.get("trend_1d", "") else "NEUT"),
+                "4h": "BULL" if "BULL" in ms.get("trend_4h", "") else ("BEAR" if "BEAR" in ms.get("trend_4h", "") else "NEUT"),
+                "1h": "BULL" if "BULL" in ms.get("trend_1h", "") else ("BEAR" if "BEAR" in ms.get("trend_1h", "") else "NEUT"),
+                "5m": trend_5m,
+                "bias": ms.get("macro_bias", "NEUTRAL"),
+            }
+        }
+
+    pf_metrics = prop_firm_manager.get_hud_metrics() if (PROP_FIRM_MODE and prop_firm_manager) else None
+    if pf_metrics:
+        init_b = float(pf_metrics.get("initial_balance", 5000.0))
+        eq_pts = [init_b]
+        cur_b = init_b
+        for t in trade_journal[-30:]:
+            cur_b += float(t.get("pnl_usd", 0.0))
+            eq_pts.append(round(cur_b, 2))
+        if round(cur_b, 2) != round(pf_metrics.get("virtual_balance", cur_b), 2):
+            eq_pts.append(round(float(pf_metrics.get("virtual_balance", cur_b)), 2))
+        pf_metrics["equity_curve"] = eq_pts
+
     return {
-        "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "halted": account.get("halted", False),
-        "halt_reason": account.get("halt_reason", ""),
-        "session_name": session.get("name", "LONDON"),
-        "kill_zone": session.get("kill_zone", ""),
-        "prop_firm_mode": PROP_FIRM_MODE,
-        "market": {
-            "ltp": _safe_price(PRIMARY_SYMBOL, "ltp") or market.get("ltp", 0.0),
-            "bid": _safe_price(PRIMARY_SYMBOL, "bid") or market.get("bid", 0.0),
-            "ask": _safe_price(PRIMARY_SYMBOL, "ask") or market.get("ask", 0.0),
-            "ws_connected": market.get("ws_connected", False),
-            "ticks": market.get("ticks", 0),
-        },
-        "account": {
-            "balance": round(account.get("balance", 0.0), 2),
-            "net_pnl": round(account.get("net_pnl", 0.0), 2),
-            "drawdown_pct": round(account.get("drawdown_pct", 0.0), 2),
-            "wins": account.get("wins", 0),
-            "losses": account.get("losses", 0),
-            "win_rate": round(account.get("win_rate", 0.0), 1),
-            "profit_factor": round(account.get("profit_factor", 0.0), 2),
-            "trades_today": account.get("trades_today", 0),
-            "max_trades_day": MAX_TRADES_DAY,
-        },
-        "intel": {
-            "fear_greed": fg_val,
-            "fear_greed_label": fg_lbl,
-            "funding_pct": funding_pct,
-            "news_clear": not is_blk,
-            "next_event_min": mins_to,
-        },
-        "cross_market": cross_market_monitor.get_state(),
-        "lead_lag": lead_lag_diag,
-        "ml": {
-            "regime": regime_info.get("current", "UNKNOWN"),
-            "atr": round(regime_info.get("atr", 0.0), 1),
-            "prob_long": round(live_probs.get("long", 0.5), 4),
-            "prob_short": round(live_probs.get("short", 0.5), 4),
-            "candles_evaluated": signal_engine._candles_processed if signal_engine else 0,
-            "models_count": _loaded_model_count,
-        },
-        "momentum": {
-            "ofi": ofi_val,
-        },
-        "position": {
-            "status": portfolio.get("position", "FLAT"),
-            "direction": portfolio.get("direction", ""),
-            "entry_price": portfolio.get("entry_price", 0.0),
-            "sl_price": portfolio.get("sl_price", 0.0),
-            "tp1_price": portfolio.get("tp1_price", 0.0),
-            "tp2_price": portfolio.get("tp2_price", 0.0),
-            "unrealized_pnl": round(portfolio.get("broker_pnl") if portfolio.get("broker_ticket") and portfolio.get("broker_pnl") != 0.0 else portfolio.get("unrealized_pnl", 0.0), 2),
-            "duration_min": dur_min,
-            "broker_ticket": portfolio.get("broker_ticket", ""),
-        },
-        "symbols": {
-            sym: {
-                "ltp": _safe_price(sym, "ltp"),
-                "bid": _safe_price(sym, "bid"),
-                "ask": _safe_price(sym, "ask"),
-                "prob_long": symbol_live_probs.get(sym, {}).get("long", 0.5),
-                "prob_short": symbol_live_probs.get(sym, {}).get("short", 0.5),
-                "regime": symbol_regime_info.get(sym, {}).get("current", "UNKNOWN"),
-                "atr": symbol_regime_info.get(sym, {}).get("atr", 0.0),
-                "position": portfolios.get(sym, {}).get("position", "FLAT"),
-                "direction": portfolios.get(sym, {}).get("direction"),
-                "entry_price": portfolios.get(sym, {}).get("entry_price", 0.0),
-                "unrealized_pnl": portfolios.get(sym, {}).get("broker_pnl") if portfolios.get(sym, {}).get("broker_ticket") else portfolios.get(sym, {}).get("unrealized_pnl", 0.0),
-            } for sym in TRADED_SYMBOLS
-        },
-        "liquidity": liq_map,
-        "retrain_status": retrain_map,
-        "prop_firm": prop_firm_manager.get_hud_metrics() if (PROP_FIRM_MODE and prop_firm_manager) else None,
-        "journal": journal_ui,
-    }
+            "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "halted": account.get("halted", False),
+            "halt_reason": account.get("halt_reason", ""),
+            "session_name": session.get("name", "LONDON"),
+            "kill_zone": session.get("kill_zone", ""),
+            "prop_firm_mode": PROP_FIRM_MODE,
+            "market": {
+                "ltp": _safe_price(PRIMARY_SYMBOL, "ltp") or market.get("ltp", 0.0),
+                "bid": _safe_price(PRIMARY_SYMBOL, "bid") or market.get("bid", 0.0),
+                "ask": _safe_price(PRIMARY_SYMBOL, "ask") or market.get("ask", 0.0),
+                "ws_connected": market.get("ws_connected", False),
+                "ticks": market.get("ticks", 0),
+            },
+            "account": {
+                "balance": round(account.get("balance", 0.0), 2),
+                "net_pnl": round(account.get("net_pnl", 0.0), 2),
+                "drawdown_pct": round(account.get("drawdown_pct", 0.0), 2),
+                "wins": account.get("wins", 0),
+                "losses": account.get("losses", 0),
+                "total": account.get("total_trades", 0),
+                "win_rate": round(account.get("win_rate", 0.0), 1),
+                "profit_factor": round(account.get("profit_factor", 0.0), 2),
+                "trades_today": account.get("trades_today", 0),
+                "max_trades_day": MAX_TRADES_PER_DAY,
+            },
+            "intel": {
+                "fear_greed": fg_val,
+                "fear_greed_label": fg_lbl,
+                "funding_rate": funding_pct,
+                "news_blackout": is_blk,
+                "next_event_min": mins_to,
+                "regime": regime_info.get("current", "UNKNOWN"),
+                "atr": round(regime_info.get("atr", 0.0), 1),
+                "prob_long": round(live_probs.get("long", 0.5), 4),
+                "prob_short": round(live_probs.get("short", 0.5), 4),
+                "candles_evaluated": signal_engine._candles_processed if signal_engine else 0,
+                "models_count": _loaded_model_count,
+            },
+            "momentum": {
+                "ofi": ofi_val,
+            },
+            "position": {
+                "status": portfolio.get("position", "FLAT"),
+                "direction": portfolio.get("direction", ""),
+                "entry_price": portfolio.get("entry_price", 0.0),
+                "sl_price": portfolio.get("sl_price", 0.0),
+                "tp1_price": portfolio.get("tp1_price", 0.0),
+                "tp2_price": portfolio.get("tp2_price", 0.0),
+                "unrealized_pnl": round(portfolio.get("broker_pnl") if portfolio.get("broker_ticket") and portfolio.get("broker_pnl") != 0.0 else portfolio.get("unrealized_pnl", 0.0), 2),
+                "duration_min": dur_min,
+                "broker_ticket": portfolio.get("broker_ticket", ""),
+            },
+            "symbols": symbols_payload,
+            "liquidity": liq_map,
+            "retrain_status": retrain_map,
+            "prop_firm": pf_metrics,
+            "journal": journal_ui,
+        }
 
 
 def _do_close_symbol(sym: str, exit_profit: float, exit_price: float, reason: str):

@@ -35,7 +35,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       --surface-elevated: #1a202c;
       --surface-hover: #1f2634;
       
-      /* Hairline Structural Borders (No Fuzzy AI Halo Glow) */
+      /* Hairline Structural Borders */
       --border-hairline: rgba(255, 255, 255, 0.06);
       --border-subtle: rgba(255, 255, 255, 0.10);
       --border-focus: #2962ff;
@@ -92,7 +92,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       padding: 16px 20px 32px 20px;
     }
 
-    /* Tabular numbers for stability across all numbers */
     .tabular, .num, td, input, .metric-val, .badge-mono {
       font-family: var(--font-mono);
       font-variant-numeric: tabular-nums;
@@ -117,6 +116,61 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       stroke: currentColor;
       fill: none;
       vertical-align: middle;
+    }
+
+    /* Toast Notification Center */
+    #toast-container {
+      position: fixed;
+      top: 16px;
+      right: 20px;
+      z-index: 99999;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      pointer-events: none;
+      max-width: 380px;
+    }
+    .toast {
+      pointer-events: auto;
+      background: var(--surface-subtle);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-md);
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.7);
+      padding: 10px 14px;
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      font-size: 12px;
+      color: var(--text-primary);
+      animation: toastSlide 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+      transition: opacity 0.2s ease, transform 0.2s ease;
+    }
+    .toast.toast-success {
+      border-color: var(--green-border);
+      background: #0d1a16;
+    }
+    .toast.toast-danger {
+      border-color: var(--red-border);
+      background: #1c0e12;
+    }
+    .toast.toast-info {
+      border-color: var(--blue-soft);
+      background: #0e1524;
+    }
+    .toast-title {
+      font-weight: 600;
+      margin-bottom: 2px;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+    }
+    .toast-body {
+      color: var(--text-secondary);
+      font-size: 12px;
+    }
+    @keyframes toastSlide {
+      from { opacity: 0; transform: translateX(20px); }
+      to { opacity: 1; transform: translateX(0); }
     }
 
     /* Top Masthead */
@@ -204,7 +258,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       gap: 8px;
     }
 
-    /* Buttons with tactile active scale (make-interfaces-feel-better rule: scale 0.97) */
+    /* Buttons with tactile active scale */
     .btn {
       display: inline-flex;
       align-items: center;
@@ -254,7 +308,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       background: #1b52e8;
     }
 
-    /* Surfaces / Panels (No Lazy Nested Cards) */
+    /* Surfaces / Panels */
     .surface-panel {
       background: var(--surface);
       border: 1px solid var(--border-hairline);
@@ -263,7 +317,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       overflow: hidden;
     }
 
-    /* Section Subheaders */
     .section-header {
       display: flex;
       justify-content: space-between;
@@ -327,7 +380,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       gap: 8px;
     }
 
-    /* Unified Horizontal Metric Columns (Divided by crisp hairlines, NOT nested boxes) */
+    /* Unified Horizontal Metric Columns */
     .cockpit-metrics {
       display: grid;
       grid-template-columns: repeat(3, 1fr);
@@ -375,7 +428,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
 
     /* Accordion Configurator Drawer */
-    #pf-drawer {
+    #pf-drawer, #pf-chart-drawer {
       display: none;
       padding: 16px;
       background: #0b0e13;
@@ -456,7 +509,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     /* Multi-Asset Grid */
     .assets-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
       gap: 12px;
     }
     .asset-card {
@@ -467,7 +520,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       padding: 14px 16px;
       display: flex;
       flex-direction: column;
-      gap: 12px;
+      gap: 10px;
       transition: border-color 0.15s ease;
     }
     .asset-card:hover {
@@ -476,7 +529,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     .asset-header {
       display: flex;
       justify-content: space-between;
-      align-items: flex-start;
+      align-items: center;
     }
     .asset-title {
       font-size: 14px;
@@ -488,11 +541,57 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       font-size: 11px;
       color: var(--text-muted);
     }
+    
+    /* Header Right: Price + Sparkline Container */
+    .price-sparkline-group {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
     .asset-price {
       font-size: 16px;
       font-weight: 600;
       color: var(--text-primary);
       text-align: right;
+    }
+    .sparkline-svg {
+      width: 88px;
+      height: 26px;
+      overflow: visible;
+    }
+
+    /* MTF 4-Timeframe Matrix Strip */
+    .mtf-matrix {
+      display: flex;
+      gap: 5px;
+      align-items: center;
+      background: var(--surface-subtle);
+      border: 1px solid var(--border-hairline);
+      border-radius: var(--radius-sm);
+      padding: 4px 8px;
+    }
+    .mtf-cell {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      font-size: 10px;
+      font-family: var(--font-mono);
+      font-weight: 600;
+      padding: 1px 5px;
+      border-radius: 3px;
+      color: var(--text-secondary);
+    }
+    .mtf-cell.bull {
+      background: var(--green-soft);
+      color: var(--green);
+    }
+    .mtf-cell.bear {
+      background: var(--red-soft);
+      color: var(--red);
+    }
+    .mtf-cell.neut {
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--text-muted);
     }
 
     /* Position Status Strip */
@@ -525,7 +624,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     .conviction-module {
       display: flex;
       flex-direction: column;
-      gap: 5px;
+      gap: 4px;
     }
     .conviction-header {
       display: flex;
@@ -588,7 +687,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       display: flex;
       justify-content: space-between;
       align-items: center;
-      padding-top: 8px;
+      padding-top: 6px;
       border-top: 1px solid var(--border-hairline);
       font-size: 11px;
       color: var(--text-muted);
@@ -693,6 +792,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </style>
 </head>
 <body>
+  <!-- Toast Notification Center -->
+  <div id="toast-container"></div>
+
   <div class="container">
 
     <!-- Top Masthead -->
@@ -717,6 +819,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         </div>
       </div>
       <div class="header-actions">
+        <button class="btn" id="btn-audio" onclick="toggleAudio()">
+          <svg class="icon" id="audio-icon" viewBox="0 0 24 24"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path></svg>
+          <span id="audio-text">Audio: ON</span>
+        </button>
         <button class="btn btn-amber" id="btn-pause" onclick="togglePause()">
           <svg class="icon" id="pause-icon" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"></rect><rect x="14" y="4" width="4" height="16" rx="1"></rect></svg>
           <span id="pause-text">Pause Bot</span>
@@ -739,6 +845,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <div class="cockpit-equity" id="pf-equity">$5,000.00</div>
         </div>
         <div class="cockpit-controls">
+          <button class="btn" id="btn-toggle-chart" onclick="toggleChartDrawer()">
+            <svg class="icon" viewBox="0 0 24 24"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
+            <span id="chart-btn-text">Equity Trajectory ▾</span>
+          </button>
           <button class="btn" id="btn-toggle-drawer" onclick="toggleConfigDrawer()">
             <svg class="icon" viewBox="0 0 24 24"><line x1="4" y1="21" x2="4" y2="14"></line><line x1="4" y1="10" x2="4" y2="3"></line><line x1="12" y1="21" x2="12" y2="12"></line><line x1="12" y1="8" x2="12" y2="3"></line><line x1="20" y1="21" x2="20" y2="16"></line><line x1="20" y1="12" x2="20" y2="3"></line><line x1="1" y1="14" x2="7" y2="14"></line><line x1="9" y1="8" x2="15" y2="8"></line><line x1="17" y1="16" x2="23" y2="16"></line></svg>
             <span id="drawer-btn-text">Configure Challenge</span>
@@ -752,22 +862,31 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         </div>
       </div>
 
+      <!-- Expandable Equity Curve Trajectory Drawer -->
+      <div id="pf-chart-drawer">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+          <div class="drawer-label" style="margin:0;">Virtual Equity Trajectory vs. Challenge Bounds</div>
+          <div style="font-size:11px; color:var(--text-secondary); display:flex; gap:12px;" class="tabular">
+            <span style="color:var(--green);">Target Ceiling: <span id="chart-tgt-lbl">$5,450.00</span></span>
+            <span style="color:var(--text-muted);">Baseline: <span id="chart-base-lbl">$5,000.00</span></span>
+            <span style="color:var(--red);">Max DD Stop: <span id="chart-dd-lbl">$4,700.00</span></span>
+          </div>
+        </div>
+        <div style="position:relative; width:100%; height:130px; background:#080a0e; border:1px solid var(--border-hairline); border-radius:var(--radius-sm); overflow:hidden;">
+          <svg id="equity-svg" width="100%" height="130" style="display:block;"></svg>
+        </div>
+      </div>
+
       <!-- Expandable Challenge Configurator Drawer -->
       <div id="pf-drawer">
         <div class="drawer-label">1. Select Prop Firm</div>
-        <div class="segment-group" id="firm-tabs">
-          <!-- Dynamically populated -->
-        </div>
+        <div class="segment-group" id="firm-tabs"></div>
 
         <div class="drawer-label" style="margin-top: 4px;">2. Challenge Size</div>
-        <div class="segment-group" id="size-pills">
-          <!-- Dynamically populated -->
-        </div>
+        <div class="segment-group" id="size-pills"></div>
 
         <div class="drawer-label" style="margin-top: 4px;">3. Challenge Phase / Tier</div>
-        <div class="segment-group" id="phase-pills">
-          <!-- Dynamically populated -->
-        </div>
+        <div class="segment-group" id="phase-pills"></div>
 
         <div class="drawer-label" style="margin-top: 6px;">4. Exact Rule Parameters (Editable)</div>
         <div class="form-grid">
@@ -811,7 +930,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         </div>
       </div>
 
-      <!-- Unified 3-Column Metrics (Hairline Dividers, Clean Typographic Hierarchy) -->
+      <!-- Unified 3-Column Metrics -->
       <div class="cockpit-metrics">
         <div class="metric-col">
           <div class="metric-top">
@@ -961,6 +1080,70 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     let lastKnownPrices = { 'BTCUSDT': 0, 'ETHUSDT': 0, 'PAXGUSDT': 0 };
     let isHalted = false;
     let propFirmMode = true;
+    let audioEnabled = true;
+
+    // State tracking for audio alerts & toasts
+    let knownPositions = {};
+    let lastKnownTradeCount = null;
+
+    function toggleAudio() {
+      audioEnabled = !audioEnabled;
+      const text = document.getElementById('audio-text');
+      const icon = document.getElementById('audio-icon');
+      if (audioEnabled) {
+        text.textContent = 'Audio: ON';
+        icon.innerHTML = '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>';
+        showToast('AUDIO ALERTS ENABLED', 'Execution chimes active', 'info');
+      } else {
+        text.textContent = 'Audio: OFF';
+        icon.innerHTML = '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1="23" y1="9" x2="17" y2="15"></line><line x1="17" y1="9" x2="23" y2="15"></line>';
+      }
+    }
+
+    function playChime(isWin = true) {
+      if (!audioEnabled) return;
+      try {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (!AudioCtx) return;
+        const ctx = new AudioCtx();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.type = 'sine';
+        const now = ctx.currentTime;
+        if (isWin) {
+          osc.frequency.setValueAtTime(587.33, now); // D5
+          osc.frequency.exponentialRampToValueAtTime(880.00, now + 0.1); // A5
+        } else {
+          osc.frequency.setValueAtTime(440.00, now); // A4
+          osc.frequency.exponentialRampToValueAtTime(349.23, now + 0.12); // F4
+        }
+        gain.gain.setValueAtTime(0.08, now);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.35);
+        osc.start(now);
+        osc.stop(now + 0.35);
+      } catch (e) {}
+    }
+
+    function showToast(title, body, type = 'info') {
+      const container = document.getElementById('toast-container');
+      if (!container) return;
+      const t = document.createElement('div');
+      t.className = `toast toast-${type}`;
+      t.innerHTML = `
+        <div>
+          <div class="toast-title">${title}</div>
+          <div class="toast-body">${body}</div>
+        </div>
+      `;
+      container.appendChild(t);
+      setTimeout(() => {
+        t.style.opacity = '0';
+        t.style.transform = 'translateX(20px)';
+        setTimeout(() => t.remove(), 250);
+      }, 4500);
+    }
 
     // Load templates on boot
     async function loadTemplates() {
@@ -993,7 +1176,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       const firm = firmTemplates[key];
       if (!firm) return;
 
-      // Render sizes
       const sizeContainer = document.getElementById('size-pills');
       sizeContainer.innerHTML = '';
       firm.sizes.forEach(sz => {
@@ -1007,7 +1189,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         currentSize = firm.default_size || firm.sizes[0];
       }
 
-      // Render phases
       const phaseContainer = document.getElementById('phase-pills');
       phaseContainer.innerHTML = '';
       const phaseKeys = Object.keys(firm.phases);
@@ -1064,6 +1245,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       }
     }
 
+    function toggleChartDrawer() {
+      const d = document.getElementById('pf-chart-drawer');
+      const text = document.getElementById('chart-btn-text');
+      if (d.style.display === 'flex') {
+        d.style.display = 'none';
+        text.textContent = 'Equity Trajectory ▾';
+      } else {
+        d.style.display = 'flex';
+        text.textContent = 'Hide Trajectory ▴';
+      }
+    }
+
     async function applyCustomConfig() {
       const cfg = {
         firm: firmTemplates[currentFirm]?.name || currentFirm,
@@ -1087,6 +1280,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         const data = await res.json();
         if (data.success) {
           toggleConfigDrawer();
+          showToast('RULES UPDATED', `${cfg.firm} ${cfg.phase} applied`, 'success');
           updateDashboard();
         } else {
           alert('Failed to apply config: ' + JSON.stringify(data));
@@ -1102,6 +1296,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         const data = await res.json();
         isHalted = data.halted;
         updatePauseButton();
+        showToast(isHalted ? 'BOT PAUSED' : 'BOT RESUMED', isHalted ? 'Execution halted' : 'Scanning active', isHalted ? 'danger' : 'success');
       } catch (e) {
         alert('Error toggling pause: ' + e);
       }
@@ -1148,6 +1343,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ reset: true })
         });
+        showToast('CHALLENGE RESET', 'Balances and loss buffers cleared', 'info');
         updateDashboard();
       } catch (e) {
         alert('Failed to reset challenge: ' + e);
@@ -1158,6 +1354,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       if (!confirm('EMERGENCY FLATTEN: Close ALL open positions immediately across all symbols?')) return;
       try {
         await fetch('/api/action/close_all', { method: 'POST' });
+        showToast('EMERGENCY FLATTEN', 'All open positions closed at market', 'danger');
         updateDashboard();
       } catch (e) {
         alert('Failed to close positions: ' + e);
@@ -1172,13 +1369,87 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ symbol: sym })
         });
+        showToast('POSITION CLOSED', `Closed ${sym} market order`, 'info');
         updateDashboard();
       } catch (e) {
         alert('Failed to close ' + sym + ': ' + e);
       }
     }
 
-    // Reactive Asset Card Map (Prevents innerHTML wiping!)
+    // SVG Sparkline Generator
+    function renderSparkline(svgElement, dataPoints) {
+      if (!svgElement || !dataPoints || dataPoints.length < 2) return;
+      const w = 88;
+      const h = 26;
+      const min = Math.min(...dataPoints);
+      const max = Math.max(...dataPoints);
+      const range = max - min || 1;
+      const isUp = dataPoints[dataPoints.length - 1] >= dataPoints[0];
+      const strokeColor = isUp ? 'var(--green)' : 'var(--red)';
+
+      const coords = dataPoints.map((val, idx) => {
+        const x = (idx / (dataPoints.length - 1)) * w;
+        const y = h - ((val - min) / range) * (h - 6) - 3;
+        return [x, y];
+      });
+
+      const lineD = 'M ' + coords.map(p => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' L ');
+      const areaD = lineD + ` L ${w},${h} L 0,${h} Z`;
+
+      svgElement.innerHTML = `
+        <defs>
+          <linearGradient id="sg-${svgElement.id}" x1="0%" y1="0%" x2="0%" y2="100%">
+            <stop offset="0%" stop-color="${strokeColor}" stop-opacity="0.25"/>
+            <stop offset="100%" stop-color="${strokeColor}" stop-opacity="0.0"/>
+          </linearGradient>
+        </defs>
+        <path d="${areaD}" fill="url(#sg-${svgElement.id})" />
+        <path d="${lineD}" fill="none" stroke="${strokeColor}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+      `;
+    }
+
+    // SVG Equity Curve Generator
+    function renderEquityChart(svgElement, pts, initialBal, targetBal, maxLossBal) {
+      if (!svgElement) return;
+      const w = svgElement.clientWidth || 800;
+      const h = 130;
+      svgElement.setAttribute('viewBox', `0 0 ${w} ${h}`);
+
+      const allVals = [...(pts || [initialBal]), targetBal, maxLossBal, initialBal];
+      const min = Math.min(...allVals) * 0.998;
+      const max = Math.max(...allVals) * 1.002;
+      const range = max - min || 1;
+
+      const getY = (val) => h - ((val - min) / range) * (h - 24) - 12;
+
+      const yTgt = getY(targetBal);
+      const yBase = getY(initialBal);
+      const yLoss = getY(maxLossBal);
+
+      const stepX = w / Math.max(1, (pts.length - 1));
+      const curveCoords = pts.map((val, idx) => [idx * stepX, getY(val)]);
+      const lineD = 'M ' + curveCoords.map(p => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' L ');
+      const lastPt = curveCoords[curveCoords.length - 1];
+
+      svgElement.innerHTML = `
+        <!-- Reference Target Line -->
+        <line x1="0" y1="${yTgt}" x2="${w}" y2="${yTgt}" stroke="var(--green)" stroke-dasharray="4,4" stroke-width="1" opacity="0.6"/>
+        <text x="${w - 8}" y="${yTgt - 4}" fill="var(--green)" font-size="9" text-anchor="end" font-family="var(--font-mono)">Target Ceiling</text>
+
+        <!-- Reference Baseline -->
+        <line x1="0" y1="${yBase}" x2="${w}" y2="${yBase}" stroke="rgba(255,255,255,0.2)" stroke-dasharray="2,2" stroke-width="1"/>
+        
+        <!-- Reference Stop Line -->
+        <line x1="0" y1="${yLoss}" x2="${w}" y2="${yLoss}" stroke="var(--red)" stroke-dasharray="4,4" stroke-width="1" opacity="0.6"/>
+        <text x="${w - 8}" y="${yLoss + 10}" fill="var(--red)" font-size="9" text-anchor="end" font-family="var(--font-mono)">Max DD Stop</text>
+
+        <!-- Equity Curve Path -->
+        <path d="${lineD}" fill="none" stroke="var(--blue)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        <circle cx="${lastPt[0]}" cy="${lastPt[1]}" r="3.5" fill="var(--blue)" stroke="#fff" stroke-width="1.5"/>
+      `;
+    }
+
+    // Reactive Asset Card Map
     const renderedCards = {};
 
     function getOrCreateAssetCard(sym, container) {
@@ -1194,7 +1465,19 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             <div class="asset-title">${sym}</div>
             <div class="asset-desc">${subNames[sym] || 'Perpetual'}</div>
           </div>
-          <div class="asset-price tabular" id="price-${sym}">$0.00</div>
+          <div class="price-sparkline-group">
+            <svg class="sparkline-svg" id="spark-${sym}"></svg>
+            <div class="asset-price tabular" id="price-${sym}">$0.00</div>
+          </div>
+        </div>
+
+        <!-- 4-Timeframe Structure Matrix (1D / 4H / 1H / 5m) -->
+        <div class="mtf-matrix" id="mtf-${sym}">
+          <span style="font-size:10px; color:var(--text-muted); font-weight:600; margin-right:2px;">MTF:</span>
+          <span class="mtf-cell neut" id="mtf-1d-${sym}">1D —</span>
+          <span class="mtf-cell neut" id="mtf-4h-${sym}">4H —</span>
+          <span class="mtf-cell neut" id="mtf-1h-${sym}">1H —</span>
+          <span class="mtf-cell neut" id="mtf-5m-${sym}">5m —</span>
         </div>
 
         <div class="pos-strip flat" id="pos-strip-${sym}">
@@ -1251,7 +1534,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           kzBadge.style.display = 'none';
         }
 
-        // 2. Prop Firm Cockpit HUD
+        // 2. Prop Firm Cockpit HUD & Equity Trajectory
         const pf = data.prop_firm;
         propFirmMode = data.prop_firm_mode !== false;
         document.getElementById('btn-mode-toggle').textContent = propFirmMode ? 'MODE: ON' : 'MODE: OFF';
@@ -1272,13 +1555,22 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           const maxDdPct = Math.min(100, Math.max(0, pf.total_dd_pct || 0));
           document.getElementById('pf-maxdd-fill').style.width = `${(maxDdPct / (pf.max_dd_limit_pct || 10)) * 100}%`;
           document.getElementById('pf-maxdd-text').textContent = `-$${(pf.total_dd_usd || 0).toFixed(2)} / -$${(pf.max_dd_usd || 0).toFixed(2)} (${maxDdPct.toFixed(1)}%)`;
+
+          // Equity Trajectory SVG
+          const eqPts = pf.equity_curve || [pf.initial_balance, pf.virtual_balance];
+          const tgtBal = pf.initial_balance + (pf.target_usd || pf.initial_balance * 0.09);
+          const ddBal = pf.initial_balance - (pf.max_dd_usd || pf.initial_balance * 0.06);
+          document.getElementById('chart-tgt-lbl').textContent = `$${tgtBal.toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
+          document.getElementById('chart-base-lbl').textContent = `$${pf.initial_balance.toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
+          document.getElementById('chart-dd-lbl').textContent = `$${ddBal.toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
+          renderEquityChart(document.getElementById('equity-svg'), eqPts, pf.initial_balance, tgtBal, ddBal);
         } else {
           document.getElementById('pf-title').textContent = 'Personal Account Mode';
           document.getElementById('pf-subtitle').textContent = 'Prop firm risk limits disabled · Running live portfolio risk';
           document.getElementById('pf-equity').textContent = `$${(data.account?.balance || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
         }
 
-        // 3. Multi-Asset Reactive In-Place Updates
+        // 3. Multi-Asset Reactive Updates (Sparklines, MTF Badges, Positions)
         const syms = data.symbols || {};
         const assetsContainer = document.getElementById('assets-grid');
         let openPositionsCount = 0;
@@ -1292,8 +1584,54 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           const displayPrice = lastKnownPrices[sym] > 0 ? lastKnownPrices[sym] : (info.ltp || 0);
           document.getElementById(`price-${sym}`).textContent = `$${Number(displayPrice).toLocaleString(undefined, { minimumFractionDigits: (sym === 'BTCUSDT' ? 1 : 2), maximumFractionDigits: 2 })}`;
 
+          // Render Sparkline
+          if (info.sparkline && info.sparkline.length >= 2) {
+            renderSparkline(document.getElementById(`spark-${sym}`), info.sparkline);
+          }
+
+          // Render MTF Matrix Badges (1D / 4H / 1H / 5m)
+          const mtf = info.mtf || {};
+          const m1d = document.getElementById(`mtf-1d-${sym}`);
+          const m4h = document.getElementById(`mtf-4h-${sym}`);
+          const m1h = document.getElementById(`mtf-1h-${sym}`);
+          const m5m = document.getElementById(`mtf-5m-${sym}`);
+
+          if (m1d) {
+            const isBull = mtf['1d'] === 'BULL';
+            const isBear = mtf['1d'] === 'BEAR';
+            m1d.className = `mtf-cell ${isBull ? 'bull' : (isBear ? 'bear' : 'neut')}`;
+            m1d.textContent = `1D ${isBull ? '▲' : (isBear ? '▼' : '—')}`;
+          }
+          if (m4h) {
+            const isBull = mtf['4h'] === 'BULL';
+            const isBear = mtf['4h'] === 'BEAR';
+            m4h.className = `mtf-cell ${isBull ? 'bull' : (isBear ? 'bear' : 'neut')}`;
+            m4h.textContent = `4H ${isBull ? '▲' : (isBear ? '▼' : '—')}`;
+          }
+          if (m1h) {
+            const isBull = mtf['1h'] === 'BULL';
+            const isBear = mtf['1h'] === 'BEAR';
+            m1h.className = `mtf-cell ${isBull ? 'bull' : (isBear ? 'bear' : 'neut')}`;
+            m1h.textContent = `1H ${isBull ? '▲' : (isBear ? '▼' : '—')}`;
+          }
+          if (m5m) {
+            const isBull = mtf['5m'] === 'BULL';
+            const isBear = mtf['5m'] === 'BEAR';
+            m5m.className = `mtf-cell ${isBull ? 'bull' : (isBear ? 'bear' : 'neut')}`;
+            m5m.textContent = `5m ${isBull ? '▲' : (isBear ? '▼' : '—')}`;
+          }
+
+          // Check Position Transitions for Toasts & Chimes
           const isPosition = info.position === 'OPEN';
           if (isPosition) openPositionsCount++;
+
+          const prevPos = knownPositions[sym];
+          if (!prevPos && isPosition) {
+            // New position opened!
+            showToast('ORDER FILLED', `${info.direction} ${sym} @ $${Number(info.entry_price).toLocaleString()}`, 'info');
+            playChime(true);
+          }
+          knownPositions[sym] = isPosition;
 
           const posStrip = document.getElementById(`pos-strip-${sym}`);
           posStrip.className = `pos-strip ${isPosition ? (info.direction === 'LONG' ? 'long' : 'short') : 'flat'}`;
@@ -1315,7 +1653,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           const bTag = document.getElementById(`bias-tag-${sym}`);
 
           if (pLong >= 0.54) {
-            const deltaPct = Math.min(50, (pLong - 0.50) * 200); // 0% to 50%
+            const deltaPct = Math.min(50, (pLong - 0.50) * 200);
             gLong.style.width = `${deltaPct}%`;
             gShort.style.width = `0%`;
             bTag.textContent = `+${Math.round(deltaPct * 2)}% BULLISH BIAS`;
@@ -1384,7 +1722,6 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           document.getElementById('gold-bias-val').textContent = data.lead_lag.gold_dxy_bias || 'NEUTRAL';
         }
 
-        // Retrain status
         const rSched = data.retrain_status || {};
         const rParts = [];
         for (const [s, st] of Object.entries(rSched)) {
@@ -1394,9 +1731,20 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           document.getElementById('retrain-text').textContent = `Retrain in ${rParts.join(' · ')}`;
         }
 
-        // 6. Trade Journal
+        // 6. Trade Journal & Exit Detection
         const jList = data.journal || [];
         document.getElementById('journal-stats').textContent = `${data.account?.total || jList.length} Trades · ${data.account?.wins || 0}W / ${data.account?.losses || 0}L`;
+
+        if (lastKnownTradeCount !== null && jList.length > lastKnownTradeCount) {
+          const newest = jList[0];
+          if (newest) {
+            const pnlNum = Number(newest.pnl_usd || 0);
+            const isWin = pnlNum >= 0;
+            showToast(isWin ? 'TAKE PROFIT HIT' : 'STOP LOSS HIT', `${newest.action}: ${isWin ? '+' : ''}$${pnlNum.toFixed(2)} (${newest.exit_reason || ''})`, isWin ? 'success' : 'danger');
+            playChime(isWin);
+          }
+        }
+        lastKnownTradeCount = jList.length;
 
         const jBody = document.getElementById('journal-tbody');
         jBody.innerHTML = '';
