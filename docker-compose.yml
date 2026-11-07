@@ -9,10 +9,10 @@ services:
       - ./src:/app/src
     environment:
       - REDIS_URL=redis://redis:6379/0
-      - TIMESCALE_URL=postgres://user:password@timescaledb:5432/apex
+      - CLICKHOUSE_HOST=clickhouse
     depends_on:
       - redis
-      - timescaledb
+      - clickhouse
     command: python -m src.main
 
   redis:
@@ -21,17 +21,22 @@ services:
     ports:
       - "6379:6379"
 
-  timescaledb:
-    image: timescale/timescaledb:latest-pg15
-    container_name: apex_timescaledb
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    container_name: apex_clickhouse
     environment:
-      - POSTGRES_USER=user
-      - POSTGRES_PASSWORD=password
-      - POSTGRES_DB=apex
+      - CLICKHOUSE_USER=default
+      - CLICKHOUSE_PASSWORD=clickhouse
+      - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
     ports:
-      - "5432:5432"
+      - "8123:8123"
+      - "9000:9000"
     volumes:
-      - timescaledb_data:/var/lib/postgresql/data
+      - clickhouse_data:/var/lib/clickhouse
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
 
 volumes:
-  timescaledb_data:
+  clickhouse_data:

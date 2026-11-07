@@ -1,3 +1,31 @@
+"""
+╔══════════════════════════════════════════════════════════════════════════════╗
+║        APEX INTELLIGENCE ENGINE v5.0 — INSTITUTIONAL QUANT LAB               ║
+║         Multi-Alpha Consensus • Macro Trend Lock • 1:2.5+ Asymmetric R:R     ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+Autonomous Institutional Trading Engine with Survival Objective:
+1. Capital is Life (HP): $1,000 bankroll. Max drawdown circuit breaker at 15%.
+   - HP gauge dynamically controls risk exposure (Thriving -> Defensive -> Bunker).
+2. Multi-Alpha Tournament Arena:
+   - Alpha 1: Order Flow Momentum Breakout (OF-MOM)
+   - Alpha 2: Liquidity Sweep & Mitigation (LIQ-REV)
+   - Alpha 3: Structural Order Book Wall Absorption (OB-ABSORB)
+   - Performance-Weighted Consensus: Alphas with WR < 35% are automatically QUARANTINED.
+3. Macro Trend Lockdown (Zero Falling Knives):
+   - 15m/1h Trend dictates directional permission:
+     * Bearish regime -> Longs strictly prohibited (No counter-trend dip buying).
+     * Bullish regime -> Shorts strictly prohibited.
+4. Institutional Asymmetric Payoff Engineering (1:2.5+ R:R):
+   - Sizing strictly accounts for roundtrip taker fees + slippage (14 bps).
+   - TP1 (2.5R target): Locks 70% of position profit.
+   - Runner (30% position): Protected at Breakeven, trailing with wide 2.5x ATR buffer to 4.5R.
+5. Anti-Whipsaw Directional Streak Protection:
+   - 2 consecutive losses in same direction triggers 45m directional lockout.
+6. Executive Decongested Quant Cockpit:
+   - Crystal-clear visual hierarchy, spacious cards, zero flicker ANSI layout.
+"""
+
 import asyncio
 import json
 import websockets
@@ -12,777 +40,241 @@ if sys.stdout.encoding.lower() != 'utf-8':
     except Exception:
         pass
 
+if os.name == 'nt':
+    os.system('')  # Enable ANSI color escape processing in Windows Console
+
 import numpy as np
-import clickhouse_connect
 import requests
 from collections import deque
-from sklearn.cluster import KMeans
-import pickle
 
 # ---------------------------------------------------------
-# SYSTEM STATE & PARAMETERS
+# ANSI COLOR PALETTE (EXECUTIVE QUANT TERMINAL)
 # ---------------------------------------------------------
-state = {
-    "symbol": "BTCUSDT",
-    "ws_connected": False,
-    "ltp": 0.0,
-    "bid": 0.0,
-    "ask": 0.0,
-    "vpin": 0.0,
-    "vpin_percentile": 0,
-    "cofi_z": 0.0,
-    "acf_lag1": 0.0,
-    "ticks_today": 0,
-    "buckets_completed": 0,
+C_RESET   = "\033[0m"
+C_BOLD    = "\033[1m"
+C_DIM     = "\033[2m"
+C_RED     = "\033[91m"
+C_GREEN   = "\033[92m"
+C_YELLOW  = "\033[93m"
+C_BLUE    = "\033[94m"
+C_MAGENTA = "\033[95m"
+C_CYAN    = "\033[96m"
+C_WHITE   = "\033[97m"
+C_GRAY    = "\033[90m"
+
+# ---------------------------------------------------------
+# CONSTANTS & EXECUTION MODEL
+# ---------------------------------------------------------
+SYMBOL                   = "BTCUSDT"
+INITIAL_CAPITAL          = 1000.0
+MAX_DRAWDOWN_LIMIT_PCT   = 15.0   # Survival fail-safe at 15% drawdown ($150 buffer)
+TAKER_FEE_BPS            = 5.0
+SLIPPAGE_BPS             = 2.0
+ROUNDTRIP_COST_BPS       = (TAKER_FEE_BPS + SLIPPAGE_BPS) * 2  # 14.0 bps
+
+TRADE_JOURNAL_FILE       = "trade_journal.json"
+
+# ---------------------------------------------------------
+# GLOBAL STATE & TELEMETRY
+# ---------------------------------------------------------
+market_state = {
+    "symbol":              SYMBOL,
+    "ws_connected":        False,
+    "ltp":                 0.0,
+    "bid":                 0.0,
+    "ask":                 0.0,
+    "spread_bps":          0.0,
+    "vpin":                0.0,
+    "vpin_percentile":     50,
+    "cofi_z":              0.0,
+    "cofi_z_ema":          0.0,
+    "cofi_direction":      0,      # +1 buy, -1 sell, 0 neutral
+    "obi":                 0.0,    # L2 Order Book Imbalance (-1.0 to +1.0)
+    "ticks_today":         0,
+    "buckets_completed":   0,
     "bucket_velocity_sec": 0.0,
-    "current_minute_ts": 0,
-    "atr_14": 0.0,
-    "avg_1min_vol": 0.0,
-    "obi": 0.0
+    "atr_14":              35.0,
+    "atr_bps":             4.0,
+    "current_minute_ts":   0,
 }
 
-# Macro Structure State
 macro_structure = {
-    "hvns": [], # High Volume Nodes
-    "poc": 0.0,  # Point of Control
-    "micro_hvns": [] # Intraday Session HVNs
+    "hvns":       [],
+    "poc":        0.0,
+    "micro_hvns": [],
 }
 
-# Liquidation State (Rolling 60s)
-liquidation_events = deque()
-liquidations = {
-    "longs_usd": 0.0,
-    "shorts_usd": 0.0
-}
-
-# Machine Learning State
-ml_state = {
-    "features": deque(maxlen=500),
-    "model": None,
-    "trending_cluster_id": 0,
-    "regime": "GATHERING DATA"
-}
-
-def save_ml_state():
-    try:
-        with open("ml_state.pkl", "wb") as f:
-            pickle.dump(ml_state["features"], f)
-    except Exception:
-        pass
-
-def load_ml_state():
-    try:
-        if os.path.exists("ml_state.pkl"):
-            with open("ml_state.pkl", "rb") as f:
-                features = pickle.load(f)
-                ml_state["features"] = features
-    except Exception:
-        pass
-
-# Virtual Portfolio State
-portfolio = {
-    "position": "FLAT", # FLAT, LONG, SHORT
-    "phase": 0, # 0 = Flat, 1 = Initial Risk, 2 = Runner
-    "entry_price": 0.0,
-    "account_balance": 1000.0,
-    "leverage_used": 0.0,
-    "notional_size_usd": 0.0,
-    "realized_pnl": 0.0,
-    "unrealized_pnl": 0.0,
-    "trades_executed": 0,
-    "post_entry_volume": 0.0,
-    "post_entry_vwap_sum": 0.0,
-    "vwap": 0.0
-}
-
-# Execution Physics
-ENTRY_COST_BPS = 6.0 # 0.05% Taker + 0.01% Slippage
-EXIT_COST_BPS = 6.0  # 0.05% Taker + 0.01% Slippage
-TOTAL_ROUNDTRIP_COST_BPS = ENTRY_COST_BPS + EXIT_COST_BPS
-
-# Dynamic Parameters (will be overridden by prewarm)
-DYNAMIC_PARAMS = {
-    "BUCKET_VOLUME_SIZE": 50.0,
-    "STOP_LOSS_BPS": 20.0,
-    "SCALE_OUT_BPS": 20.0,
-    "BREAKEVEN_BPS": 2.0
-}
-
-# Microstructure Buffers
-current_bucket = {"buy_vol": 0.0, "sell_vol": 0.0, "total_vol": 0.0, "start_time": time.time()}
-vpin_history = deque(maxlen=200)
-order_flow_imbalances = deque(maxlen=300)
-recent_trades = deque(maxlen=100)
-
-# Volatility Buffers
-minute_candles = deque(maxlen=60)
-live_candle = {"open": 0, "high": 0, "low": 0, "close": 0, "volume": 0}
-
-# 5-Minute Candle Buffer (for FVG & OB detection)
-five_min_candles = deque(maxlen=50)
-five_min_accumulator = []  # Collects 1-min candles to aggregate
-
-# Dynamic Cooldown State
-cooldown = {
-    "active": False,
-    "buckets_remaining": 0,
-    "base_buckets": 15,
-    "elevated_vpin": 98,     # Cooldown lifts if VPIN >= 98th
-    "elevated_cofi": 4.0     # AND COFI Z > 4.0
-}
-
-# Session Awareness (UTC hours)
-SESSION_MAP = {
-    "DEAD_ZONE": (21, 0),    # UTC 21:00-00:00 | IST 2:30-5:30 AM
-    "ASIAN":     (0, 7),     # UTC 00:00-07:00 | IST 5:30 AM-12:30 PM
-    "LONDON":    (7, 13),    # UTC 07:00-13:00 | IST 12:30-6:30 PM
-    "NEW_YORK":  (13, 21)    # UTC 13:00-21:00 | IST 6:30 PM-2:30 AM
-}
-session_state = {
-    "current": "UNKNOWN",
-    "execution_allowed": True,
-    "thresholds_elevated": False
-}
-
-# Live FVG State
-fvg_state = {
-    "bullish_fvgs": [],   # List of {"bottom": float, "top": float, "ts": str}
-    "bearish_fvgs": [],
-    "nearest_bullish": None,
-    "nearest_bearish": None
-}
-
-# ICT Order Block State
-ob_state = {
-    "bullish_obs": [],    # List of {"low": float, "high": float, "ts": str, "displacement": float}
-    "bearish_obs": [],
-    "active_count": 0
-}
-
-# CVD (Cumulative Volume Delta)
 cvd_state = {
-    "cvd": 0.0,
-    "cvd_history": deque(maxlen=50),   # CVD snapshot per 5-min candle
-    "price_history": deque(maxlen=50), # Price snapshot per 5-min candle
-    "divergence": "NONE",              # NONE, BULLISH, BEARISH
-    "5min_buy_vol": 0.0,
-    "5min_sell_vol": 0.0
+    "cvd":            0.0,
+    "cvd_history":    deque(maxlen=60),
+    "price_history":  deque(maxlen=60),
+    "divergence":     "NONE",
+    "delta_momentum": 0.0,
+    "5min_buy_vol":   0.0,
+    "5min_sell_vol":  0.0,
 }
 
-# 15-Minute Candle Buffer (Multi-Timeframe Confirmation)
-fifteen_min_candles = deque(maxlen=30)
-fifteen_min_accumulator = []  # Collects 5-min candles
-mtf_state = {
-    "ema_20": 0.0,
-    "trend": "NEUTRAL",   # BULLISH, BEARISH, NEUTRAL
-    "strength": 0.0       # How far price is from EMA (in bps)
-}
-
-# Liquidity Sweep Detection
 sweep_state = {
-    "recent_highs": deque(maxlen=20),  # Rolling 5m candle highs
-    "recent_lows": deque(maxlen=20),   # Rolling 5m candle lows
-    "last_sweep": "NONE",             # NONE, BULLISH_SWEEP, BEARISH_SWEEP
-    "sweep_price": 0.0,
-    "sweep_ts": ""
+    "recent_highs":      deque(maxlen=25),
+    "recent_lows":       deque(maxlen=25),
+    "last_sweep":        "NONE",
+    "sweep_price":       0.0,
+    "sweep_candles_ago": 0,
 }
 
-# Trade Journal (for Supervised ML)
-trade_journal = []  # List of {features_at_entry, outcome, pnl, ...}
-TRADE_JOURNAL_FILE = "trade_journal.json"
+ob_state = {
+    "bullish_obs":  [],
+    "bearish_obs":  [],
+}
 
-# Volume Profile Refresh Timer
-vp_refresh = {
-    "last_refresh_time": 0.0,
-    "refresh_interval_sec": 4 * 3600  # 4 hours
+fvg_state = {
+    "bullish_fvgs": [],
+    "bearish_fvgs": [],
+}
+
+mtf_state = {
+    "ema_20":   0.0,
+    "ema_50":   0.0,
+    "trend":    "NEUTRAL",
+    "slope":    0.0,
+    "strength": 0.0,
+}
+
+session_state = {
+    "current":           "UNKNOWN",
+    "execution_allowed": True,
+    "size_multiplier":   1.0,
 }
 
 # ---------------------------------------------------------
-# VOLATILITY & PRE-WARM LOGIC
+# SURVIVAL & HEALTH SYSTEM (Capital as Life / HP)
 # ---------------------------------------------------------
-def calculate_atr():
-    if len(minute_candles) < 14:
-        return 0.0
-        
-    trs = []
-    candles = list(minute_candles)
-    for i in range(1, len(candles)):
-        high = candles[i]['high']
-        low = candles[i]['low']
-        prev_close = candles[i-1]['close']
-        
-        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
-        if tr > 1000:
-            with open('atr_debug.txt', 'a') as f:
-                f.write(f"BUG! tr={tr}, high={high}, low={low}, prev_close={prev_close}, i={i}, len={len(candles)}\n")
-        trs.append(tr)
-        
-    atr = np.mean(trs[-14:]) # 14-period ATR
-    return atr
-
-def update_dynamic_parameters():
-    global DYNAMIC_PARAMS
-    if len(minute_candles) < 14 or state["ltp"] == 0:
-        return
-        
-    # 1. Update Bucket Size (ADV Approximation)
-    vols = [c['volume'] for c in minute_candles]
-    state["avg_1min_vol"] = np.mean(vols)
-    DYNAMIC_PARAMS["BUCKET_VOLUME_SIZE"] = max(10.0, state["avg_1min_vol"] / 2.0)
-    
-    # 2. Update Stop Loss & Scale Out (ATR Approximation)
-    state["atr_14"] = calculate_atr()
-    atr_bps = (state["atr_14"] / state["ltp"]) * 10000
-    
-    # STOP LOSS must be strictly > TOTAL_ROUNDTRIP_COST_BPS (12 bps)
-    # Otherwise, it stops out instantly upon entering the trade!
-    DYNAMIC_PARAMS["STOP_LOSS_BPS"] = max(30.0, atr_bps * 3.0)
-    DYNAMIC_PARAMS["SCALE_OUT_BPS"] = max(40.0, atr_bps * 4.0)
-
-def build_volume_profile():
-    print("Building Macro Volume Profile (30-Day Lookback)...")
-    try:
-        res = requests.get("https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=1h&limit=720")
-        data = res.json()
-        
-        highs = [float(k[2]) for k in data]
-        lows = [float(k[3]) for k in data]
-        
-        min_price = min(lows)
-        max_price = max(highs)
-        
-        num_bins = 50
-        bin_size = (max_price - min_price) / num_bins
-        profile = np.zeros(num_bins)
-        
-        for kline in data:
-            c_low = float(kline[3])
-            c_high = float(kline[2])
-            c_vol = float(kline[5])
-            
-            start_bin = int(max(0, min(num_bins-1, (c_low - min_price) / bin_size)))
-            end_bin = int(max(0, min(num_bins-1, (c_high - min_price) / bin_size)))
-            
-            if start_bin == end_bin:
-                profile[start_bin] += c_vol
-            else:
-                vol_per_bin = c_vol / (end_bin - start_bin + 1)
-                for b in range(start_bin, end_bin + 1):
-                    profile[b] += vol_per_bin
-                    
-        top_indices = np.argsort(profile)[-5:]
-        hvns = []
-        for idx in top_indices:
-            price_level = min_price + (idx * bin_size) + (bin_size / 2.0)
-            hvns.append(price_level)
-            
-        macro_structure["hvns"] = sorted(hvns)
-        
-        poc_idx = np.argmax(profile)
-        macro_structure["poc"] = min_price + (poc_idx * bin_size) + (bin_size / 2.0)
-        
-        print(f"Macro Profile Complete. POC: {macro_structure['poc']:.1f}, HVNs: {[round(x, 1) for x in macro_structure['hvns']]}")
-        
-    except Exception as e:
-        print(f"Volume Profile failed: {e}")
-
-def build_session_volume_profile():
-    print("Building Session Volume Profile (24-Hour Lookback)...")
-    try:
-        res = requests.get("https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=15m&limit=96")
-        data = res.json()
-        highs = [float(k[2]) for k in data]
-        lows = [float(k[3]) for k in data]
-        min_price = min(lows)
-        max_price = max(highs)
-        num_bins = 30
-        bin_size = (max_price - min_price) / num_bins
-        profile = np.zeros(num_bins)
-        for kline in data:
-            c_low = float(kline[3])
-            c_high = float(kline[2])
-            c_vol = float(kline[5])
-            start_bin = int(max(0, min(num_bins-1, (c_low - min_price) / bin_size)))
-            end_bin = int(max(0, min(num_bins-1, (c_high - min_price) / bin_size)))
-            if start_bin == end_bin:
-                profile[start_bin] += c_vol
-            else:
-                vol_per_bin = c_vol / (end_bin - start_bin + 1)
-                for b in range(start_bin, end_bin + 1):
-                    profile[b] += vol_per_bin
-        top_indices = np.argsort(profile)[-3:]
-        micro_hvns = []
-        for idx in top_indices:
-            price_level = min_price + (idx * bin_size) + (bin_size / 2.0)
-            micro_hvns.append(price_level)
-        macro_structure["micro_hvns"] = sorted(micro_hvns)
-        print(f"Session Profile Complete. Micro-HVNs: {[round(x, 1) for x in macro_structure['micro_hvns']]}")
-    except Exception as e:
-        print(f"Session Volume Profile failed: {e}")
-
-
-def prewarm_engine():
-    print("Pre-warming Dynamic Volatility Engine from Binance REST API...")
-    try:
-        build_volume_profile()
-        build_session_volume_profile()
-        
-        # 1. Pre-warm 1-minute candles (60 candles = 1 hour)
-        res = requests.get("https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=1m&limit=60")
-        data = res.json()
-        for kline in data:
-            candle = {
-                "open": float(kline[1]),
-                "high": float(kline[2]),
-                "low": float(kline[3]),
-                "close": float(kline[4]),
-                "volume": float(kline[5])
-            }
-            minute_candles.append(candle)
-            
-        state["ltp"] = float(data[-1][4])
-        update_dynamic_parameters()
-        state["current_minute_ts"] = int(time.time() // 60) * 60
-        live_candle["open"] = live_candle["high"] = live_candle["low"] = live_candle["close"] = state["ltp"]
-        live_candle["volume"] = 0.0
-        print(f"  1m candles: {len(minute_candles)} loaded.")
-        
-        # 2. Pre-warm 5-minute candles (50 candles = ~4 hours)
-        res5 = requests.get("https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=5m&limit=50")
-        data5 = res5.json()
-        for kline in data5:
-            candle5 = {
-                "open": float(kline[1]),
-                "high": float(kline[2]),
-                "low": float(kline[3]),
-                "close": float(kline[4]),
-                "volume": float(kline[5])
-            }
-            five_min_candles.append(candle5)
-            
-            # Seed CVD history from 5m buy/sell volume
-            buy_vol = float(kline[9])  # Taker buy base asset volume
-            total_vol = float(kline[5])
-            sell_vol = total_vol - buy_vol
-            cvd_snapshot = buy_vol - sell_vol
-            cvd_state["cvd_history"].append(cvd_snapshot)
-            cvd_state["price_history"].append(float(kline[4]))
-        
-        print(f"  5m candles: {len(five_min_candles)} loaded.")
-        
-        # 3. Run FVG and OB detection on pre-warmed data
-        detect_fvgs()
-        detect_order_blocks()
-        detect_cvd_divergence()
-        
-        # 4. Pre-warm 15-minute candles from 5m data
-        candles_5m = list(five_min_candles)
-        for i in range(0, len(candles_5m) - 2, 3):
-            group = candles_5m[i:i+3]
-            if len(group) == 3:
-                c15 = {
-                    "open": group[0]["open"],
-                    "high": max(g["high"] for g in group),
-                    "low": min(g["low"] for g in group),
-                    "close": group[-1]["close"],
-                    "volume": sum(g["volume"] for g in group)
-                }
-                fifteen_min_candles.append(c15)
-        update_mtf_trend()
-        print(f"  15m candles: {len(fifteen_min_candles)} loaded. MTF Trend: {mtf_state['trend']}")
-        
-        # 5. Seed swing levels for liquidity sweep detection
-        for c5 in candles_5m:
-            track_swing_levels(c5)
-        print(f"  Swing levels: {len(sweep_state['recent_highs'])} highs, {len(sweep_state['recent_lows'])} lows tracked")
-        
-        # 6. Load trade journal
-        load_trade_journal()
-        print(f"  Trade journal: {len(trade_journal)} historical trades loaded")
-        
-        # 7. Init VP refresh timer
-        vp_refresh["last_refresh_time"] = time.time()
-        
-        bull_fvgs = len(fvg_state["bullish_fvgs"])
-        bear_fvgs = len(fvg_state["bearish_fvgs"])
-        bull_obs = len(ob_state["bullish_obs"])
-        bear_obs = len(ob_state["bearish_obs"])
-        print(f"  FVGs: {bull_fvgs} bullish, {bear_fvgs} bearish")
-        print(f"  ICT Order Blocks: {bull_obs} bullish, {bear_obs} bearish")
-        print(f"  CVD Divergence: {cvd_state['divergence']}")
-        print(f"Pre-warm complete! Engine is combat-ready.")
-    except Exception as e:
-        print(f"Pre-warm failed: {e}. Will rely on live ticks.")
+survival = {
+    "initial_capital":       INITIAL_CAPITAL,
+    "account_balance":       INITIAL_CAPITAL,
+    "peak_balance":          INITIAL_CAPITAL,
+    "max_drawdown_limit":    MAX_DRAWDOWN_LIMIT_PCT,
+    "current_drawdown_pct":  0.0,
+    "hp_pct":                100.0,
+    "mode":                  "THRIVING",   # THRIVING (>70%), DEFENSIVE (40-70%), BUNKER (<40%), ELIMINATED (0%)
+    "consecutive_losses":    0,
+    "circuit_breaker":       False,
+    "global_cooldown_until": 0.0,          # Global halt across ALL alphas
+    "session_halt_until":    0.0,          # Rolling multi-loss circuit breaker
+    "cooldown_reason":       "",           # Reason for active halt
+    "rolling_losses":        deque(maxlen=20), # (timestamp, pnl_usd)
+    "directional_lock":      {"direction": None, "until": 0.0}, # Anti-whipsaw lockout
+}
 
 # ---------------------------------------------------------
-# SESSION AWARENESS
+# MULTI-ALPHA TOURNAMENT ARENA
 # ---------------------------------------------------------
-def get_current_session():
-    utc_hour = datetime.datetime.utcnow().hour
-    if 7 <= utc_hour < 13:
-        session_state["current"] = "LONDON"
-        session_state["execution_allowed"] = True
-        session_state["thresholds_elevated"] = False
-    elif 13 <= utc_hour < 21:
-        session_state["current"] = "NEW_YORK"
-        session_state["execution_allowed"] = True
-        session_state["thresholds_elevated"] = False
-    elif 0 <= utc_hour < 7:
-        session_state["current"] = "ASIAN"
-        session_state["execution_allowed"] = True
-        session_state["thresholds_elevated"] = True  # Elevated thresholds
-    else:  # 21-24
-        session_state["current"] = "DEAD_ZONE"
-        session_state["execution_allowed"] = False
-        session_state["thresholds_elevated"] = True
+alphas = {
+    "OF_MOM": {
+        "name":        "OF-MOM (Order Flow Momentum)",
+        "tag":         "OF-MOM",
+        "weight":      0.50,
+        "conviction":  0.0,      # -1.0 to +1.0
+        "direction":   "FLAT",   # LONG, SHORT, FLAT
+        "confidence":  0,        # 0 to 100%
+        "rationale":   "Initializing...",
+        "trades":      0,
+        "wins":        0,
+        "losses":      0,
+        "pnl":         0.0,
+        "rolling_wr":  50.0,
+        "status":      "ACTIVE", # ACTIVE, PROBATION, QUARANTINED
+    },
+    "LIQ_REV": {
+        "name":        "LIQ-REV (Liquidity Sweep Fade)",
+        "tag":         "LIQ-REV",
+        "weight":      0.25,
+        "conviction":  0.0,
+        "direction":   "FLAT",
+        "confidence":  0,
+        "rationale":   "Initializing...",
+        "trades":      0,
+        "wins":        0,
+        "losses":      0,
+        "pnl":         0.0,
+        "rolling_wr":  50.0,
+        "status":      "ACTIVE",
+    },
+    "OB_ABSORB": {
+        "name":        "OB-ABSORB (Order Book Wall Defense)",
+        "tag":         "OB-ABSORB",
+        "weight":      0.25,
+        "conviction":  0.0,
+        "direction":   "FLAT",
+        "confidence":  0,
+        "rationale":   "Initializing...",
+        "trades":      0,
+        "wins":        0,
+        "losses":      0,
+        "pnl":         0.0,
+        "rolling_wr":  50.0,
+        "status":      "ACTIVE",
+    }
+}
+
+# Active position state
+portfolio = {
+    "position":              "FLAT",     # FLAT, LONG, SHORT
+    "phase":                 0,          # 0=flat, 1=initial full, 2=runner post 70% scale
+    "entry_price":           0.0,
+    "sl_distance":           0.0,
+    "active_sl_price":       0.0,
+    "tp1_price":             0.0,        # 2.5R target (70% scale-out)
+    "active_tp_price":       0.0,        # 4.5R target (30% runner)
+    "notional_size_usd":     0.0,
+    "initial_notional_usd":  0.0,
+    "leverage_used":         0.0,
+    "realized_pnl":          0.0,
+    "banked_pnl":            0.0,
+    "unrealized_pnl":        0.0,
+    "highest_unrealized":    0.0,
+    "trade_open_time":       0.0,
+    "lead_alpha":            "",
+    "be_moved":              False,
+    "entry_reason":          "",
+}
+
+alpha_cooldowns = {
+    "OF_MOM": 0.0,
+    "LIQ_REV": 0.0,
+    "OB_ABSORB": 0.0,
+}
+
+# Trade history & rolling structures
+trade_journal         = []
+recent_trades         = deque(maxlen=8)
+recent_post_mortems   = deque(maxlen=6)
+
+current_bucket        = {"buy_vol": 0.0, "sell_vol": 0.0, "total_vol": 0.0, "start_time": time.time()}
+vpin_history          = deque(maxlen=500)
+order_flow_imbalances = deque(maxlen=500)
+cofi_z_history        = deque(maxlen=50)
+
+minute_candles          = deque(maxlen=120)
+live_candle             = {"open": 0, "high": 0, "low": 0, "close": 0, "volume": 0}
+five_min_candles        = deque(maxlen=100)
+five_min_accumulator    = []
+fifteen_min_candles     = deque(maxlen=60)
+fifteen_min_accumulator = []
+
+liquidation_events      = deque()
+liquidations            = {"longs_usd": 0.0, "shorts_usd": 0.0}
+
+DYNAMIC_PARAMS = {
+    "BUCKET_VOLUME_SIZE": 10.0,
+    "TARGET_RR_RATIO":    2.5,   # TP1 target (70% position exit)
+    "SCALE_OUT_FRAC":     0.70,  # Lock 70% profit at TP1
+    "RUNNER_RR_RATIO":    4.5,   # TP2 target (30% runner exit)
+    "RUNNER_FRAC":        0.30,  # 30% runner position
+}
 
 # ---------------------------------------------------------
-# DYNAMIC COOLDOWN
-# ---------------------------------------------------------
-def activate_cooldown():
-    cooldown["active"] = True
-    cooldown["buckets_remaining"] = cooldown["base_buckets"]
-
-def tick_cooldown():
-    """Called on each completed volume bucket."""
-    if cooldown["active"]:
-        cooldown["buckets_remaining"] -= 1
-        if cooldown["buckets_remaining"] <= 0:
-            cooldown["active"] = False
-            cooldown["buckets_remaining"] = 0
-
-def check_cooldown_override(vpin_pct, cofi_z):
-    """Returns True if the signal is strong enough to override cooldown."""
-    if not cooldown["active"]:
-        return True
-    if vpin_pct >= cooldown["elevated_vpin"] and abs(cofi_z) >= cooldown["elevated_cofi"]:
-        cooldown["active"] = False
-        cooldown["buckets_remaining"] = 0
-        print("⚡ COOLDOWN OVERRIDE: Exceptional signal detected, cooldown lifted!")
-        return True
-    return False
-
-# ---------------------------------------------------------
-# 5-MINUTE CANDLE AGGREGATOR
-# ---------------------------------------------------------
-def aggregate_5min_candle(one_min_candle):
-    """Collect 1-min candles and aggregate every 5 into a 5-min candle."""
-    five_min_accumulator.append(one_min_candle)
-    if len(five_min_accumulator) >= 5:
-        o = five_min_accumulator[0]["open"]
-        h = max(c["high"] for c in five_min_accumulator)
-        l = min(c["low"] for c in five_min_accumulator)
-        c = five_min_accumulator[-1]["close"]
-        v = sum(c_["volume"] for c_ in five_min_accumulator)
-        
-        candle_5m = {"open": o, "high": h, "low": l, "close": c, "volume": v}
-        five_min_candles.append(candle_5m)
-        five_min_accumulator.clear()
-        
-        # Snapshot CVD and price for divergence detection
-        cvd_state["cvd_history"].append(cvd_state["cvd"])
-        cvd_state["price_history"].append(c)
-        cvd_state["cvd"] = 0.0  # Reset per 5-min window
-        
-        # Run detection on new 5-min candle
-        detect_fvgs()
-        detect_order_blocks()
-        detect_cvd_divergence()
-        
-        # Tier 1: Feed into 15-min aggregator
-        aggregate_15min_candle(candle_5m)
-        
-        # Tier 1: Liquidity Sweep Detection
-        track_swing_levels(candle_5m)
-        detect_liquidity_sweep(candle_5m)
-        
-        # Tier 1: Auto-refresh Volume Profile every 4 hours
-        check_vp_refresh()
-
-# ---------------------------------------------------------
-# LIVE FVG DETECTION
-# ---------------------------------------------------------
-def detect_fvgs():
-    """Detect Fair Value Gaps on the 5-minute chart."""
-    if len(five_min_candles) < 3:
-        return
-    
-    candles = list(five_min_candles)
-    ltp = state["ltp"]
-    
-    # Purge mitigated FVGs (price closed inside the gap)
-    fvg_state["bullish_fvgs"] = [
-        f for f in fvg_state["bullish_fvgs"]
-        if not (ltp > f["bottom"] and ltp < f["top"])
-    ]
-    fvg_state["bearish_fvgs"] = [
-        f for f in fvg_state["bearish_fvgs"]
-        if not (ltp < f["top"] and ltp > f["bottom"])
-    ]
-    
-    # Check latest 3 candles for new FVG
-    c0 = candles[-3]  # Candle 1
-    c1 = candles[-2]  # Candle 2 (impulse)
-    c2 = candles[-1]  # Candle 3
-    
-    # Bullish FVG: candle 3's low > candle 1's high (gap up)
-    if c2["low"] > c0["high"]:
-        gap_bottom = c0["high"]
-        gap_top = c2["low"]
-        # Wick rule: candle 2's low must not go below candle 1's low
-        if c1["low"] >= c0["low"]:
-            fvg = {"bottom": gap_bottom, "top": gap_top, "ts": datetime.datetime.now().strftime("%H:%M")}
-            # Only add if not duplicate
-            if not any(abs(f["bottom"] - gap_bottom) < 1.0 for f in fvg_state["bullish_fvgs"]):
-                fvg_state["bullish_fvgs"].append(fvg)
-                print(f"📊 NEW BULLISH FVG DETECTED: [{gap_bottom:,.1f} - {gap_top:,.1f}]")
-    
-    # Bearish FVG: candle 3's high < candle 1's low (gap down)
-    if c2["high"] < c0["low"]:
-        gap_top = c0["low"]
-        gap_bottom = c2["high"]
-        # Wick rule: candle 2's high must not go above candle 1's high
-        if c1["high"] <= c0["high"]:
-            fvg = {"bottom": gap_bottom, "top": gap_top, "ts": datetime.datetime.now().strftime("%H:%M")}
-            if not any(abs(f["top"] - gap_top) < 1.0 for f in fvg_state["bearish_fvgs"]):
-                fvg_state["bearish_fvgs"].append(fvg)
-                print(f"📊 NEW BEARISH FVG DETECTED: [{gap_bottom:,.1f} - {gap_top:,.1f}]")
-    
-    # Find nearest FVGs to current price
-    all_bull = sorted(fvg_state["bullish_fvgs"], key=lambda f: abs(ltp - (f["bottom"] + f["top"]) / 2))
-    all_bear = sorted(fvg_state["bearish_fvgs"], key=lambda f: abs(ltp - (f["bottom"] + f["top"]) / 2))
-    fvg_state["nearest_bullish"] = all_bull[0] if all_bull else None
-    fvg_state["nearest_bearish"] = all_bear[0] if all_bear else None
-
-def is_price_in_fvg(ltp, is_long):
-    """Check if current price is inside any active FVG zone."""
-    fvgs = fvg_state["bullish_fvgs"] if is_long else fvg_state["bearish_fvgs"]
-    for fvg in fvgs:
-        if fvg["bottom"] <= ltp <= fvg["top"]:
-            return True, fvg
-    return False, None
-
-# ---------------------------------------------------------
-# ICT ORDER BLOCK DETECTION
-# ---------------------------------------------------------
-def detect_order_blocks():
-    """Detect ICT Order Blocks on the 5-minute chart."""
-    if len(five_min_candles) < 15:
-        return
-    
-    candles = list(five_min_candles)
-    ltp = state["ltp"]
-    
-    # Purge mitigated OBs (price closed through the OB zone)
-    ob_state["bullish_obs"] = [
-        ob for ob in ob_state["bullish_obs"]
-        if not (ltp < ob["low"])  # Only remove if price went completely below
-    ]
-    ob_state["bearish_obs"] = [
-        ob for ob in ob_state["bearish_obs"]
-        if not (ltp > ob["high"])  # Only remove if price went completely above
-    ]
-    
-    # Calculate body sizes
-    bodies = [abs(c["close"] - c["open"]) for c in candles]
-    is_bullish = [c["close"] > c["open"] for c in candles]
-    
-    n = len(candles)
-    
-    # Check last candle for displacement
-    if n < 12:
-        return
-    
-    i = n - 1  # Latest candle
-    avg_body = np.mean(bodies[max(0, i-10):i])
-    
-    if avg_body <= 0 or bodies[i] < 1.5 * avg_body:
-        return  # No displacement
-    
-    displacement_bullish = is_bullish[i]
-    
-    if displacement_bullish:
-        # Find last bearish candle before displacement
-        for j in range(i - 1, max(0, i - 6), -1):
-            if not is_bullish[j]:
-                ob = {
-                    "low": candles[j]["low"],
-                    "high": candles[j]["high"],
-                    "ts": datetime.datetime.now().strftime("%H:%M"),
-                    "displacement": bodies[i] / avg_body
-                }
-                if not any(abs(o["low"] - ob["low"]) < 1.0 for o in ob_state["bullish_obs"]):
-                    ob_state["bullish_obs"].append(ob)
-                    print(f"🏗️ BULLISH ORDER BLOCK: [{ob['low']:,.1f} - {ob['high']:,.1f}] (Displacement: {ob['displacement']:.1f}x)")
-                break
-    else:
-        # Find last bullish candle before displacement
-        for j in range(i - 1, max(0, i - 6), -1):
-            if is_bullish[j]:
-                ob = {
-                    "low": candles[j]["low"],
-                    "high": candles[j]["high"],
-                    "ts": datetime.datetime.now().strftime("%H:%M"),
-                    "displacement": bodies[i] / avg_body
-                }
-                if not any(abs(o["high"] - ob["high"]) < 1.0 for o in ob_state["bearish_obs"]):
-                    ob_state["bearish_obs"].append(ob)
-                    print(f"🏗️ BEARISH ORDER BLOCK: [{ob['low']:,.1f} - {ob['high']:,.1f}] (Displacement: {ob['displacement']:.1f}x)")
-                break
-    
-    ob_state["active_count"] = len(ob_state["bullish_obs"]) + len(ob_state["bearish_obs"])
-
-def is_price_in_ict_ob(ltp, is_long):
-    """Check if current price is inside any active ICT Order Block."""
-    obs = ob_state["bullish_obs"] if is_long else ob_state["bearish_obs"]
-    for ob in obs:
-        if ob["low"] <= ltp <= ob["high"]:
-            return True, ob
-    return False, None
-
-# ---------------------------------------------------------
-# CVD DIVERGENCE DETECTION
-# ---------------------------------------------------------
-def detect_cvd_divergence():
-    """Detect price vs CVD divergence across 5-min windows."""
-    if len(cvd_state["cvd_history"]) < 5 or len(cvd_state["price_history"]) < 5:
-        cvd_state["divergence"] = "NONE"
-        return
-    
-    prices = list(cvd_state["price_history"])
-    cvds = list(cvd_state["cvd_history"])
-    
-    # Compare last 3 snapshots
-    p1, p2, p3 = prices[-3], prices[-2], prices[-1]
-    c1, c2, c3 = cvds[-3], cvds[-2], cvds[-1]
-    
-    # Bullish divergence: price making lower lows but CVD making higher lows
-    if p3 < p1 and c3 > c1:
-        cvd_state["divergence"] = "BULLISH"
-    # Bearish divergence: price making higher highs but CVD making lower highs
-    elif p3 > p1 and c3 < c1:
-        cvd_state["divergence"] = "BEARISH"
-    else:
-        cvd_state["divergence"] = "NONE"
-
-# ---------------------------------------------------------
-# MULTI-TIMEFRAME CONFIRMATION (15-MIN)
-# ---------------------------------------------------------
-def aggregate_15min_candle(five_min_candle):
-    """Collect 5-min candles and aggregate every 3 into a 15-min candle."""
-    fifteen_min_accumulator.append(five_min_candle)
-    if len(fifteen_min_accumulator) >= 3:
-        o = fifteen_min_accumulator[0]["open"]
-        h = max(c["high"] for c in fifteen_min_accumulator)
-        l = min(c["low"] for c in fifteen_min_accumulator)
-        c = fifteen_min_accumulator[-1]["close"]
-        v = sum(c_["volume"] for c_ in fifteen_min_accumulator)
-        
-        candle_15m = {"open": o, "high": h, "low": l, "close": c, "volume": v}
-        fifteen_min_candles.append(candle_15m)
-        fifteen_min_accumulator.clear()
-        
-        update_mtf_trend()
-
-def update_mtf_trend():
-    """Calculate 20-period EMA on 15-min closes and determine trend."""
-    if len(fifteen_min_candles) < 5:
-        mtf_state["trend"] = "NEUTRAL"
-        return
-    
-    closes = [c["close"] for c in fifteen_min_candles]
-    
-    # EMA-20 calculation
-    k = 2 / (min(20, len(closes)) + 1)
-    ema = closes[0]
-    for close in closes[1:]:
-        ema = close * k + ema * (1 - k)
-    
-    mtf_state["ema_20"] = ema
-    current_price = closes[-1]
-    
-    # Strength: how far price is from EMA in bps
-    strength_bps = ((current_price - ema) / ema) * 10000
-    mtf_state["strength"] = strength_bps
-    
-    if strength_bps > 15:
-        mtf_state["trend"] = "BULLISH"
-    elif strength_bps < -15:
-        mtf_state["trend"] = "BEARISH"
-    else:
-        mtf_state["trend"] = "NEUTRAL"
-
-# ---------------------------------------------------------
-# LIQUIDITY SWEEP DETECTION
-# ---------------------------------------------------------
-def track_swing_levels(five_min_candle):
-    """Track rolling highs and lows for sweep detection."""
-    sweep_state["recent_highs"].append(five_min_candle["high"])
-    sweep_state["recent_lows"].append(five_min_candle["low"])
-
-def detect_liquidity_sweep(five_min_candle):
-    """Detect if latest candle swept a previous high/low and reversed."""
-    if len(sweep_state["recent_highs"]) < 5:
-        return
-    
-    highs = list(sweep_state["recent_highs"])
-    lows = list(sweep_state["recent_lows"])
-    candle = five_min_candle
-    
-    # Find the highest high in the last 10-20 candles (excluding latest)
-    prev_highs = highs[:-1] if len(highs) > 1 else highs
-    prev_lows = lows[:-1] if len(lows) > 1 else lows
-    
-    swing_high = max(prev_highs[-10:]) if len(prev_highs) >= 3 else 0
-    swing_low = min(prev_lows[-10:]) if len(prev_lows) >= 3 else float('inf')
-    
-    # Bearish sweep: wick above swing high, close below it
-    if candle["high"] > swing_high and candle["close"] < swing_high:
-        sweep_state["last_sweep"] = "BEARISH_SWEEP"
-        sweep_state["sweep_price"] = swing_high
-        sweep_state["sweep_ts"] = datetime.datetime.now().strftime("%H:%M")
-        print(f"🎯 LIQUIDITY SWEEP: Bearish sweep above {swing_high:,.1f} — stop hunt reversal!")
-    
-    # Bullish sweep: wick below swing low, close above it
-    elif candle["low"] < swing_low and candle["close"] > swing_low:
-        sweep_state["last_sweep"] = "BULLISH_SWEEP"
-        sweep_state["sweep_price"] = swing_low
-        sweep_state["sweep_ts"] = datetime.datetime.now().strftime("%H:%M")
-        print(f"🎯 LIQUIDITY SWEEP: Bullish sweep below {swing_low:,.1f} — stop hunt reversal!")
-    else:
-        # Decay sweep signal after 3 candles
-        if sweep_state["last_sweep"] != "NONE":
-            if len(highs) > 3:
-                sweep_state["last_sweep"] = "NONE"
-
-# ---------------------------------------------------------
-# DISPLACEMENT SCORING (ICT OB QUALITY)
-# ---------------------------------------------------------
-def score_displacement(ob, candles_list):
-    """Score an order block by its displacement candle's strength.
-    Returns a score from 0-3: 0=weak, 1=normal, 2=strong, 3=extreme."""
-    disp = ob.get("displacement", 1.5)
-    if disp >= 3.0:
-        return 3  # Extreme
-    elif disp >= 2.0:
-        return 2  # Strong
-    elif disp >= 1.5:
-        return 1  # Normal
-    return 0
-
-def get_best_ob_score(is_long):
-    """Get the highest displacement score among active OBs near current price."""
-    obs = ob_state["bullish_obs"] if is_long else ob_state["bearish_obs"]
-    ltp = state["ltp"]
-    best_score = 0
-    for ob in obs:
-        if ob["low"] <= ltp <= ob["high"]:
-            score = score_displacement(ob, [])
-            best_score = max(best_score, score)
-    return best_score
-
-# ---------------------------------------------------------
-# TRADE JOURNAL (FOR SUPERVISED ML)
+# DATABASE & JOURNAL STORAGE (REHYDRATION ON RESTART)
 # ---------------------------------------------------------
 def save_trade_journal():
     try:
@@ -791,824 +283,1646 @@ def save_trade_journal():
     except Exception:
         pass
 
+
+def update_alpha_quarantine_status():
+    """
+    Evaluates rolling win rates and benches underperforming alphas (< 35% WR).
+    Guarantees at least 1 viable alpha by keeping the highest performer on probation.
+    """
+    candidates = []
+    for k, a in alphas.items():
+        tr = a.get("trades", 0)
+        wr = a.get("rolling_wr", 50.0)
+        if tr >= 3 and wr < 35.0:
+            a["status"] = "QUARANTINED"
+            a["weight"] = 0.05
+        else:
+            a["status"] = "ACTIVE"
+        candidates.append((k, wr, tr))
+
+    active_count = sum(1 for a in alphas.values() if a["status"] == "ACTIVE")
+    if active_count == 0:
+        # Keep best performing alpha on PROBATION so engine can operate with strict trend locks
+        best_k = max(candidates, key=lambda x: (x[1], -x[2]))[0]
+        alphas[best_k]["status"] = "PROBATION"
+        alphas[best_k]["weight"] = 0.70
+
+    # Normalize weights across active and probationary alphas
+    active_keys = [k for k, a in alphas.items() if a["status"] in ["ACTIVE", "PROBATION"]]
+    if active_keys:
+        tot_w = sum(alphas[k]["weight"] for k in active_keys)
+        for k in active_keys:
+            alphas[k]["weight"] = round(alphas[k]["weight"] / tot_w, 3)
+    
+    # Quarantined alphas have weight 0.00 in consensus
+    for k, a in alphas.items():
+        if a["status"] == "QUARANTINED":
+            a["weight"] = 0.00
+
+
 def load_trade_journal():
     global trade_journal
     try:
         if os.path.exists(TRADE_JOURNAL_FILE):
             with open(TRADE_JOURNAL_FILE, "r") as f:
                 trade_journal = json.load(f)
-    except Exception:
-        trade_journal = []
 
-def journal_entry(action, entry_price, setup_grade, confluences):
-    """Record features at trade entry for later ML training."""
-    entry = {
-        "ts": datetime.datetime.now().isoformat(),
-        "action": action,
-        "entry_price": entry_price,
-        "setup_grade": setup_grade,
-        "risk_multiplier": portfolio.get("confidence_multiplier", 1.0),
-        "session": session_state["current"],
-        "regime": ml_state["regime"],
-        "vpin_pct": state["vpin_percentile"],
-        "cofi_z": state["cofi_z"],
-        "obi": state["obi"],
-        "cvd_divergence": cvd_state["divergence"],
-        "mtf_trend": mtf_state["trend"],
-        "mtf_strength": mtf_state["strength"],
-        "atr": state["atr_14"],
-        "sweep": sweep_state["last_sweep"],
-        "confluences": confluences,
-        "ob_displacement_score": get_best_ob_score(action == "BUY"),
-        # Filled on exit:
-        "exit_price": 0.0,
-        "pnl": 0.0,
-        "outcome": "OPEN",
-        "exit_reason": ""
-    }
-    trade_journal.append(entry)
-    return len(trade_journal) - 1  # Return index for later update
+            # Clean up stale dangling open trades if more than 1 exists
+            open_trades = [t for t in trade_journal if t.get("outcome") == "OPEN"]
+            if len(open_trades) > 1:
+                for t in open_trades[:-1]:
+                    t["outcome"] = "CANCELLED"
+                    t["exit_reason"] = "STALE_ABANDONED"
+                    t["exit_ts"] = datetime.datetime.now().isoformat()
+                    t["post_mortem"] = "Voided: Abandoned open trade from prior process crash."
+                save_trade_journal()
 
-def journal_exit(pnl, exit_price, exit_reason):
-    """Update the last open journal entry with exit data."""
-    for entry in reversed(trade_journal):
-        if entry["outcome"] == "OPEN":
-            entry["exit_price"] = exit_price
-            entry["pnl"] = pnl
-            entry["outcome"] = "WIN" if pnl > 0 else "LOSS"
-            entry["exit_reason"] = exit_reason
+            closed = [t for t in trade_journal if t.get("outcome") in ["WIN", "LOSS"]]
+            if closed:
+                current_run_trades = [t for t in closed if t.get("id", 0) >= 8]
+                target_trades = current_run_trades if current_run_trades else closed
+                session_pnl = sum(t.get("pnl_usd", 0.0) for t in target_trades)
+
+                survival["account_balance"] = round(INITIAL_CAPITAL + session_pnl, 2)
+
+                # Reconstruct peak balance
+                running_bal = INITIAL_CAPITAL
+                peak_bal = INITIAL_CAPITAL
+                for t in target_trades:
+                    running_bal += t.get("pnl_usd", 0.0)
+                    if running_bal > peak_bal:
+                        peak_bal = running_bal
+                survival["peak_balance"] = round(peak_bal, 2)
+
+                # Reconstruct stats for each alpha
+                for k in alphas:
+                    alpha_trades = [t for t in closed if t.get("lead_alpha") == k]
+                    if alpha_trades:
+                        wins = sum(1 for t in alpha_trades if t.get("outcome") == "WIN")
+                        losses = sum(1 for t in alpha_trades if t.get("outcome") == "LOSS")
+                        pnl = sum(t.get("pnl_usd", 0.0) for t in alpha_trades)
+                        alphas[k]["trades"] = len(alpha_trades)
+                        alphas[k]["wins"] = wins
+                        alphas[k]["losses"] = losses
+                        alphas[k]["pnl"] = round(pnl, 2)
+                        alphas[k]["rolling_wr"] = round((wins / len(alpha_trades)) * 100.0, 1)
+
+                update_alpha_quarantine_status()
+
+                # Calculate consecutive losses streak on current tournament run (within last 3 hours)
+                streak = 0
+                now_epoch = time.time()
+                for t in reversed(target_trades):
+                    if t.get("outcome") == "LOSS":
+                        # Time decay preservation scratches do not count towards consecutive loss streaks
+                        if "TIME DECAY" in t.get("exit_reason", ""):
+                            continue
+                        ex_ts = t.get("exit_ts")
+                        ts_epoch = 0.0
+                        try:
+                            if isinstance(ex_ts, str):
+                                ts_epoch = datetime.datetime.fromisoformat(ex_ts).timestamp()
+                            elif isinstance(ex_ts, list) and ex_ts:
+                                ts_epoch = datetime.datetime.fromisoformat(ex_ts[0]).timestamp()
+                        except Exception:
+                            ts_epoch = 0.0
+                        if ts_epoch > 0 and (now_epoch - ts_epoch) > 10800.0:
+                            break
+                        streak += 1
+                    else:
+                        break
+                survival["consecutive_losses"] = min(streak, 3)
+
+                # Rehydrate rolling losses
+                survival["rolling_losses"].clear()
+                for t in closed:
+                    if t.get("outcome") == "LOSS":
+                        ex_ts = t.get("exit_ts")
+                        ts_epoch = 0.0
+                        try:
+                            if isinstance(ex_ts, str):
+                                ts_epoch = datetime.datetime.fromisoformat(ex_ts).timestamp()
+                            elif isinstance(ex_ts, list) and ex_ts:
+                                ts_epoch = datetime.datetime.fromisoformat(ex_ts[0]).timestamp()
+                        except Exception:
+                            ts_epoch = 0.0
+                        if ts_epoch > 0 and (now_epoch - ts_epoch) <= 7200.0:
+                            survival["rolling_losses"].append((ts_epoch, t.get("pnl_usd", -5.0)))
+
+                # Populate recent trades and post-mortems
+                recent_trades.clear()
+                for t in closed[-5:]:
+                    action = t.get("action", "BUY")
+                    pnl_val = t.get("pnl_usd", 0.0)
+                    sign = "+" if pnl_val >= 0 else ""
+                    lead_tag = t.get("lead_alpha", "")
+                    reason_tag = t.get("exit_reason", "CLOSED")
+                    msg = (f"[{t.get('open_ts','')[11:19]}] {action:4} | Entry: {t.get('entry_price',0):,.1f} | "
+                           f"Exit: {t.get('exit_price',0):,.1f} | PnL: ${sign}{pnl_val:.2f} | {reason_tag} [{lead_tag}]")
+                    recent_trades.append(msg)
+
+                recent_post_mortems.clear()
+                for t in closed[-4:]:
+                    if t.get("post_mortem"):
+                        pm = f"[{t.get('exit_ts','')[11:19] if isinstance(t.get('exit_ts'), str) else ''}] [{t.get('lead_alpha','')}] {t.get('post_mortem')} (${t.get('pnl_usd',0):+.2f})"
+                        recent_post_mortems.append(pm)
+
+            # Rehydrate active trade if open
+            if open_trades:
+                latest_open = open_trades[-1]
+                pos_dir = "LONG" if latest_open.get("action") == "BUY" else "SHORT"
+                ep = latest_open.get("entry_price", 0.0)
+                sl_p = latest_open.get("sl_price", 0.0)
+                sl_dist = abs(ep - sl_p) if ep > 0 and sl_p > 0 else 150.0
+                tp1_p = latest_open.get("tp_price", 0.0)
+                tp2_p = latest_open.get("tp2_price", 0.0)
+                if tp2_p == 0.0 or tp2_p == tp1_p:
+                    tp2_p = ep + sl_dist * 4.5 if pos_dir == "LONG" else ep - sl_dist * 4.5
+                portfolio.update({
+                    "position":             pos_dir,
+                    "phase":                1,
+                    "entry_price":          ep,
+                    "sl_distance":          sl_dist,
+                    "active_sl_price":      sl_p,
+                    "tp1_price":            tp1_p,
+                    "active_tp_price":      tp2_p,
+                    "notional_size_usd":    latest_open.get("notional_usd", 0.0),
+                    "initial_notional_usd": latest_open.get("notional_usd", 0.0),
+                    "leverage_used":        round(latest_open.get("notional_usd", 0.0) / max(1.0, survival["account_balance"]), 1),
+                    "realized_pnl":         0.0,
+                    "banked_pnl":           0.0,
+                    "unrealized_pnl":       0.0,
+                    "highest_unrealized":   0.0,
+                    "trade_open_time":      time.time(),
+                    "lead_alpha":           latest_open.get("lead_alpha", ""),
+                    "be_moved":             False,
+                    "entry_reason":         latest_open.get("reason", ""),
+                })
+
+            update_survival_health()
+    except Exception as e:
+        print(f"Error loading journal: {e}")
+
+
+# ---------------------------------------------------------
+# SURVIVAL HP CONTROLLER
+# ---------------------------------------------------------
+def update_survival_health():
+    bal = survival["account_balance"]
+    peak = survival["peak_balance"]
+    if bal > peak:
+        survival["peak_balance"] = bal
+        peak = bal
+
+    dd_usd = peak - bal
+    dd_pct = (dd_usd / peak * 100.0) if peak > 0 else 0.0
+    survival["current_drawdown_pct"] = dd_pct
+
+    max_dd = survival["max_drawdown_limit"]
+    hp = max(0.0, 100.0 * (1.0 - (dd_pct / max_dd)))
+    survival["hp_pct"] = round(hp, 1)
+
+    if hp <= 0.0:
+        survival["mode"] = "ELIMINATED"
+        survival["circuit_breaker"] = True
+    elif hp < 15.0:
+        survival["mode"] = "SURVIVAL BUNKER (HALTED)"
+    elif hp < 45.0:
+        survival["mode"] = "DEFENSIVE RECOVERY 🛡️"
+    elif hp < 70.0:
+        survival["mode"] = "DEFENSIVE 🟡"
+    else:
+        survival["mode"] = "THRIVING 🟢"
+
+
+def get_survival_risk_scalar():
+    """Returns dynamic risk scaling based on current HP. Hard freeze only under 15% HP."""
+    hp = survival["hp_pct"]
+    if survival["circuit_breaker"] or hp < 15.0:
+        return 0.0     # Hard capital preservation freeze only near actual 15% DD limit
+    elif hp < 45.0:
+        return 0.40    # Defensive recovery: conservative sizing ($2.50-$3.50 risk)
+    elif hp < 70.0:
+        return 0.65    # Defensive sizing with active recovery capacity
+    else:
+        return 1.00    # Full capital deployment
+
+
+def check_circuit_breakers():
+    """Checks session limits and rolling losses to enforce institutional cooldowns."""
+    now_t = time.time()
+    if survival["circuit_breaker"] or survival["hp_pct"] <= 0.0:
+        return False, "Circuit breaker tripped: Max Drawdown hit."
+    if survival["hp_pct"] < 15.0:
+        return False, "SURVIVAL BUNKER: Trading halted (Capital buffer exhausted <15% HP)."
+    if now_t < survival.get("session_halt_until", 0.0):
+        rem = int(survival["session_halt_until"] - now_t)
+        return False, f"Session halt active: {rem}s cooling ({survival.get('cooldown_reason','')})."
+    if now_t < survival.get("global_cooldown_until", 0.0):
+        rem = int(survival["global_cooldown_until"] - now_t)
+        return False, f"Global cooldown: {rem}s cooling ({survival.get('cooldown_reason','')})."
+
+    # Check rolling losses in last 2 hours (7200 seconds)
+    two_hours_ago = now_t - 7200.0
+    recent_losses = [pnl for t, pnl in survival.get("rolling_losses", []) if t >= two_hours_ago]
+    if len(recent_losses) >= 3:
+        survival["session_halt_until"] = now_t + 2700.0  # 45 minute halt
+        survival["cooldown_reason"] = "3 losses in 2h"
+        return False, "Session halt: 3 losses in 2h (45m cooling)."
+
+    return True, "CLEAR"
+
+
+# ---------------------------------------------------------
+# DYNAMIC MULTI-ARMED BANDIT META-ALLOCATOR
+# ---------------------------------------------------------
+def reward_alpha(lead_alpha_key, is_win, pnl_usd):
+    """Reinforces winning alphas and penalizes losing alphas dynamically."""
+    if lead_alpha_key not in alphas:
+        return
+
+    a = alphas[lead_alpha_key]
+    a["trades"] += 1
+    a["pnl"]    += pnl_usd
+    if is_win:
+        a["wins"] += 1
+        a["weight"] *= 1.30
+    else:
+        a["losses"] += 1
+        a["weight"] *= 0.75
+
+    tot = a["wins"] + a["losses"]
+    a["rolling_wr"] = (a["wins"] / tot * 100.0) if tot > 0 else 50.0
+    update_alpha_quarantine_status()
+
+
+# ---------------------------------------------------------
+# ALPHA 1: ORDER FLOW MOMENTUM BREAKOUT (OF-MOM)
+# ---------------------------------------------------------
+def evaluate_alpha_of_mom():
+    cofi_z_ema = market_state.get("cofi_z_ema", 0.0)
+    vpin_pct  = market_state["vpin_percentile"]
+    obi       = market_state["obi"]
+    mtf_trend = mtf_state["trend"]
+    mtf_str   = mtf_state["strength"]
+    atr_bps   = market_state.get("atr_bps", 4.0)
+
+    score_long  = 0.0
+    score_short = 0.0
+    notes       = []
+
+    # Short-term price velocity over last 3 minutes (bps return)
+    if len(minute_candles) >= 3:
+        p_base = minute_candles[-3]["close"]
+        price_vel_bps = ((market_state["ltp"] - p_base) / p_base) * 10000.0 if p_base > 0 else 0.0
+    else:
+        price_vel_bps = 0.0
+
+    is_mtf_bull = mtf_str > 5.0 or mtf_trend in ["BULLISH", "BULLISH_EXPANSION", "BULLISH_SLOPE"]
+    is_mtf_bear = mtf_str < -5.0 or mtf_trend in ["BEARISH", "BEARISH_BREAKDOWN", "BEARISH_SLOPE"]
+    is_cascade_down = mtf_str < -10.0 or mtf_trend in ["BEARISH", "BEARISH_BREAKDOWN", "BEARISH_SLOPE"]
+    is_cascade_up   = mtf_str > 10.0 or mtf_trend in ["BULLISH", "BULLISH_EXPANSION", "BULLISH_SLOPE"]
+
+    # Flow-Price Concordance & Trend Expansion using Institutional Z-Scores & Volatility
+    vol_adjusted_velocity = max(2.0, atr_bps * 0.25)
+    
+    if cofi_z_ema >= 1.5 and (price_vel_bps >= vol_adjusted_velocity or (is_mtf_bull and cofi_z_ema >= 2.5)):
+        if not is_cascade_down:
+            score_long += 0.40
+            notes.append(f"COFI Z {cofi_z_ema:+.1f}σ")
+            if is_mtf_bull:
+                score_long += 0.30
+                notes.append("MTF Aligned")
+    elif cofi_z_ema <= -1.5 and (price_vel_bps <= -vol_adjusted_velocity or (is_mtf_bear and cofi_z_ema <= -2.5)):
+        if not is_cascade_up:
+            score_short += 0.40
+            notes.append(f"COFI Z {cofi_z_ema:+.1f}σ")
+            if is_mtf_bear:
+                score_short += 0.30
+                notes.append("MTF Aligned")
+
+    # VPIN Confirmation
+    if vpin_pct >= 75:
+        if score_long > 0:
+            score_long += 0.15
+            notes.append(f"VPIN {vpin_pct}th")
+        elif score_short > 0:
+            score_short += 0.15
+            notes.append(f"VPIN {vpin_pct}th")
+
+    # L2 OBI Confirmation
+    if obi > 0.35 and cofi_z_ema > 0:
+        score_long += 0.15
+        notes.append(f"L2 OBI +{obi:.2f}")
+    elif obi < -0.35 and cofi_z_ema < 0:
+        score_short += 0.15
+        notes.append(f"L2 OBI {obi:.2f}")
+
+    # Strict Regime Veto
+    if is_cascade_down:
+        score_long = 0.0
+    if is_cascade_up:
+        score_short = 0.0
+
+    net_conviction = score_long - score_short
+    net_conviction = max(-1.0, min(1.0, net_conviction))
+
+    direction = "LONG" if net_conviction >= 0.40 else ("SHORT" if net_conviction <= -0.40 else "FLAT")
+    conf      = int(abs(net_conviction) * 100)
+
+    alphas["OF_MOM"].update({
+        "conviction": round(net_conviction, 2),
+        "direction":  direction,
+        "confidence": conf,
+        "rationale":  " | ".join(notes) or "Consolidating",
+    })
+    return net_conviction
+
+
+# ---------------------------------------------------------
+# ALPHA 2: LIQUIDITY SWEEP & MITIGATION MEAN REVERSION (LIQ-REV)
+# ---------------------------------------------------------
+def evaluate_alpha_liq_rev():
+    ltp         = market_state["ltp"]
+    sweep       = sweep_state["last_sweep"]
+    sweep_fresh = sweep_state["sweep_candles_ago"] <= 3 and sweep not in ["NONE", "FAILED", "INVALIDATED"]
+    cvd_div     = cvd_state["divergence"]
+    cofi_ema    = market_state["cofi_z_ema"]
+    atr         = market_state["atr_14"]
+    mtf_str     = mtf_state["strength"]
+    mtf_trend   = mtf_state["trend"]
+
+    score_long  = 0.0
+    score_short = 0.0
+    notes       = []
+
+    is_cascade_down = mtf_str < -10.0 or mtf_trend in ["BEARISH", "BEARISH_BREAKDOWN", "BEARISH_SLOPE"]
+    is_cascade_up   = mtf_str > 10.0 or mtf_trend in ["BULLISH", "BULLISH_EXPANSION", "BULLISH_SLOPE"]
+
+    # Only take sweeps IN THE DIRECTION of the macro trend
+    if sweep == "BULLISH_SWEEP" and sweep_fresh:
+        sweep_px = sweep_state["sweep_price"]
+        if is_cascade_down:
+            notes.append("Bull Sweep (Vetoed: Bear Trend)")
+        elif ltp < sweep_px:
+            notes.append("Low Broken (No Reclaim)")
+        elif ltp > sweep_px + atr * 1.5:
+            sweep_state["last_sweep"] = "FAILED"
+            notes.append("Sweep Stale / Extended")
+        else:
+            score_long += 0.45
+            notes.append(f"Reclaimed Low @ {sweep_px:,.0f}")
+    elif sweep == "BEARISH_SWEEP" and sweep_fresh:
+        sweep_px = sweep_state["sweep_price"]
+        if is_cascade_up:
+            notes.append("Bear Sweep (Vetoed: Bull Trend)")
+        elif ltp > sweep_px:
+            notes.append("High Broken (No Reclaim)")
+        elif ltp < sweep_px - atr * 1.5:
+            sweep_state["last_sweep"] = "FAILED"
+            notes.append("Sweep Stale / Extended")
+        else:
+            score_short += 0.45
+            notes.append(f"Reclaimed High @ {sweep_px:,.0f}")
+
+    # Delta Divergence Confirmation
+    if cvd_div == "BULLISH" and not is_cascade_down:
+        score_long += 0.25
+        notes.append("Bullish CVD Div")
+    elif cvd_div == "BEARISH" and not is_cascade_up:
+        score_short += 0.25
+        notes.append("Bearish CVD Div")
+
+    # Volume Profile Proximity
+    all_levels = macro_structure["hvns"] + macro_structure["micro_hvns"] + [macro_structure["poc"]]
+    near_struct = any(abs(ltp - lvl) <= atr * 0.8 for lvl in all_levels if lvl > 0)
+    if near_struct:
+        if score_long > 0:
+            score_long += 0.20
+            notes.append("At VP Structure")
+        elif score_short > 0:
+            score_short += 0.20
+            notes.append("At VP Structure")
+
+    # Hard Regime Veto
+    if is_cascade_down:
+        score_long = 0.0
+    if is_cascade_up:
+        score_short = 0.0
+
+    net_conviction = score_long - score_short
+    net_conviction = max(-1.0, min(1.0, net_conviction))
+
+    direction = "LONG" if net_conviction >= 0.40 else ("SHORT" if net_conviction <= -0.40 else "FLAT")
+    conf      = int(abs(net_conviction) * 100)
+
+    alphas["LIQ_REV"].update({
+        "conviction": round(net_conviction, 2),
+        "direction":  direction,
+        "confidence": conf,
+        "rationale":  " | ".join(notes) or "No Sweep Trigger",
+    })
+    return net_conviction
+
+
+# ---------------------------------------------------------
+# ALPHA 3: STRUCTURAL ORDER BOOK WALL ABSORPTION (OB-ABSORB)
+# ---------------------------------------------------------
+def evaluate_alpha_ob_absorb():
+    ltp       = market_state["ltp"]
+    obi       = market_state["obi"]
+    mtf_str   = mtf_state["strength"]
+    mtf_trend = mtf_state["trend"]
+    cvd_mom   = cvd_state["delta_momentum"]
+
+    score_long  = 0.0
+    score_short = 0.0
+    notes       = []
+
+    is_cascade_down = mtf_str < -10.0 or mtf_trend in ["BEARISH", "BEARISH_BREAKDOWN", "BEARISH_SLOPE"]
+    is_cascade_up   = mtf_str > 10.0 or mtf_trend in ["BULLISH", "BULLISH_EXPANSION", "BULLISH_SLOPE"]
+
+    # Bullish OB mitigation
+    for ob in ob_state["bullish_obs"]:
+        if ob["low"] <= ltp <= ob["high"]:
+            if is_cascade_down:
+                notes.append("Bull OB (Bypassed: Bear Trend)")
+            else:
+                score_long += 0.40
+                notes.append(f"Bull OB [{ob['low']:,.0f}-{ob['high']:,.0f}]")
             break
+
+    # Bearish OB mitigation
+    for ob in ob_state["bearish_obs"]:
+        if ob["low"] <= ltp <= ob["high"]:
+            if is_cascade_up:
+                notes.append("Bear OB (Bypassed: Bull Trend)")
+            else:
+                score_short += 0.40
+                notes.append(f"Bear OB [{ob['low']:,.0f}-{ob['high']:,.0f}]")
+            break
+
+    # Order Book Wall Defense with delta anti-spoofing
+    if obi >= 0.45:
+        if cvd_mom < -25.0:
+            notes.append("Bid Wall (Wall Smashed by Sells)")
+        elif not is_cascade_down:
+            score_long += 0.35
+            notes.append(f"Bid Wall ({obi:+.2f})")
+    elif obi <= -0.45:
+        if cvd_mom > 25.0:
+            notes.append("Ask Wall (Wall Smashed by Buys)")
+        elif not is_cascade_up:
+            score_short += 0.35
+            notes.append(f"Ask Wall ({obi:+.2f})")
+
+    # Hard Regime Veto
+    if is_cascade_down:
+        score_long = 0.0
+    if is_cascade_up:
+        score_short = 0.0
+
+    net_conviction = score_long - score_short
+    net_conviction = max(-1.0, min(1.0, net_conviction))
+
+    direction = "LONG" if net_conviction >= 0.40 else ("SHORT" if net_conviction <= -0.40 else "FLAT")
+    conf      = int(abs(net_conviction) * 100)
+
+    alphas["OB_ABSORB"].update({
+        "conviction": round(net_conviction, 2),
+        "direction":  direction,
+        "confidence": conf,
+        "rationale":  " | ".join(notes) or "Open Space",
+    })
+    return net_conviction
+
+
+# ---------------------------------------------------------
+# MULTI-ALPHA CONTINUOUS EVALUATION
+# ---------------------------------------------------------
+def update_alpha_evaluations():
+    """Evaluates all 3 Alphas and calculates Performance-Weighted Consensus."""
+    c1 = evaluate_alpha_of_mom()
+    c2 = evaluate_alpha_liq_rev()
+    c3 = evaluate_alpha_ob_absorb()
+
+    convictions = {"OF_MOM": c1, "LIQ_REV": c2, "OB_ABSORB": c3}
+
+    # Only ACTIVE or PROBATION alphas contribute to consensus
+    active_alphas = {k: v for k, v in alphas.items() if v.get("status") in ["ACTIVE", "PROBATION"]}
+    if active_alphas:
+        tot_w = sum(a["weight"] for a in active_alphas.values())
+        consensus = sum(convictions[k] * alphas[k]["weight"] for k in active_alphas) / tot_w if tot_w > 0 else 0.0
+    else:
+        consensus = 0.0
+
+    return c1, c2, c3, consensus
+
+
+# ---------------------------------------------------------
+# META-ALLOCATOR DECISION ENGINE
+# ---------------------------------------------------------
+def run_meta_decision(c1=None, c2=None, c3=None, consensus_conviction=None):
+    if portfolio["position"] != "FLAT":
+        return
+
+    # 1. Execution session gate
+    if not session_state["execution_allowed"] or session_state["size_multiplier"] <= 0.0:
+        return
+
+    # 2. Circuit Breaker & Survival Gates
+    can_trade, reason = check_circuit_breakers()
+    if not can_trade:
+        return
+
+    if c1 is None or consensus_conviction is None:
+        c1, c2, c3, consensus_conviction = update_alpha_evaluations()
+
+    convictions = {"OF_MOM": c1, "LIQ_REV": c2, "OB_ABSORB": c3}
+
+    # 3. Dynamic Consensus Entry Threshold
+    sess = session_state["current"]
+    # High threshold in Asian chop / Pacific lull (0.58) stops whipsaw bleed
+    base_threshold = 0.58 if sess in ["ASIAN", "PACIFIC_LULL"] else 0.48
+
+    streak = survival.get("consecutive_losses", 0)
+    streak_penalty = min(0.12, streak * 0.03)
+    entry_threshold = base_threshold + streak_penalty
+
+    # Spread gate: only enter if spread is tight (< 8.0 bps)
+    if market_state["spread_bps"] > 8.0:
+        return
+
+    # Trigger based on WEIGHTED CONSENSUS
+    is_long  = consensus_conviction >= entry_threshold
+    is_short = consensus_conviction <= -entry_threshold
+
+    if not (is_long or is_short):
+        return
+
+    # 4. HARD MACRO REGIME GATE (15m/1h Trend Lockdown)
+    # Never buy into a downtrend; never short an uptrend
+    macro_trend = mtf_state["trend"]
+    if macro_trend in ["BEARISH", "BEARISH_BREAKDOWN", "BEARISH_SLOPE"]:
+        if is_long:
+            return  # Strict veto: Longs blocked during bear regime!
+    elif macro_trend in ["BULLISH", "BULLISH_EXPANSION", "BULLISH_SLOPE"]:
+        if is_short:
+            return  # Strict veto: Shorts blocked during bull regime!
+
+    # 5. DIRECTIONAL STREAK LOCKOUT (Anti-whipsaw defense)
+    now_t = time.time()
+    dir_lock = survival.get("directional_lock", {})
+    if now_t < dir_lock.get("until", 0.0):
+        locked_dir = dir_lock.get("direction")
+        if (is_long and locked_dir == "LONG") or (is_short and locked_dir == "SHORT"):
+            return  # Directional cooldown active!
+
+    # 6. Active Lead Alpha Selection (must be ACTIVE or PROBATION)
+    active_candidates = {
+        k: conv for k, conv in convictions.items()
+        if alphas[k]["status"] in ["ACTIVE", "PROBATION"]
+        and ((is_long and conv > 0) or (is_short and conv < 0))
+        and now_t >= alpha_cooldowns.get(k, 0.0)
+    }
+    if not active_candidates:
+        return
+
+    lead_key   = max(active_candidates, key=lambda k: abs(active_candidates[k]))
+    lead_conv  = active_candidates[lead_key]
+    lead_alpha = alphas[lead_key]
+
+    entry_px = market_state["ask"] if is_long else market_state["bid"]
+    if entry_px <= 0:
+        return
+
+    # 7. Survival Risk Sizing & Asymmetric R:R Structure
+    risk_hp_scalar = get_survival_risk_scalar()
+    if risk_hp_scalar <= 0.0:
+        return
+
+    # Base risk: 0.75% of capital (institutional conservative risk per trade)
+    base_risk_pct = 0.0075
+    final_risk_mult = max(0.50, risk_hp_scalar * session_state["size_multiplier"])
+    risk_usd = survival["account_balance"] * base_risk_pct * final_risk_mult
+
+    atr_val = max(market_state["atr_14"], 40.0)
+
+    # Overextension Guard: Never buy the peak of parabolic expansion or short the floor
+    ema20 = mtf_state.get("ema_20", 0.0)
+    if ema20 > 0:
+        if is_long and entry_px > ema20 + (atr_val * 6.0):
+            return  # Overextended: Wait for pullback towards EMA20!
+        elif is_short and entry_px < ema20 - (atr_val * 6.0):
+            return  # Overextended: Wait for bounce towards EMA20!
+
+    # Structural Volatility Stop Distance (Dynamic Institutional Risk Sizing)
+    structural_buffer = atr_val * 1.5
+    if is_long:
+        recent_lows = list(sweep_state["recent_lows"])
+        recent_swing_low = min(recent_lows[-10:]) if len(recent_lows) >= 10 else (entry_px - atr_val * 4.0)
+        struct_dist = max(0.0, entry_px - recent_swing_low) + structural_buffer
+        sl_dist = max(atr_val * 3.5, struct_dist)
+    else:
+        recent_highs = list(sweep_state["recent_highs"])
+        recent_swing_high = max(recent_highs[-10:]) if len(recent_highs) >= 10 else (entry_px + atr_val * 4.0)
+        struct_dist = max(0.0, recent_swing_high - entry_px) + structural_buffer
+        sl_dist = max(atr_val * 3.5, struct_dist)
+
+    sl_fraction = sl_dist / entry_px
+    fee_fraction = ROUNDTRIP_COST_BPS / 10000.0
+    total_loss_fraction = sl_fraction + fee_fraction
+
+    # Sizing: notional chosen so that price SL + roundtrip fee = risk_usd exactly!
+    notional = risk_usd / total_loss_fraction
+    max_not  = survival["account_balance"] * 7.0  # Cap at 7x max leverage
+    notional = min(notional, max_not)
+
+    if notional < 150.0:
+        return  # Reject tiny sub-threshold orders
+
+    leverage = notional / survival["account_balance"]
+
+    # Asymmetric Targets:
+    # TP1: 2.5R target (scales out 70% of position)
+    # TP2: 4.5R target (for 30% runner)
+    tp1_dist = sl_dist * DYNAMIC_PARAMS["TARGET_RR_RATIO"]
+    tp2_dist = sl_dist * DYNAMIC_PARAMS["RUNNER_RR_RATIO"]
+
+    if is_long:
+        sl_price  = entry_px - sl_dist
+        tp1_price = entry_px + tp1_dist
+        tp2_price = entry_px + tp2_dist
+    else:
+        sl_price  = entry_px + sl_dist
+        tp1_price = entry_px - tp1_dist
+        tp2_price = entry_px - tp2_dist
+
+    portfolio.update({
+        "position":             "LONG" if is_long else "SHORT",
+        "phase":                1,
+        "entry_price":          entry_px,
+        "sl_distance":          sl_dist,
+        "active_sl_price":      sl_price,
+        "tp1_price":            tp1_price,
+        "active_tp_price":      tp2_price,
+        "notional_size_usd":    notional,
+        "initial_notional_usd": notional,
+        "leverage_used":        leverage,
+        "realized_pnl":         0.0,
+        "banked_pnl":           0.0,
+        "unrealized_pnl":       0.0,
+        "highest_unrealized":   0.0,
+        "trade_open_time":      now_t,
+        "lead_alpha":           lead_key,
+        "be_moved":             False,
+        "entry_reason":         f"[{lead_alpha['tag']}] Weighted Consensus: {consensus_conviction:+.2f} | Macro: {macro_trend}",
+    })
+
+    # Log to recent trades
+    now_str = datetime.datetime.now().strftime("%H:%M:%S")
+    action  = "BUY" if is_long else "SELL"
+    msg     = (f"[{now_str}] OPEN  {action:4} | Entry: {entry_px:,.1f} | SL: {sl_price:,.1f} | "
+               f"2.5R TP: {tp1_price:,.1f} | Risk: ${risk_usd:.2f} ({leverage:.1f}x) | Lead: {lead_alpha['tag']}")
+    recent_trades.append(msg)
+
+    # Append to journal
+    trade_journal.append({
+        "id":           len(trade_journal) + 1,
+        "open_ts":      datetime.datetime.now().isoformat(),
+        "action":       action,
+        "entry_price":  entry_px,
+        "sl_price":     sl_price,
+        "tp_price":     tp1_price,
+        "tp2_price":    tp2_price,
+        "lead_alpha":   lead_key,
+        "consensus":    round(consensus_conviction, 3),
+        "hp_at_entry":  survival["hp_pct"],
+        "notional_usd": round(notional, 2),
+        "reason":       portfolio["entry_reason"],
+        "outcome":      "OPEN",
+        "exit_price":   0.0,
+        "pnl_usd":      0.0,
+        "post_mortem":  "",
+    })
     save_trade_journal()
 
-# ---------------------------------------------------------
-# DYNAMIC VOLUME PROFILE REFRESH
-# ---------------------------------------------------------
-def check_vp_refresh():
-    """Refresh volume profile every 4 hours."""
-    now = time.time()
-    if vp_refresh["last_refresh_time"] == 0:
-        vp_refresh["last_refresh_time"] = now
-        return
-    
-    if now - vp_refresh["last_refresh_time"] >= vp_refresh["refresh_interval_sec"]:
-        print("🔄 Auto-refreshing Volume Profiles...")
-        build_volume_profile()
-        build_session_volume_profile()
-        vp_refresh["last_refresh_time"] = now
 
 # ---------------------------------------------------------
-# DATABASE & LOGGING
+# EXIT ENGINE & AUTONOMOUS POST-MORTEM
 # ---------------------------------------------------------
-def init_clickhouse():
-    try:
-        client = clickhouse_connect.get_client(host='localhost', port=8123)
-        client.command("""
-            CREATE TABLE IF NOT EXISTS crypto_paper_trades (
-                timestamp DateTime64(3),
-                symbol String,
-                action String,
-                price Float64,
-                pnl Float64,
-                reason String
-            ) ENGINE = MergeTree()
-            ORDER BY timestamp
-        """)
-        return client
-    except Exception as e:
-        return None
-
-db_client = init_clickhouse()
-
-def log_trade(action, price, pnl, reason):
-    portfolio["trades_executed"] += 1
-    
-    now_str = datetime.datetime.now().strftime("%H:%M:%S")
-    pnl_str = f"${pnl:+.2f}" if pnl != 0 else " $0.00"
-    
-    if "STOP LOSS" in reason or "TAKE PROFIT" in reason or "EXIT" in reason:
-        entry_px = portfolio['entry_price']
-        log_msg = f"[{now_str}] CLOSE {action:4} | Entry: {entry_px:,.1f} -> Exit: {price:,.1f} | PnL: {pnl_str} | {reason}"
-    else:
-        log_msg = f"[{now_str}] OPEN  {action:4} | Entry: {price:,.1f} {' ' * 19}| PnL: {pnl_str} | {reason}"
-        
-    recent_trades.append(log_msg)
-    
-    if db_client:
-        try:
-            now = datetime.datetime.now()
-            db_client.insert('crypto_paper_trades', 
-                [[now, state["symbol"], action, float(price), float(pnl), reason]], 
-                column_names=['timestamp', 'symbol', 'action', 'price', 'pnl', 'reason'])
-        except:
-            pass
-
-# ---------------------------------------------------------
-# EXECUTION LOGIC
-# ---------------------------------------------------------
-def execute_signal():
-    if portfolio["position"] != "FLAT":
-        return
-    
-    # --- SESSION GATE ---
-    get_current_session()
-    if not session_state["execution_allowed"]:
-        return  # Dead zone: no trades
-    
-    vpin_pct = state["vpin_percentile"]
-    cofi = state["cofi_z"]
-    acf = state["acf_lag1"]
-    velocity = state["bucket_velocity_sec"]
-    
-    if velocity > 60.0:
-        return # Block fake breakouts
-    
-    # --- DYNAMIC COOLDOWN GATE ---
-    if cooldown["active"] and not check_cooldown_override(vpin_pct, cofi):
-        return  # In cooldown, signal not strong enough to override
-    
-    # --- SETUP B: LIQUIDATION SQUEEZE (unchanged, but with session gate) ---
-    longs_wiped = liquidations["longs_usd"]
-    shorts_wiped = liquidations["shorts_usd"]
-    
-    if longs_wiped > 500000.0 or shorts_wiped > 500000.0:
-        is_long = longs_wiped > shorts_wiped
-        sl_pct = DYNAMIC_PARAMS["STOP_LOSS_BPS"] / 10000.0
-        risk_dollars = portfolio["account_balance"] * 0.02
-        notional_size = risk_dollars / sl_pct
-        max_notional = portfolio["account_balance"] * 50.0
-        portfolio["notional_size_usd"] = min(notional_size, max_notional)
-        portfolio["leverage_used"] = portfolio["notional_size_usd"] / portfolio["account_balance"]
-        
-        portfolio["phase"] = 1
-        portfolio["post_entry_volume"] = 0.0
-        portfolio["post_entry_vwap_sum"] = 0.0
-        portfolio["vwap"] = 0.0
-        
-        if is_long:
-            portfolio["position"] = "LONG"
-            portfolio["entry_price"] = state["ask"]
-            print("🔥 SETUP B - SQUEEZE REVERSAL (Capitulation Caught)")
-            log_trade("BUY", state["ask"], 0.0, "SETUP B - LONG")
-        else:
-            portfolio["position"] = "SHORT"
-            portfolio["entry_price"] = state["bid"]
-            print("🔥 SETUP B - SQUEEZE REVERSAL (Short Squeeze Caught)")
-            log_trade("SELL", state["bid"], 0.0, "SETUP B - SHORT")
-            
-        liquidations["longs_usd"] = 0.0
-        liquidations["shorts_usd"] = 0.0
-        liquidation_events.clear()
-        return
-    
-    # --- SETUP A: INSTITUTIONAL FLOW + ORDER BLOCK + ABSORPTION ---
-    # --- PROBABILISTIC SCORING ENGINE ---
-    is_long = cofi > 0
-    ltp = state["ltp"]
-    hvns = macro_structure["hvns"]
-    
-    # --- MULTI-SOURCE ORDER BLOCK CHECK (THE TRAP/SWEEP) ---
-    # Calculate Dynamic Radius based on Volatility (Stop Loss)
-    atr_bps = (state["atr_14"] / state["ltp"]) * 10000 if state["ltp"] > 0 else 0
-    adjusted_sl_bps = max(20.0, min(60.0, atr_bps * 0.8))
-    dynamic_radius = (adjusted_sl_bps / 10000.0) * 0.25
-    
-    def did_sweep_level(level, radius):
-        radius_abs = level * radius
-        zone_upper = level + radius_abs
-        zone_lower = level - radius_abs
-        if zone_lower <= ltp <= zone_upper:
-            return True
-        lookback = min(10, len(minute_candles))
-        for c in list(minute_candles)[-lookback:]:
-            if c["low"] <= zone_upper and c["high"] >= zone_lower:
-                return True
-        return False
-    
-    # Source 1: Volume Profile HVNs (Macro & Micro)
-    in_vp_ob = False
-    ob_price = 0.0
-    for hvn in hvns + macro_structure["micro_hvns"]:
-        if did_sweep_level(hvn, dynamic_radius):
-            in_vp_ob = True
-            ob_price = hvn
-            break
-    if not in_vp_ob:
-        if did_sweep_level(macro_structure["poc"], dynamic_radius):
-            in_vp_ob = True
-            ob_price = macro_structure["poc"]
-    
-    # Source 2: ICT Order Blocks (5-min structural)
-    in_ict_ob, ict_ob = is_price_in_ict_ob(ltp, is_long)
-    
-    # Source 3: FVG (Fair Value Gaps)
-    in_fvg, fvg = is_price_in_fvg(ltp, is_long)
-    
-    # Source 4: Liquidity Sweep
-    sweep = sweep_state["last_sweep"]
-    in_sweep = (is_long and sweep == "BULLISH_SWEEP") or (not is_long and sweep == "BEARISH_SWEEP")
-    
-    # --- PROBABILISTIC SCORING MODEL (12-Point System) ---
-    total_pts = 0
-    
-    # 1. Structure Points (Max 3)
-    if in_vp_ob: total_pts += 3
-    elif in_ict_ob: total_pts += 2
-    elif in_fvg or in_sweep: total_pts += 1
-    
-    # 2. Order Flow / COFI Points (Max 3)
-    abs_cofi = abs(cofi)
-    if abs_cofi >= 3.0: total_pts += 3
-    elif abs_cofi >= 2.0: total_pts += 2
-    elif abs_cofi >= 1.0: total_pts += 1
-    
-    # 3. Toxicity / VPIN Points (Max 3)
-    if vpin_pct >= 95: total_pts += 3
-    elif vpin_pct >= 85: total_pts += 2
-    elif vpin_pct >= 70: total_pts += 1
-    
-    # 4. Confluence Points
-    cvd_div = cvd_state["divergence"]
-    mtf_trend = mtf_state["trend"]
-    
-    cvd_aligned = (is_long and cvd_div == "BULLISH") or (not is_long and cvd_div == "BEARISH")
-    cvd_opposing = (is_long and cvd_div == "BEARISH") or (not is_long and cvd_div == "BULLISH")
-    mtf_aligned = (is_long and mtf_trend == "BULLISH") or (not is_long and mtf_trend == "BEARISH")
-    mtf_opposing = (is_long and mtf_trend == "BEARISH") or (not is_long and mtf_trend == "BULLISH")
-    
-    if cvd_aligned: total_pts += 1
-    elif cvd_opposing: total_pts -= 1
-    
-    if mtf_aligned: total_pts += 1
-    elif mtf_opposing: total_pts -= 1
-    
-    # 5. Velocity Health (Anti-Knife)
-    vel = state.get("bucket_velocity_sec", 999.0)
-    if vel >= 30.0: total_pts += 1
-    elif vel < 15.0: total_pts -= 1 # Penalize waterfall, but don't hard ban if score is huge
-    
-    # --- FLUID QUALITY GATE ---
-    if total_pts < 4:
-        return # Need at least 4/12 points to execute
-        
-    # --- DETERMINE SETUP GRADE & MULTIPLIER ---
-    if total_pts >= 9:
-        setup_grade = "S"
-        risk_mult = 2.0
-    elif total_pts >= 7:
-        setup_grade = "A"
-        risk_mult = 1.5
-    elif total_pts >= 5:
-        setup_grade = "B"
-        risk_mult = 1.0
-    else:
-        setup_grade = "C"
-        risk_mult = 0.5
-        
-    portfolio["confidence_multiplier"] = risk_mult
-    
-    # --- DYNAMIC POSITION SIZING & VOLATILITY STOPS ---
-    atr_bps = (state["atr_14"] / state["ltp"]) * 10000 if state["ltp"] > 0 else 0
-    # Dynamic SL: base is 20 bps, scales up with ATR, cap at 60 bps
-    adjusted_sl_bps = max(20.0, min(60.0, atr_bps * 0.8))
-    DYNAMIC_PARAMS["STOP_LOSS_BPS"] = adjusted_sl_bps
-    DYNAMIC_PARAMS["SCALE_OUT_BPS"] = adjusted_sl_bps  # 1:1 risk-reward for first scale
-    
-    sl_pct = adjusted_sl_bps / 10000.0
-    # Base risk is 2%, scaled by the confidence multiplier
-    risk_dollars = portfolio["account_balance"] * 0.02 * risk_mult
-    notional_size = risk_dollars / sl_pct
-    max_notional = portfolio["account_balance"] * (50.0 if risk_mult > 0.5 else 20.0)
-    portfolio["notional_size_usd"] = min(notional_size, max_notional)
-    portfolio["leverage_used"] = portfolio["notional_size_usd"] / portfolio["account_balance"]
-    
-    portfolio["phase"] = 1
-    portfolio["post_entry_volume"] = 0.0
-    portfolio["post_entry_vwap_sum"] = 0.0
-    portfolio["vwap"] = 0.0
-    
-    # Build reason string
-    sources = []
-    if in_vp_ob: sources.append(f"VP-OB:{ob_price:,.0f}")
-    if in_ict_ob: sources.append(f"ICT-OB:{ict_ob['low']:,.0f}-{ict_ob['high']:,.0f}")
-    if in_fvg: sources.append(f"FVG:{fvg['bottom']:,.0f}-{fvg['top']:,.0f}")
-    if cvd_div != "NONE": sources.append(f"CVD:{cvd_div}")
-    if in_sweep: sources.append(f"SWEEP:{sweep_state['sweep_price']:,.0f}")
-    ob_disp_score = get_best_ob_score(is_long) if in_ict_ob else 0
-    if ob_disp_score >= 2: sources.append(f"DISP:{ob_disp_score}")
-    if mtf_trend != "NEUTRAL": sources.append(f"15m:{mtf_trend}")
-    source_str = " | ".join(sources)
-    
-    if cofi > 0:
-        portfolio["position"] = "LONG"
-        portfolio["entry_price"] = state["ask"]
-        portfolio["trade_open_time"] = time.time()
-        reason = f"SETUP {setup_grade} - LONG [{source_str}]"
-        log_trade("BUY", state["ask"], 0.0, reason)
-        journal_entry("BUY", state["ask"], setup_grade, source_str)
-    else:
-        portfolio["position"] = "SHORT"
-        portfolio["entry_price"] = state["bid"]
-        portfolio["trade_open_time"] = time.time()
-        reason = f"SETUP {setup_grade} - SHORT [{source_str}]"
-        log_trade("SELL", state["bid"], 0.0, reason)
-        journal_entry("SELL", state["bid"], setup_grade, source_str)
-
-def check_exits():
+def check_exits(consensus_conviction=0.0):
     if portfolio["position"] == "FLAT":
         return
-        
-    ts_now = time.time()
-    trade_duration_mins = (ts_now - portfolio.get("trade_open_time", ts_now)) / 60.0
-        
-    entry = portfolio["entry_price"]
-    vwap = portfolio["vwap"]
-    
-    SL_BPS = DYNAMIC_PARAMS["STOP_LOSS_BPS"]
-    SCALE_BPS = DYNAMIC_PARAMS["SCALE_OUT_BPS"]
-    BE_BPS = DYNAMIC_PARAMS["BREAKEVEN_BPS"]
-    
-    if portfolio["position"] == "LONG":
-        gross_pnl_pct = (state["bid"] - entry) / entry * 10000
-        net_pnl_pct = gross_pnl_pct - TOTAL_ROUNDTRIP_COST_BPS
-        
-        portfolio["unrealized_pnl"] = (net_pnl_pct / 10000) * portfolio["notional_size_usd"]
-        
+
+    now_t   = time.time()
+    dur_min = (now_t - portfolio["trade_open_time"]) / 60.0
+    entry   = portfolio["entry_price"]
+    pos     = portfolio["position"]
+    sl_dist = portfolio.get("sl_distance", 150.0)
+
+    def close_position(price, reason, post_mortem_tag):
+        if pos == "LONG":
+            gross_pct = (price - entry) / entry * 10000.0
+        else:
+            gross_pct = (entry - price) / entry * 10000.0
+
+        net_pct = gross_pct - ROUNDTRIP_COST_BPS
+        net_usd = (net_pct / 10000.0) * portfolio["notional_size_usd"]
+        total_trade_pnl = portfolio.get("banked_pnl", 0.0) + net_usd
+
+        survival["account_balance"] += net_usd
+        update_survival_health()
+
+        is_win = total_trade_pnl > 0
+        lead = portfolio["lead_alpha"]
+
+        # Track consecutive losses & directional lockout
+        is_time_decay = "TIME DECAY" in reason
+        if is_win:
+            survival["consecutive_losses"] = 0
+        else:
+            survival["rolling_losses"].append((time.time(), total_trade_pnl))
+
+            if is_time_decay:
+                # Time Decay is a capital preservation scratch, NOT an adverse stop loss!
+                # Lock only the timed-out direction for 15m; brief 120s global pause
+                survival["directional_lock"] = {"direction": pos, "until": time.time() + 900.0}
+                survival["global_cooldown_until"] = time.time() + 120.0
+                survival["cooldown_reason"] = "Time decay scratch (2m pause)"
+                alpha_cooldowns[lead] = time.time() + 120.0
+            else:
+                survival["consecutive_losses"] += 1
+                streak = survival["consecutive_losses"]
+                # Directional lockout: lock the failed direction for 30 minutes!
+                survival["directional_lock"] = {"direction": pos, "until": time.time() + 1800.0}
+
+                # Global cooldown: only 180s (3m) on 1st loss, 450s (7.5m) on 2nd loss
+                cooldown_sec = 180.0 if streak == 1 else 450.0
+                survival["global_cooldown_until"] = time.time() + cooldown_sec
+                survival["cooldown_reason"] = f"{reason} ({streak}L streak)"
+                alpha_cooldowns[lead] = time.time() + cooldown_sec + 60.0
+
+        reward_alpha(lead, is_win, total_trade_pnl)
+
+        # Log post-mortem diagnostic
+        now_str = datetime.datetime.now().strftime("%H:%M:%S")
+        action_label = "CLOSE LONG " if pos == "LONG" else "CLOSE SHORT"
+        pnl_str = f"${total_trade_pnl:+.2f}"
+        banked = portfolio.get("banked_pnl", 0.0)
+        pnl_breakdown = f"Total: {pnl_str} (70% TP: +${banked:.2f} | Runner: ${net_usd:+.2f})" if banked > 0 else f"PnL: {pnl_str}"
+
+        msg = f"[{now_str}] {action_label} | Exit: {price:,.1f} | {pnl_breakdown} | {reason} [{lead}]"
+        recent_trades.append(msg)
+        recent_post_mortems.append(f"[{now_str}] [{lead}] {post_mortem_tag} ({pnl_breakdown})")
+
+        # Update last journal entry
+        for t in reversed(trade_journal):
+            if t.get("outcome") == "OPEN":
+                t["exit_ts"]       = datetime.datetime.now().isoformat()
+                t["exit_price"]    = price
+                t["pnl_usd"]       = round(total_trade_pnl, 2)
+                t["scale_out_pnl"] = round(banked, 2)
+                t["runner_pnl"]    = round(net_usd, 2)
+                t["outcome"]       = "WIN" if is_win else "LOSS"
+                t["exit_reason"]   = reason
+                t["post_mortem"]   = post_mortem_tag
+                break
+        save_trade_journal()
+
+        portfolio.update({
+            "position":           "FLAT",
+            "phase":              0,
+            "banked_pnl":         0.0,
+            "unrealized_pnl":     0.0,
+            "highest_unrealized": 0.0,
+            "active_sl_price":    0.0,
+            "active_tp_price":    0.0,
+            "tp1_price":          0.0,
+            "be_moved":           False,
+        })
+
+    # Long Position Exit Checks
+    if pos == "LONG":
+        cur = market_state["bid"]
+        if cur <= 0:
+            cur = market_state["ltp"]
+        if cur <= 0:
+            return  # Safety guard: Never exit on invalid price
+
+        gross_pct = (cur - entry) / entry * 10000.0
+        net_pct   = gross_pct - ROUNDTRIP_COST_BPS
+        unreal    = (net_pct / 10000.0) * portfolio["notional_size_usd"]
+        portfolio["unrealized_pnl"]   = unreal
+        portfolio["highest_unrealized"] = max(portfolio["highest_unrealized"], unreal)
+
         if portfolio["phase"] == 1:
-            if net_pnl_pct <= -SL_BPS:
-                portfolio["realized_pnl"] += portfolio["unrealized_pnl"]
-                portfolio["account_balance"] += portfolio["unrealized_pnl"]
-                log_trade("SELL", state["bid"], portfolio["unrealized_pnl"], "STOP LOSS")
-                journal_exit(portfolio["unrealized_pnl"], state["bid"], "STOP LOSS")
-                portfolio["position"] = "FLAT"
-                portfolio["phase"] = 0
-                portfolio["unrealized_pnl"] = 0.0
-                activate_cooldown()
-            elif trade_duration_mins > 45 and portfolio["unrealized_pnl"] <= 0:
-                portfolio["realized_pnl"] += portfolio["unrealized_pnl"]
-                portfolio["account_balance"] += portfolio["unrealized_pnl"]
-                log_trade("SELL", state["bid"], portfolio["unrealized_pnl"], "TIME DECAY EXIT")
-                journal_exit(portfolio["unrealized_pnl"], state["bid"], "TIME DECAY EXIT")
-                portfolio["position"] = "FLAT"
-                portfolio["phase"] = 0
-                portfolio["unrealized_pnl"] = 0.0
-            elif net_pnl_pct >= SCALE_BPS:
-                half_pnl = portfolio["unrealized_pnl"] / 2.0
-                portfolio["realized_pnl"] += half_pnl
-                portfolio["account_balance"] += half_pnl
-                portfolio["notional_size_usd"] /= 2.0
-                log_trade("SELL", state["bid"], half_pnl, "SCALE OUT (50%)")
-                portfolio["phase"] = 2
-                portfolio["unrealized_pnl"] /= 2.0
-                
+            # Stop loss hit
+            if cur <= portfolio["active_sl_price"]:
+                close_position(cur, "STOP LOSS HIT", "SL hit: Price reached adverse risk threshold.")
+                return
+
+            # 2.5R Partial Scale Out: lock 70% of position profit!
+            if cur >= portfolio.get("tp1_price", entry + sl_dist * 2.5):
+                scale_frac = DYNAMIC_PARAMS["SCALE_OUT_FRAC"]
+                part_unreal = unreal * scale_frac
+                portfolio["banked_pnl"] = portfolio.get("banked_pnl", 0.0) + part_unreal
+                survival["account_balance"] += part_unreal
+                update_survival_health()
+                portfolio["notional_size_usd"] *= (1.0 - scale_frac)
+                # Move SL to Breakeven (+ 1.5x fee buffer)
+                be_sl = entry + ((ROUNDTRIP_COST_BPS * 1.5) / 10000.0) * entry
+                portfolio["active_sl_price"] = be_sl
+                portfolio["be_moved"]        = True
+                portfolio["phase"]           = 2
+                recent_post_mortems.append(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] 2.5R TP Hit (+${part_unreal:.2f}) | 70% locked, SL to BE")
+
+            # Time Decay Preservation (90 minutes, adverse drift only)
+            if dur_min > 90.0 and cur < entry - market_state["atr_14"] * 1.0 and cvd_state["delta_momentum"] < 0:
+                close_position(cur, "TIME DECAY (90m)", "Consolidating adverse with negative delta.")
+                return
+
         elif portfolio["phase"] == 2:
-            if net_pnl_pct <= BE_BPS:
-                portfolio["realized_pnl"] += portfolio["unrealized_pnl"]
-                portfolio["account_balance"] += portfolio["unrealized_pnl"]
-                log_trade("SELL", state["bid"], portfolio["unrealized_pnl"], "BREAKEVEN STOP")
-                journal_exit(portfolio["unrealized_pnl"], state["bid"], "BREAKEVEN STOP")
-                portfolio["position"] = "FLAT"
-                portfolio["phase"] = 0
-                portfolio["unrealized_pnl"] = 0.0
-            elif vwap > 0 and state["bid"] < vwap:
-                portfolio["realized_pnl"] += portfolio["unrealized_pnl"]
-                portfolio["account_balance"] += portfolio["unrealized_pnl"]
-                log_trade("SELL", state["bid"], portfolio["unrealized_pnl"], "VWAP EXIT")
-                journal_exit(portfolio["unrealized_pnl"], state["bid"], "VWAP EXIT")
-                portfolio["position"] = "FLAT"
-                portfolio["phase"] = 0
-                portfolio["unrealized_pnl"] = 0.0
-            
-    elif portfolio["position"] == "SHORT":
-        gross_pnl_pct = (entry - state["ask"]) / entry * 10000
-        net_pnl_pct = gross_pnl_pct - TOTAL_ROUNDTRIP_COST_BPS
-        
-        portfolio["unrealized_pnl"] = (net_pnl_pct / 10000) * portfolio["notional_size_usd"]
-        
+            if cur <= portfolio["active_sl_price"]:
+                close_position(cur, "BE / TRAIL STOP", "30% Runner protected at Breakeven / ATR trailing stop.")
+                return
+
+            # ATR Trailing Stop (gives 2.5x ATR room to breathe)
+            trail_buf = max(market_state["atr_14"] * 2.5, entry * 0.0035)
+            struct_trail = cur - trail_buf
+            if struct_trail > portfolio["active_sl_price"]:
+                portfolio["active_sl_price"] = struct_trail
+
+            if cur >= portfolio["active_tp_price"]:
+                close_position(cur, "FULL TP HIT (4.5R)", "Runner hit maximum institutional target.")
+                return
+
+    # Short Position Exit Checks
+    elif pos == "SHORT":
+        cur = market_state["ask"]
+        if cur <= 0:
+            cur = market_state["ltp"]
+        if cur <= 0:
+            return  # Safety guard: Never exit on invalid price
+
+        gross_pct = (entry - cur) / entry * 10000.0
+        net_pct   = gross_pct - ROUNDTRIP_COST_BPS
+        unreal    = (net_pct / 10000.0) * portfolio["notional_size_usd"]
+        portfolio["unrealized_pnl"]   = unreal
+        portfolio["highest_unrealized"] = max(portfolio["highest_unrealized"], unreal)
+
         if portfolio["phase"] == 1:
-            if net_pnl_pct <= -SL_BPS:
-                portfolio["realized_pnl"] += portfolio["unrealized_pnl"]
-                portfolio["account_balance"] += portfolio["unrealized_pnl"]
-                log_trade("BUY", state["ask"], portfolio["unrealized_pnl"], "STOP LOSS")
-                journal_exit(portfolio["unrealized_pnl"], state["ask"], "STOP LOSS")
-                portfolio["position"] = "FLAT"
-                portfolio["phase"] = 0
-                portfolio["unrealized_pnl"] = 0.0
-                activate_cooldown()
-            elif trade_duration_mins > 45 and portfolio["unrealized_pnl"] <= 0:
-                portfolio["realized_pnl"] += portfolio["unrealized_pnl"]
-                portfolio["account_balance"] += portfolio["unrealized_pnl"]
-                log_trade("BUY", state["ask"], portfolio["unrealized_pnl"], "TIME DECAY EXIT")
-                journal_exit(portfolio["unrealized_pnl"], state["ask"], "TIME DECAY EXIT")
-                portfolio["position"] = "FLAT"
-                portfolio["phase"] = 0
-                portfolio["unrealized_pnl"] = 0.0
-            elif net_pnl_pct >= SCALE_BPS:
-                half_pnl = portfolio["unrealized_pnl"] / 2.0
-                portfolio["realized_pnl"] += half_pnl
-                portfolio["account_balance"] += half_pnl
-                portfolio["notional_size_usd"] /= 2.0
-                log_trade("BUY", state["ask"], half_pnl, "SCALE OUT (50%)")
-                portfolio["phase"] = 2
-                portfolio["unrealized_pnl"] /= 2.0
-                
+            if cur >= portfolio["active_sl_price"]:
+                close_position(cur, "STOP LOSS HIT", "SL hit: Price reached adverse risk threshold.")
+                return
+
+            # 2.5R Partial Scale Out: lock 70% of position profit!
+            if cur <= portfolio.get("tp1_price", entry - sl_dist * 2.5):
+                scale_frac = DYNAMIC_PARAMS["SCALE_OUT_FRAC"]
+                part_unreal = unreal * scale_frac
+                portfolio["banked_pnl"] = portfolio.get("banked_pnl", 0.0) + part_unreal
+                survival["account_balance"] += part_unreal
+                update_survival_health()
+                portfolio["notional_size_usd"] *= (1.0 - scale_frac)
+                be_sl = entry - ((ROUNDTRIP_COST_BPS * 1.5) / 10000.0) * entry
+                portfolio["active_sl_price"] = be_sl
+                portfolio["be_moved"]        = True
+                portfolio["phase"]           = 2
+                recent_post_mortems.append(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] 2.5R TP Hit (+${part_unreal:.2f}) | 70% locked, SL to BE")
+
+            if dur_min > 90.0 and cur > entry + market_state["atr_14"] * 1.0 and cvd_state["delta_momentum"] > 0:
+                close_position(cur, "TIME DECAY (90m)", "Consolidating adverse with positive delta.")
+                return
+
         elif portfolio["phase"] == 2:
-            if net_pnl_pct <= BE_BPS:
-                portfolio["realized_pnl"] += portfolio["unrealized_pnl"]
-                portfolio["account_balance"] += portfolio["unrealized_pnl"]
-                log_trade("BUY", state["ask"], portfolio["unrealized_pnl"], "BREAKEVEN STOP")
-                journal_exit(portfolio["unrealized_pnl"], state["ask"], "BREAKEVEN STOP")
-                portfolio["position"] = "FLAT"
-                portfolio["phase"] = 0
-                portfolio["unrealized_pnl"] = 0.0
-            elif vwap > 0 and state["ask"] > vwap:
-                portfolio["realized_pnl"] += portfolio["unrealized_pnl"]
-                portfolio["account_balance"] += portfolio["unrealized_pnl"]
-                log_trade("BUY", state["ask"], portfolio["unrealized_pnl"], "VWAP EXIT")
-                journal_exit(portfolio["unrealized_pnl"], state["ask"], "VWAP EXIT")
-                portfolio["position"] = "FLAT"
-                portfolio["phase"] = 0
-                portfolio["unrealized_pnl"] = 0.0
+            if cur >= portfolio["active_sl_price"]:
+                close_position(cur, "BE / TRAIL STOP", "30% Runner protected at Breakeven / ATR trailing stop.")
+                return
+
+            trail_buf = max(market_state["atr_14"] * 2.5, entry * 0.0035)
+            struct_trail = cur + trail_buf
+            if struct_trail < portfolio["active_sl_price"]:
+                portfolio["active_sl_price"] = struct_trail
+
+            if cur <= portfolio["active_tp_price"]:
+                close_position(cur, "FULL TP HIT (4.5R)", "Runner hit maximum institutional target.")
+                return
+
 
 # ---------------------------------------------------------
-# DATA PROCESSING
+# CANDLE & TECHNICAL AGGREGATION
 # ---------------------------------------------------------
-def process_trade(price, qty, is_buyer_maker):
-    state["ltp"] = price
-    state["ticks_today"] += 1
-    
-    if price <= 0:
+def calculate_atr(period=14):
+    if len(minute_candles) < period + 1:
+        return 35.0
+    candles = list(minute_candles)
+    trs = []
+    for i in range(1, len(candles)):
+        h, l, pc = candles[i]['high'], candles[i]['low'], candles[i-1]['close']
+        tr = max(h - l, abs(h - pc), abs(l - pc))
+        if 0 < tr < 5000:
+            trs.append(tr)
+    return float(np.mean(trs[-period:])) if trs else 35.0
+
+
+def update_dynamic_parameters():
+    if len(minute_candles) < 14 or market_state["ltp"] <= 0:
         return
-        
-    # 1. Update Live Candle
-    ts_now = time.time()
-    if state["current_minute_ts"] == 0:
-        state["current_minute_ts"] = int(ts_now // 60) * 60
-        live_candle["open"] = live_candle["high"] = live_candle["low"] = live_candle["close"] = price
-        live_candle["volume"] = 0.0
-        
-    if ts_now > state["current_minute_ts"] + 60:
-        completed_candle = dict(live_candle)
-        minute_candles.append(completed_candle)
-        update_dynamic_parameters()
-        aggregate_5min_candle(completed_candle)  # Feed into 5-min aggregator
-        
-        state["current_minute_ts"] = int(ts_now // 60) * 60
-        live_candle["open"] = live_candle["high"] = live_candle["low"] = live_candle["close"] = price
-        live_candle["volume"] = 0.0
+    atr = max(calculate_atr(14), 30.0)
+    market_state["atr_14"] = atr
+    market_state["atr_bps"] = (atr / market_state["ltp"]) * 10000.0 if market_state["ltp"] > 0 else 0.0
+
+
+def calc_ema(closes, period):
+    if not closes:
+        return 0.0
+    k   = 2.0 / (period + 1)
+    ema = closes[0]
+    for price in closes[1:]:
+        ema = price * k + ema * (1 - k)
+    return ema
+
+
+def update_mtf_trend():
+    if len(fifteen_min_candles) < 3:
+        mtf_state["trend"] = "NEUTRAL"
+        return
+    closes = [c["close"] for c in fifteen_min_candles]
+    p = len(closes)
+    ema20 = calc_ema(closes, min(20, p))
+    ema50 = calc_ema(closes, min(50, p))
+    mtf_state["ema_20"] = ema20
+    mtf_state["ema_50"] = ema50
+    cur = market_state["ltp"] if market_state["ltp"] > 0 else closes[-1]
+
+    if p >= 4:
+        old20 = calc_ema(closes[:-3], min(20, p-3))
+        mtf_state["slope"] = ((ema20 - old20) / old20) * 10000 if old20 > 0 else 0.0
+
+    strength_bps = ((cur - ema20) / ema20) * 10000 if ema20 > 0 else 0.0
+    mtf_state["strength"] = strength_bps
+
+    # Strict multi-timeframe regime classification
+    if strength_bps < -25.0:
+        mtf_state["trend"] = "BEARISH_BREAKDOWN"
+    elif strength_bps > 25.0:
+        mtf_state["trend"] = "BULLISH_EXPANSION"
+    elif cur < ema20 and ema20 <= ema50:
+        mtf_state["trend"] = "BEARISH"
+    elif cur > ema20 and ema20 >= ema50:
+        mtf_state["trend"] = "BULLISH"
+    elif strength_bps < -10.0 or (cur < ema20 and mtf_state["slope"] < 0):
+        mtf_state["trend"] = "BEARISH_SLOPE"
+    elif strength_bps > 10.0 or (cur > ema20 and mtf_state["slope"] > 0):
+        mtf_state["trend"] = "BULLISH_SLOPE"
     else:
-        live_candle["high"] = max(live_candle["high"], price) if live_candle["high"] > 0 else price
-        live_candle["low"] = min(live_candle["low"], price) if live_candle["low"] > 0 else price
-        live_candle["close"] = price
+        mtf_state["trend"] = "NEUTRAL"
+
+
+def detect_fvgs():
+    if len(five_min_candles) < 3:
+        return
+    candles = list(five_min_candles)
+    ltp = market_state["ltp"]
+    fvg_state["bullish_fvgs"] = [f for f in fvg_state["bullish_fvgs"] if ltp > f["bottom"]]
+    fvg_state["bearish_fvgs"] = [f for f in fvg_state["bearish_fvgs"] if ltp < f["top"]]
+    c0, c1, c2 = candles[-3], candles[-2], candles[-1]
+
+    if c2["low"] > c0["high"] and c1["close"] > c1["open"]:
+        gb, gt = c0["high"], c2["low"]
+        spb = ((gt - gb) / c1["close"]) * 10000 if c1["close"] > 0 else 0
+        if spb > 5 and not any(abs(f["bottom"] - gb) < 2.0 for f in fvg_state["bullish_fvgs"]):
+            fvg_state["bullish_fvgs"].append({"bottom": gb, "top": gt, "size_bps": spb})
+
+    if c2["high"] < c0["low"] and c1["close"] < c1["open"]:
+        gt, gb = c0["low"], c2["high"]
+        spb = ((gt - gb) / c1["close"]) * 10000 if c1["close"] > 0 else 0
+        if spb > 5 and not any(abs(f["top"] - gt) < 2.0 for f in fvg_state["bearish_fvgs"]):
+            fvg_state["bearish_fvgs"].append({"bottom": gb, "top": gt, "size_bps": spb})
+
+
+def detect_order_blocks():
+    if len(five_min_candles) < 15:
+        return
+    candles = list(five_min_candles)
+    ltp     = market_state["ltp"]
+    bodies  = [abs(c["close"] - c["open"]) for c in candles]
+    is_bull = [c["close"] > c["open"] for c in candles]
+    n       = len(candles)
+
+    ob_state["bullish_obs"] = [o for o in ob_state["bullish_obs"] if ltp > o["low"] - (o["high"]-o["low"])*0.5]
+    ob_state["bearish_obs"] = [o for o in ob_state["bearish_obs"] if ltp < o["high"] + (o["high"]-o["low"])*0.5]
+
+    for i in range(n-1, max(n-4, 12), -1):
+        avg_body = float(np.mean(bodies[max(0, i-10):i])) if i > 0 else 0
+        if avg_body <= 0 or bodies[i] < 2.0 * avg_body:
+            continue
+        disp = bodies[i] / avg_body
+        if is_bull[i]:
+            for j in range(i-1, max(0, i-6), -1):
+                if not is_bull[j]:
+                    ob = {"low": candles[j]["low"], "high": candles[j]["high"], "disp": disp}
+                    if not any(abs(o["low"] - ob["low"]) < 2.0 for o in ob_state["bullish_obs"]):
+                        ob_state["bullish_obs"].append(ob)
+                        if len(ob_state["bullish_obs"]) > 5:
+                            ob_state["bullish_obs"].pop(0)
+
+
+def track_swing_levels(five_min_candle):
+    sweep_state["recent_highs"].append(five_min_candle["high"])
+    sweep_state["recent_lows"].append(five_min_candle["low"])
+
+
+def detect_liquidity_sweep(five_min_candle):
+    if len(sweep_state["recent_highs"]) < 5:
+        return
+    h, l, c = five_min_candle["high"], five_min_candle["low"], five_min_candle["close"]
+    prev_highs = list(sweep_state["recent_highs"])[:-1]
+    prev_lows  = list(sweep_state["recent_lows"])[:-1]
+
+    recent_swing_high = max(prev_highs[-10:]) if len(prev_highs) >= 10 else max(prev_highs)
+    recent_swing_low  = min(prev_lows[-10:])  if len(prev_lows)  >= 10 else min(prev_lows)
+
+    if h > recent_swing_high and c < recent_swing_high:
+        sweep_state["last_sweep"]        = "BEARISH_SWEEP"
+        sweep_state["sweep_price"]       = recent_swing_high
+        sweep_state["sweep_candles_ago"] = 0
+
+    elif l < recent_swing_low and c > recent_swing_low:
+        sweep_state["last_sweep"]        = "BULLISH_SWEEP"
+        sweep_state["sweep_price"]       = recent_swing_low
+        sweep_state["sweep_candles_ago"] = 0
+
+
+def detect_cvd_divergence():
+    if len(cvd_state["cvd_history"]) < 5 or len(cvd_state["price_history"]) < 5:
+        cvd_state["divergence"] = "NONE"
+        return
+    prices = list(cvd_state["price_history"])[-5:]
+    cvds   = list(cvd_state["cvd_history"])[-5:]
+    ps = prices[-1] - prices[0]
+    cs = cvds[-1]   - cvds[0]
+    if ps < 0 and cs > 0 and abs(cs) > 0.1:
+        cvd_state["divergence"] = "BULLISH"
+    elif ps > 0 and cs < 0 and abs(cs) > 0.1:
+        cvd_state["divergence"] = "BEARISH"
+    else:
+        cvd_state["divergence"] = "NONE"
+
+
+def aggregate_5min_candle(one_min_candle):
+    five_min_accumulator.append(one_min_candle)
+    if len(five_min_accumulator) >= 5:
+        o = five_min_accumulator[0]["open"]
+        h = max(c["high"] for c in five_min_accumulator)
+        l = min(c["low"]  for c in five_min_accumulator)
+        c = five_min_accumulator[-1]["close"]
+        v = sum(c_["volume"] for c_ in five_min_accumulator)
+        c5 = {"open": o, "high": h, "low": l, "close": c, "volume": v}
+        five_min_candles.append(c5)
+        five_min_accumulator.clear()
+
+        cvd_state["cvd_history"].append(cvd_state["cvd"])
+        cvd_state["price_history"].append(c)
+        if len(cvd_state["cvd_history"]) >= 3:
+            cvds = list(cvd_state["cvd_history"])
+            cvd_state["delta_momentum"] = float(np.mean(np.diff(cvds[-3:])))
+        cvd_state["cvd"] = 0.0
+
+        detect_fvgs()
+        detect_order_blocks()
+        detect_cvd_divergence()
+        track_swing_levels(c5)
+        detect_liquidity_sweep(c5)
+
+        # 15m candle aggregation
+        fifteen_min_accumulator.append(c5)
+        if len(fifteen_min_accumulator) >= 3:
+            o15 = fifteen_min_accumulator[0]["open"]
+            h15 = max(x["high"] for x in fifteen_min_accumulator)
+            l15 = min(x["low"]  for x in fifteen_min_accumulator)
+            c15 = fifteen_min_accumulator[-1]["close"]
+            v15 = sum(x["volume"] for x in fifteen_min_accumulator)
+            fifteen_min_candles.append({"open": o15, "high": h15, "low": l15, "close": c15, "volume": v15})
+            fifteen_min_accumulator.clear()
+            update_mtf_trend()
+
+        if sweep_state["last_sweep"] not in ["NONE", "FAILED", "INVALIDATED"]:
+            sweep_state["sweep_candles_ago"] += 1
+            if sweep_state["sweep_candles_ago"] > 6:
+                sweep_state["last_sweep"] = "NONE"
+
+
+# ---------------------------------------------------------
+# VOLUME PROFILES & PRE-WARM
+# ---------------------------------------------------------
+def build_volume_profiles():
+    try:
+        # Macro 30d profile
+        res = requests.get("https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=1h&limit=720", timeout=10)
+        data = res.json()
+        highs = [float(k[2]) for k in data]
+        lows  = [float(k[3]) for k in data]
+        mn, mx = min(lows), max(highs)
+        n_bins = 60
+        bin_size = (mx - mn) / n_bins
+        profile  = np.zeros(n_bins)
+        for k in data:
+            cl, ch, cv = float(k[3]), float(k[2]), float(k[5])
+            sb = int(max(0, min(n_bins-1, (cl-mn)/bin_size)))
+            eb = int(max(0, min(n_bins-1, (ch-mn)/bin_size)))
+            if sb == eb:
+                profile[sb] += cv
+            else:
+                vpb = cv / (eb - sb + 1)
+                for b in range(sb, eb+1):
+                    profile[b] += vpb
+        top_idx = np.argsort(profile)[-6:]
+        macro_structure["hvns"] = sorted([mn + (i*bin_size) + bin_size/2 for i in top_idx])
+        poc_idx = int(np.argmax(profile))
+        macro_structure["poc"] = mn + poc_idx*bin_size + bin_size/2
+
+        # Session 24h profile
+        res24 = requests.get("https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=15m&limit=96", timeout=10)
+        data24 = res24.json()
+        h24 = [float(k[2]) for k in data24]
+        l24 = [float(k[3]) for k in data24]
+        mn24, mx24 = min(l24), max(h24)
+        n_bins24 = 30
+        bs24 = (mx24 - mn24) / n_bins24
+        p24 = np.zeros(n_bins24)
+        for k in data24:
+            cl, ch, cv = float(k[3]), float(k[2]), float(k[5])
+            sb = int(max(0, min(n_bins24-1, (cl-mn24)/bs24)))
+            eb = int(max(0, min(n_bins24-1, (ch-mn24)/bs24)))
+            if sb == eb:
+                p24[sb] += cv
+            else:
+                vpb = cv / (eb - sb + 1)
+                for b in range(sb, eb+1):
+                    p24[b] += vpb
+        top_idx24 = np.argsort(p24)[-4:]
+        macro_structure["micro_hvns"] = sorted([mn24 + (i*bs24) + bs24/2 for i in top_idx24])
+    except Exception as e:
+        print(f"Volume profile error: {e}")
+
+
+def prewarm_engine():
+    print("=" * 70)
+    print("  INITIALIZING APEX SURVIVAL QUANT LAB v5.0...")
+    print("=" * 70)
+    build_volume_profiles()
+
+    res = requests.get("https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=1m&limit=120", timeout=10)
+    data = res.json()
+    for k in data:
+        minute_candles.append({
+            "open": float(k[1]), "high": float(k[2]),
+            "low":  float(k[3]), "close": float(k[4]),
+            "volume": float(k[5])
+        })
+    market_state["ltp"] = float(data[-1][4])
+    market_state["bid"] = market_state["ltp"]
+    market_state["ask"] = market_state["ltp"]
+    update_dynamic_parameters()
+    market_state["current_minute_ts"] = int(time.time() // 60) * 60
+    live_candle.update({"open": market_state["ltp"], "high": market_state["ltp"],
+                         "low": market_state["ltp"], "close": market_state["ltp"], "volume": 0.0})
+
+    res5 = requests.get("https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=5m&limit=100", timeout=10)
+    data5 = res5.json()
+    for k in data5:
+        c5 = {"open": float(k[1]), "high": float(k[2]),
+              "low":  float(k[3]), "close": float(k[4]), "volume": float(k[5])}
+        five_min_candles.append(c5)
+        bv = float(k[9])
+        sv = float(k[5]) - bv
+        cvd_state["cvd_history"].append(bv - sv)
+        cvd_state["price_history"].append(float(k[4]))
+
+    detect_fvgs()
+    detect_order_blocks()
+    detect_cvd_divergence()
+
+    c5_list = list(five_min_candles)
+    for i in range(0, len(c5_list) - 2, 3):
+        grp = c5_list[i:i+3]
+        if len(grp) == 3:
+            fifteen_min_candles.append({
+                "open":   grp[0]["open"],
+                "high":   max(g["high"] for g in grp),
+                "low":    min(g["low"] for g in grp),
+                "close":  grp[-1]["close"],
+                "volume": sum(g["volume"] for g in grp),
+            })
+    update_mtf_trend()
+    for c in c5_list:
+        track_swing_levels(c)
+
+    load_trade_journal()
+    update_session()
+    update_alpha_evaluations()
+    print(f"  POC: {macro_structure['poc']:,.1f} | HVNs: {[round(x,0) for x in macro_structure['hvns']]}")
+    print(f"  15m MTF: {mtf_state['trend']} (EMA20: {mtf_state['ema_20']:,.1f} EMA50: {mtf_state['ema_50']:,.1f})")
+    print(f"  Survival HP: {survival['hp_pct']}% | Bankroll: ${survival['account_balance']:,.2f}")
+    print("=" * 70)
+    print("  ENGINE ONLINE — INSTITUTIONAL QUANT LAB ACTIVE")
+    print("=" * 70)
+
+
+# ---------------------------------------------------------
+# SESSION TRACKER (24/7 ACTIVE TRADING)
+# ---------------------------------------------------------
+def update_session():
+    utc_hour = datetime.datetime.now(datetime.timezone.utc).hour
+    if 7 <= utc_hour < 13:
+        session_state.update({"current": "LONDON",       "execution_allowed": True, "size_multiplier": 1.0})
+    elif 13 <= utc_hour < 21:
+        session_state.update({"current": "NEW_YORK",     "execution_allowed": True, "size_multiplier": 1.0})
+    elif 0 <= utc_hour < 7:
+        session_state.update({"current": "ASIAN",        "execution_allowed": True, "size_multiplier": 0.7})
+    else:
+        session_state.update({"current": "PACIFIC_LULL", "execution_allowed": True, "size_multiplier": 0.5})
+
+
+# ---------------------------------------------------------
+# TICK & BUCKET PROCESSING
+# ---------------------------------------------------------
+def process_trade_tick(price, qty, is_buyer_maker):
+    market_state["ltp"] = price
+    market_state["ticks_today"] += 1
+    if price <= 0 or qty <= 0:
+        return
+
+    ts_now = time.time()
+    if market_state["current_minute_ts"] == 0:
+        market_state["current_minute_ts"] = int(ts_now // 60) * 60
+        live_candle.update({"open": price, "high": price, "low": price, "close": price, "volume": 0.0})
+
+    if ts_now > market_state["current_minute_ts"] + 60:
+        completed = dict(live_candle)
+        minute_candles.append(completed)
+        update_dynamic_parameters()
+        aggregate_5min_candle(completed)
+        market_state["current_minute_ts"] = int(ts_now // 60) * 60
+        live_candle.update({"open": price, "high": price, "low": price, "close": price, "volume": 0.0})
+    else:
+        if live_candle["high"] == 0:
+            live_candle.update({"open": price, "high": price, "low": price})
+        live_candle["high"]   = max(live_candle["high"], price)
+        live_candle["low"]    = min(live_candle["low"],  price)
+        live_candle["close"]  = price
         live_candle["volume"] += qty
-        
-    # 2. VWAP Tracker
-    if portfolio["position"] != "FLAT":
-        portfolio["post_entry_volume"] += qty
-        portfolio["post_entry_vwap_sum"] += (price * qty)
-        portfolio["vwap"] = portfolio["post_entry_vwap_sum"] / portfolio["post_entry_volume"]
-    
+
+    if market_state["bid"] > 0 and market_state["ask"] > 0:
+        market_state["spread_bps"] = ((market_state["ask"] - market_state["bid"]) / price) * 10000.0
+
     direction = "SELL" if is_buyer_maker else "BUY"
-    
-    # 3. CVD Tracking (cumulative per 5-min window)
     if direction == "BUY":
         cvd_state["cvd"] += qty
-        cvd_state["5min_buy_vol"] += qty
     else:
         cvd_state["cvd"] -= qty
-        cvd_state["5min_sell_vol"] += qty
-    
-    # 4. Update COFI
+
+    # COFI Z-score
     signed_vol = qty if direction == "BUY" else -qty
     order_flow_imbalances.append(signed_vol)
-    
-    if len(order_flow_imbalances) > 10:
-        cofi_arr = np.array(order_flow_imbalances)
-        mean = np.mean(cofi_arr)
-        std = np.std(cofi_arr) + 1e-9
-        state["cofi_z"] = (signed_vol - mean) / std
-        
-        if len(order_flow_imbalances) > 100:
-            cofi_series = np.array(order_flow_imbalances)[-100:]
-            corr = np.corrcoef(cofi_series[:-1], cofi_series[1:])[0,1]
-            state["acf_lag1"] = corr if not np.isnan(corr) else 0.0
-    
-    # 4. Update VPIN
+    if len(order_flow_imbalances) > 20:
+        arr  = np.array(order_flow_imbalances)
+        mean = float(np.mean(arr))
+        std  = float(np.std(arr)) + 1e-9
+        market_state["cofi_z"] = (signed_vol - mean) / std
+
+        k = 2.0 / 21.0
+        market_state["cofi_z_ema"] = market_state["cofi_z"] * k + market_state["cofi_z_ema"] * (1.0 - k)
+        c_ema = market_state["cofi_z_ema"]
+        market_state["cofi_direction"] = +1 if c_ema > 1.2 else (-1 if c_ema < -1.2 else 0)
+
+    # VPIN Volume Bucketing
     global current_bucket
     if direction == "BUY":
         current_bucket["buy_vol"] += qty
     else:
         current_bucket["sell_vol"] += qty
-        
     current_bucket["total_vol"] += qty
-    
+
     if current_bucket["total_vol"] >= DYNAMIC_PARAMS["BUCKET_VOLUME_SIZE"]:
-        imbalance = abs(current_bucket["buy_vol"] - current_bucket["sell_vol"])
-        vpin = imbalance / current_bucket["total_vol"]
+        imb  = abs(current_bucket["buy_vol"] - current_bucket["sell_vol"])
+        vpin = imb / current_bucket["total_vol"]
         vpin_history.append(vpin)
-        
-        state["bucket_velocity_sec"] = time.time() - current_bucket["start_time"]
-        state["buckets_completed"] += 1
+        market_state["bucket_velocity_sec"] = time.time() - current_bucket["start_time"]
+        market_state["buckets_completed"]  += 1
         current_bucket = {"buy_vol": 0.0, "sell_vol": 0.0, "total_vol": 0.0, "start_time": time.time()}
-        tick_cooldown()  # Decrement cooldown on each bucket
-        
-        vpin_arr = np.array(vpin_history)
-        state["vpin"] = vpin_arr[-1]
-        
-        if len(vpin_arr) > 10:
-            state["vpin_percentile"] = int(np.percentile([np.sum(vpin_arr <= x) / len(vpin_arr) * 100 for x in vpin_arr], 100) if vpin_arr[-1] == np.max(vpin_arr) else np.sum(vpin_arr <= vpin_arr[-1]) / len(vpin_arr) * 100)
 
-        # 5. Machine Learning Regime Classification
-        ml_state["features"].append([state["vpin"], abs(state["cofi_z"]), abs(state["obi"])])
-        
-        if state["buckets_completed"] % 5 == 0:
-            save_ml_state()
-            
-        if len(ml_state["features"]) >= 50:
-            if state["buckets_completed"] % 50 == 0:
-                X = np.array(ml_state["features"])
-                try:
-                    model = KMeans(n_clusters=2, n_init=10, random_state=42)
-                    model.fit(X)
-                    ml_state["model"] = model
-                    
-                    centroids = model.cluster_centers_
-                    score_0 = centroids[0][0] + centroids[0][1]
-                    score_1 = centroids[1][0] + centroids[1][1]
-                    
-                    ml_state["trending_cluster_id"] = 0 if score_0 > score_1 else 1
-                except Exception:
-                    pass
-            
-            if ml_state["model"] is not None:
-                try:
-                    current_f = np.array([[state["vpin"], abs(state["cofi_z"]), abs(state["obi"])]])
-                    pred = ml_state["model"].predict(current_f)[0]
-                    if pred == ml_state["trending_cluster_id"]:
-                        ml_state["regime"] = "TRENDING (HIGH VOL)"
-                    else:
-                        ml_state["regime"] = "CHOP (LOW VOL)"
-                except Exception:
-                    pass
+        varr = np.array(vpin_history)
+        market_state["vpin"] = float(varr[-1])
+        if len(varr) > 10:
+            market_state["vpin_percentile"] = int(float(np.sum(varr <= varr[-1]) / len(varr) * 100))
 
-def render_dashboard():
-    os.system('cls' if os.name == 'nt' else 'clear')
+
+# ---------------------------------------------------------
+# REAL-TIME EXECUTIVE QUANT DASHBOARD (v5.0 COCKPIT)
+# ---------------------------------------------------------
+first_render = True
+
+def render_survival_dashboard():
+    global first_render
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    vpin_pct = state["vpin_percentile"]
-    cofi_z = state["cofi_z"]
-    acf = state["acf_lag1"]
-    
-    vpin_bar = "████" + "░░" * int(10 - (vpin_pct/10))
-    
-    print("="*65)
-    print(f"  CRYPTO PAPER TRADING LAB (INSTITUTIONAL PHYSICS) | {now_str}")
-    print("="*65)
-    ws_status = "🟢 CONNECTED" if state["ws_connected"] else "🔴 DISCONNECTED"
-    print(f"Binance WS: {ws_status} | {state['symbol']} LTP: {state['ltp']:,.1f}")
-    print(f"Bid: {state['bid']:,.1f} | Ask: {state['ask']:,.1f}")
-    print("")
-    obi = state["obi"]
-    obi_status = "MASSIVE BUY WALL (Spoofing)" if obi > 0.60 else "MASSIVE SELL WALL (Spoofing)" if obi < -0.60 else "BALANCED"
-    obi_color = "🟢" if obi > 0.60 else "🔴" if obi < -0.60 else "⚪"
-    
-    print(f"VPIN:      {state['vpin']:.3f}  [{vpin_bar:10}]  Percentile: {vpin_pct}th")
-    ml_regime = ml_state["regime"]
-    print(f"COFI Z:    {cofi_z:+.2f}  |  ML Regime: {ml_regime} ({len(ml_state['features'])}/500)")
-    print(f"L2 OBI:    {obi:+.2f}  |  Wall: {obi_color} {obi_status}")
-    
-    # CVD Display
-    cvd_val = cvd_state["cvd"]
-    cvd_div = cvd_state["divergence"]
-    cvd_div_color = "\U0001f7e2" if cvd_div == "BULLISH" else "\U0001f534" if cvd_div == "BEARISH" else "\u26aa"
-    print(f"CVD:       {cvd_val:+.1f}  |  Divergence: {cvd_div_color} {cvd_div}")
-    
-    vel_color = "\U0001f7e2" if state["bucket_velocity_sec"] > 0 and state["bucket_velocity_sec"] < 60.0 else "\U0001f534"
-    print(f"Bucket Vel: {state['bucket_velocity_sec']:>5.1f}s {vel_color}  (Needs < 60s for Entry)")
-    print("\u2500"*65)
-    
-    # Session & Cooldown
-    get_current_session()
+
+    if first_render:
+        os.system('cls' if os.name == 'nt' else 'clear')
+        first_render = False
+
+    hp        = survival["hp_pct"]
+    hp_blocks = int(hp // 10)
+
+    # HP color coding
+    if hp >= 70.0:
+        hp_color = C_GREEN
+        mode_pill = f"{C_GREEN}{C_BOLD}THRIVING 🟢{C_RESET}"
+    elif hp >= 45.0:
+        hp_color = C_YELLOW
+        mode_pill = f"{C_YELLOW}{C_BOLD}DEFENSIVE 🟡{C_RESET}"
+    elif hp >= 15.0:
+        hp_color = C_YELLOW
+        mode_pill = f"{C_YELLOW}{C_BOLD}DEFENSIVE RECOVERY 🛡️{C_RESET}"
+    else:
+        hp_color = C_RED
+        mode_pill = f"{C_RED}{C_BOLD}SURVIVAL BUNKER 🔴{C_RESET}"
+
+    hp_bar = f"{hp_color}{'█' * hp_blocks}{'░' * (10 - hp_blocks)}{C_RESET}"
+
+    ltp  = market_state["ltp"]
+    sp   = market_state["spread_bps"]
+    obi  = market_state["obi"]
+    vpin = market_state["vpin_percentile"]
+    cmom = cvd_state["delta_momentum"]
+    mtf  = mtf_state["trend"]
+    str_bps = mtf_state["strength"]
+
+    if "BULLISH" in mtf:
+        mtf_badge = f"{C_GREEN}{C_BOLD}BULLISH 🟢 ({str_bps:+.1f} bps){C_RESET}"
+        gate_badge = f"{C_GREEN}{C_BOLD}LONGS ONLY (Shorts blocked by Bullish trend){C_RESET}"
+    elif "BEARISH" in mtf:
+        mtf_badge = f"{C_RED}{C_BOLD}BEARISH 🔴 ({str_bps:+.1f} bps){C_RESET}"
+        gate_badge = f"{C_RED}{C_BOLD}SHORTS ONLY (Longs blocked by Bearish trend){C_RESET}"
+    else:
+        mtf_badge = f"{C_YELLOW}NEUTRAL 🟡 ({str_bps:+.1f} bps){C_RESET}"
+        gate_badge = f"{C_YELLOW}CONCORDANT ONLY (High threshold required){C_RESET}"
+
+    obi_color = C_GREEN if obi > 0.3 else (C_RED if obi < -0.3 else C_GRAY)
+    obi_str = "BUY WALL" if obi > 0.3 else ("SELL WALL" if obi < -0.3 else "BALANCED")
+
+    bal  = survival["account_balance"]
+    peak = survival["peak_balance"]
+    dd   = survival["current_drawdown_pct"]
+    pnl_today = bal - INITIAL_CAPITAL
+    pnl_color = C_GREEN if pnl_today >= 0 else C_RED
+    pnl_sign  = "+" if pnl_today >= 0 else "-"
+
     sess = session_state["current"]
-    sess_color = "\U0001f7e2" if sess in ("LONDON", "NEW_YORK") else "\U0001f7e1" if sess == "ASIAN" else "\U0001f534"
-    cd_str = f"ACTIVE ({cooldown['buckets_remaining']} buckets)" if cooldown["active"] else "CLEAR"
-    cd_color = "\U0001f534" if cooldown["active"] else "\U0001f7e2"
-    print(f"SESSION: {sess_color} {sess} (Sizing Modifier) | Cooldown: {cd_color} {cd_str}")
-    
-    # MTF Trend
-    mtf_t = mtf_state["trend"]
-    mtf_color = "\U0001f7e2" if mtf_t == "BULLISH" else "\U0001f534" if mtf_t == "BEARISH" else "\u26aa"
-    mtf_ema = mtf_state["ema_20"]
-    print(f"15m Trend: {mtf_color} {mtf_t} (EMA-20: {mtf_ema:,.1f} | Sizing Modifier)")
-    
-    # Liquidity Sweep
-    sw = sweep_state["last_sweep"]
-    sw_color = "\U0001f3af" if sw != "NONE" else "\u26aa"
-    sw_display = f"{sw} @ {sweep_state['sweep_price']:,.0f}" if sw != "NONE" else "NONE"
-    print(f"Liq Sweep: {sw_color} {sw_display}")
-    print("\u2500"*65)
-    
-    print(f"MACRO STRUCTURE (30-Day Volume Profile):")
-    ltp = state["ltp"]
-    hvns = macro_structure["hvns"]
-    support = [h for h in hvns if h < ltp]
-    resistance = [h for h in hvns if h > ltp]
-    nearest_sup = max(support) if support else 0.0
-    nearest_res = min(resistance) if resistance else 0.0
-    print(f"Point of Control (POC): {macro_structure['poc']:,.1f}")
-    print(f"Nearest Resistance:     {nearest_res:,.1f}")
-    print(f"Nearest Support:        {nearest_sup:,.1f}")
-    
-    # Order Block Status (VP + ICT combined)
-    in_vp_ob = False
-    atr_bps_dash = (state["atr_14"] / state["ltp"]) * 10000 if state["ltp"] > 0 else 0
-    dynamic_radius_dash = (max(20.0, min(60.0, atr_bps_dash * 0.8)) / 10000.0) * 0.25
-    def did_sweep_level_dash(level, radius):
-        radius_abs = level * radius
-        zone_upper = level + radius_abs
-        zone_lower = level - radius_abs
-        if zone_lower <= ltp <= zone_upper:
-            return True
-        lookback = min(10, len(minute_candles))
-        for c in list(minute_candles)[-lookback:]:
-            if c["low"] <= zone_upper and c["high"] >= zone_lower:
-                return True
-        return False
+    sess_mult = session_state["size_multiplier"]
 
-    for h in hvns + macro_structure["micro_hvns"] + [macro_structure["poc"]]:
-        if did_sweep_level_dash(h, dynamic_radius_dash):
-            in_vp_ob = True
-            break
-    in_ict_bull, _ = is_price_in_ict_ob(ltp, True)
-    in_ict_bear, _ = is_price_in_ict_ob(ltp, False)
-    
-    in_fvg_bull, _ = is_price_in_fvg(ltp, True)
-    in_fvg_bear, _ = is_price_in_fvg(ltp, False)
-    in_sweep_act = sweep_state["last_sweep"] != "NONE"
-    
-    in_execution_zone = in_vp_ob or in_ict_bull or in_ict_bear or in_fvg_bull or in_fvg_bear or in_sweep_act
-    
-    trend_str = "\U0001f7e2 IN STRUCTURAL ZONE (Execution Allowed)" if in_execution_zone else "\u26aa NO-MAN'S LAND (Execution Banned)"
-    print(f"Liquidity State:        {trend_str}")
-    
-    # ICT Order Blocks with displacement scores
-    bull_ob_count = len(ob_state["bullish_obs"])
-    bear_ob_count = len(ob_state["bearish_obs"])
-    ob_strs = []
-    for ob in ob_state["bullish_obs"][-2:]:
-        d_score = score_displacement(ob, [])
-        d_label = ["⚪", "🟡", "🟠", "🔴"][min(d_score, 3)]
-        ob_strs.append(f"Bull:{ob['low']:,.0f}-{ob['high']:,.0f}{d_label}")
-    for ob in ob_state["bearish_obs"][-2:]:
-        d_score = score_displacement(ob, [])
-        d_label = ["⚪", "🟡", "🟠", "🔴"][min(d_score, 3)]
-        ob_strs.append(f"Bear:{ob['low']:,.0f}-{ob['high']:,.0f}{d_label}")
-    ob_display = " | ".join(ob_strs) if ob_strs else "None"
-    print(f"ICT Order Blocks:       {bull_ob_count + bear_ob_count} Active ({ob_display})")
-    
-    # FVGs
-    bull_fvg_count = len(fvg_state["bullish_fvgs"])
-    bear_fvg_count = len(fvg_state["bearish_fvgs"])
-    fvg_strs = []
-    if fvg_state["nearest_bullish"]:
-        f = fvg_state["nearest_bullish"]
-        fvg_strs.append(f"Bull:{f['bottom']:,.0f}-{f['top']:,.0f}")
-    if fvg_state["nearest_bearish"]:
-        f = fvg_state["nearest_bearish"]
-        fvg_strs.append(f"Bear:{f['bottom']:,.0f}-{f['top']:,.0f}")
-    fvg_display = " | ".join(fvg_strs) if fvg_strs else "None"
-    print(f"Active FVGs:            {bull_fvg_count + bear_fvg_count} ({fvg_display})")
-    print("\u2500"*65)
-    
-    print(f"LIQUIDATIONS (Rolling 60s):")
-    longs_wiped = liquidations["longs_usd"]
-    shorts_wiped = liquidations["shorts_usd"]
-    print(f"Longs Wiped:  ${longs_wiped:,.0f}  {'\U0001f534 CAPITULATION DUMP' if longs_wiped > 500000 else ''}")
-    print(f"Shorts Wiped: ${shorts_wiped:,.0f}  {'\U0001f7e2 SHORT SQUEEZE' if shorts_wiped > 500000 else ''}")
-    print("\u2500"*65)
-    
-    print("DYNAMIC ENGINE (Live Calibrated):")
-    print(f"ATR (14m): {state['atr_14']:.1f}  |  Avg 1m Vol: {state['avg_1min_vol']:.1f} BTC")
-    print(f"Bucket Size: {DYNAMIC_PARAMS['BUCKET_VOLUME_SIZE']:.1f} BTC  |  SL: {DYNAMIC_PARAMS['STOP_LOSS_BPS']:.1f} bps  |  Scale: {DYNAMIC_PARAMS['SCALE_OUT_BPS']:.1f} bps")
-    print(f"Cost/Trade:  {TOTAL_ROUNDTRIP_COST_BPS:.1f} bps  (Taker + Slippage applied to Net PnL)")
-    
-    # Journal stats
-    wins = sum(1 for t in trade_journal if t.get("outcome") == "WIN")
-    losses = sum(1 for t in trade_journal if t.get("outcome") == "LOSS")
-    wr = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0
-    print(f"5m: {len(five_min_candles)}  |  15m: {len(fifteen_min_candles)}  |  Journal: {len(trade_journal)} trades (WR: {wr:.0f}%)")
-    print("\u2500"*65)
-    
-    pos_color = "🟢" if portfolio["position"] == "LONG" else "🔴" if portfolio["position"] == "SHORT" else "⚪"
-    pnl_color = "🟢" if portfolio["unrealized_pnl"] > 0 else "🔴" if portfolio["unrealized_pnl"] < 0 else "⚪"
-    total_color = "🟢" if portfolio["realized_pnl"] > 0 else "🔴" if portfolio["realized_pnl"] < 0 else "⚪"
-    
-    vwap_str = f"|  Runner VWAP: {portfolio['vwap']:,.1f}" if portfolio["phase"] == 2 else ""
-    
-    print(f"VIRTUAL PORTFOLIO (NET PnL):")
-    print(f"Balance:  ${portfolio['account_balance']:,.2f}  |  Total PnL: {total_color} ${portfolio['realized_pnl']:.2f}  |  Trades: {portfolio['trades_executed']}")
-    print(f"Position: {pos_color} {portfolio['position']:5}  |  Entry: {portfolio['entry_price']:,.1f} {vwap_str}")
-    print(f"Size:     ${portfolio['notional_size_usd']:,.0f} (Lev: {portfolio['leverage_used']:.1f}x)  |  Phase: {portfolio['phase']}")
-    print(f"Unreal PnL: {pnl_color} ${portfolio['unrealized_pnl']:.2f}")
-    print("="*65)
-    print(f"Ticks Processed: {state['ticks_today']:,}  |  Buckets: {state['buckets_completed']}")
-    
-    if len(recent_trades) > 0:
-        print("-" * 65)
-        print("RECENT TRADES:")
-        for trade in recent_trades:
-            print(f"  {trade}")
+    import re
+    ANSI_RE = re.compile(r'\033\[[0-9;]*[mHJK]')
 
-# ---------------------------------------------------------
-# WEBSOCKET LOOP
-# ---------------------------------------------------------
-def clean_liquidations():
-    current_time = time.time()
-    while len(liquidation_events) > 0 and current_time - liquidation_events[0]["time"] > 60.0:
-        event = liquidation_events.popleft()
-        if event["side"] == "SELL":
-            liquidations["longs_usd"] -= event["usd_value"]
+    def visible_len(s):
+        return len(ANSI_RE.sub('', s))
+
+    def truncate_ansi(s, max_len):
+        cur_len = 0
+        res = []
+        tokens = re.split(r'(\033\[[0-9;]*[mHJK])', s)
+        for t in tokens:
+            if not t:
+                continue
+            if t.startswith('\033['):
+                res.append(t)
+            else:
+                rem = max_len - cur_len
+                if rem <= 0:
+                    break
+                if len(t) > rem:
+                    res.append(t[:rem - 1] + '…')
+                    cur_len += rem
+                    break
+                else:
+                    res.append(t)
+                    cur_len += len(t)
+        res.append(C_RESET)
+        return ''.join(res)
+
+    BOX_WIDTH = 90
+
+    def row(content):
+        vlen = visible_len(content)
+        if vlen > BOX_WIDTH:
+            content = truncate_ansi(content, BOX_WIDTH)
+            vlen = visible_len(content)
+        pad = max(0, BOX_WIDTH - vlen)
+        return f"{C_CYAN}║{C_RESET} {content}{' ' * pad} {C_CYAN}║{C_RESET}\033[K"
+
+    border_top = f"{C_CYAN}╔{'═' * (BOX_WIDTH + 2)}╗{C_RESET}\033[K"
+    border_mid = f"{C_CYAN}╠{'═' * (BOX_WIDTH + 2)}╣{C_RESET}\033[K"
+    border_div = f"{C_CYAN}╟{'─' * (BOX_WIDTH + 2)}╢{C_RESET}\033[K"
+    border_bot = f"{C_CYAN}╚{'═' * (BOX_WIDTH + 2)}╝{C_RESET}\033[K"
+
+    buf = []
+    buf.append("\033[H")  # Move to top-left without flicker
+    buf.append(border_top)
+    buf.append(row(f"{C_BOLD}{C_WHITE}⚡ APEX INTELLIGENCE ENGINE v5.0 — INSTITUTIONAL QUANT LAB ⚡{C_RESET}"))
+    buf.append(row(f"{C_DIM}Time:{C_RESET} {now_str} IST  │  {C_DIM}Session:{C_RESET} {C_CYAN}{sess} ({sess_mult:.1f}x){C_RESET}  │  {C_DIM}Binance Feed:{C_RESET} {C_GREEN}CONNECTED ●{C_RESET}"))
+    buf.append(border_mid)
+
+    # 1. Capital & HP Card
+    buf.append(row(f"{C_BOLD}{C_CYAN}CAPITAL & HEALTH (HP):{C_RESET}"))
+    buf.append(row(f" Bankroll: {C_WHITE}${bal:,.2f}{C_RESET} [{hp_bar}] {hp_color}{hp:5.1f}% HP{C_RESET}  │  Peak: ${peak:,.2f}  │  Drawdown: {C_RED}-{dd:4.1f}%{C_RESET}"))
+    buf.append(row(f" Mode: {mode_pill}  │  Net PnL: {pnl_color}{pnl_sign}${abs(pnl_today):.2f}{C_RESET}  │  Asymmetry: {C_GREEN}{C_BOLD}1 : 2.50 Target R:R (70% Scale){C_RESET}"))
+
+    # Active Cooldown & Defense Telemetry
+    now_t = time.time()
+    circuit_status = ""
+    if survival["circuit_breaker"]:
+        circuit_status = f"{C_RED}{C_BOLD}CIRCUIT BREAKER: TRIPPED (Max DD Reached){C_RESET}"
+    elif survival["hp_pct"] < 40.0:
+        circuit_status = f"{C_RED}{C_BOLD}BUNKER LOCKDOWN: TRADING HALTED (Capital Defense){C_RESET}"
+    elif now_t < survival.get("session_halt_until", 0.0):
+        rem = int(survival["session_halt_until"] - now_t)
+        circuit_status = f"{C_YELLOW}{C_BOLD}SESSION HALT: {rem}s cooling ({survival.get('cooldown_reason','')}){C_RESET}"
+    elif now_t < survival.get("global_cooldown_until", 0.0):
+        rem = int(survival["global_cooldown_until"] - now_t)
+        circuit_status = f"{C_YELLOW}COOLDOWN: {rem}s remaining ({survival.get('cooldown_reason','')}){C_RESET}"
+    else:
+        circuit_status = f"{C_GREEN}ACTIVE DEFENSE: ALL GATES CLEAR{C_RESET}"
+
+    dir_lock = survival.get("directional_lock", {})
+    if now_t < dir_lock.get("until", 0.0):
+        rem = int(dir_lock["until"] - now_t)
+        circuit_status += f"  │  {C_YELLOW}Streak Lock: {dir_lock.get('direction')} ({rem}s){C_RESET}"
+
+    buf.append(row(f" Defense Status: {circuit_status}"))
+    buf.append(border_div)
+
+    # 2. Market Microstructure Card
+    buf.append(row(f"{C_BOLD}{C_CYAN}MARKET MICROSTRUCTURE & MACRO REGIME:{C_RESET}"))
+    buf.append(row(f" BTC Price: {C_BOLD}${ltp:,.1f}{C_RESET}  │  Spread: {sp:3.1f} bps  │  15m Trend: {mtf_badge}"))
+    buf.append(row(f" Flow: L2 OBI: {obi_color}{obi:+.2f} ({obi_str}){C_RESET}  │  VPIN: {vpin}th pct  │  CVD Mom: {cmom:+.1f}"))
+    buf.append(row(f" Macro Gate: {gate_badge}"))
+    buf.append(border_div)
+
+    # 3. Multi-Alpha Arena Tournament Table
+    buf.append(row(f"{C_BOLD}{C_CYAN}MULTI-ALPHA TOURNAMENT ARENA:{C_RESET}"))
+    buf.append(row(f" {C_DIM}STRATEGY    WEIGHT   STATUS           WR      CONVICTION       RATIONALE{C_RESET}"))
+    for k, a in alphas.items():
+        w_pct  = int(a["weight"] * 100)
+        conv   = a["conviction"]
+        d_str  = a["direction"]
+        st     = a["status"]
+        wr     = f"{a['rolling_wr']:.0f}%" if a["trades"] > 0 else "--%"
+
+        if st == "ACTIVE":
+            st_badge = f"{C_GREEN}ACTIVE 🟢   {C_RESET}"
+        elif st == "PROBATION":
+            st_badge = f"{C_YELLOW}PROBATION 🟡{C_RESET}"
         else:
-            liquidations["shorts_usd"] -= event["usd_value"]
-        
-        liquidations["longs_usd"] = max(0.0, liquidations["longs_usd"])
-        liquidations["shorts_usd"] = max(0.0, liquidations["shorts_usd"])
+            st_badge = f"{C_RED}QUARANTINE 🔒{C_RESET}"
 
+        if d_str == "LONG":
+            dir_pill = f"{C_GREEN}{C_BOLD}[+{conv:.2f} LONG ]{C_RESET}"
+        elif d_str == "SHORT":
+            dir_pill = f"{C_RED}{C_BOLD}[{conv:.2f} SHORT]{C_RESET}"
+        else:
+            dir_pill = f"{C_GRAY}[ {conv:+.2f} FLAT ]{C_RESET}"
+
+        rat_short = a["rationale"][:26].ljust(26)
+        buf.append(row(f" {C_BOLD}{a['tag']:9}{C_RESET}  {w_pct:3d}%    {st_badge}  {wr:>4}   {dir_pill}   {C_DIM}{rat_short}{C_RESET}"))
+
+    buf.append(border_div)
+
+    # 4. Position & Order Cockpit
+    buf.append(row(f"{C_BOLD}{C_CYAN}EXECUTION & ACTIVE POSITION:{C_RESET}"))
+    pos = portfolio["position"]
+    if pos != "FLAT":
+        unreal = portfolio["unrealized_pnl"]
+        u_color = C_GREEN if unreal >= 0 else C_RED
+        u_sign  = "+" if unreal >= 0 else ""
+        be_str = f"{C_GREEN}BE LOCKED{C_RESET}" if portfolio["be_moved"] else f"{C_YELLOW}PHASE 1 (100% SIZE){C_RESET}"
+        pos_color = C_GREEN if pos == "LONG" else C_RED
+
+        buf.append(row(f" Position: {pos_color}{C_BOLD}{pos}{C_RESET} @ ${portfolio['entry_price']:,.1f}  │  PnL: {u_color}{C_BOLD}{u_sign}${unreal:.2f}{C_RESET}  │  Status: {be_str}"))
+        buf.append(row(f" Orders:   SL: ${portfolio['active_sl_price']:,.1f}  │  70% TP1: ${portfolio['tp1_price']:,.1f} (+2.5R)  │  30% TP2: ${portfolio['active_tp_price']:,.1f} (+4.5R)"))
+        buf.append(row(f" Exposure: Size: ${portfolio['notional_size_usd']:,.0f} ({portfolio['leverage_used']:.1f}x leverage)  │  Lead: {portfolio['lead_alpha']}"))
+    else:
+        flat_desc = circuit_status if "COOLDOWN" in circuit_status or "HALT" in circuit_status else f"Scanning for Consensus Setup >= {0.58 if sess in ['ASIAN','PACIFIC_LULL'] else 0.48:.2f}"
+        buf.append(row(f" Position: {C_GRAY}FLAT{C_RESET} @ ${ltp:,.1f}  │  {flat_desc}"))
+
+    buf.append(border_div)
+
+    # 5. Recent Execution Audit Log
+    buf.append(row(f"{C_BOLD}{C_CYAN}RECENT EXECUTION AUDIT LOG:{C_RESET}"))
+    buf.append(row(f" {C_DIM}TIME     DIR   ENTRY      EXIT       NET PNL    R-MULT   OUTCOME / STRATEGY{C_RESET}"))
+    if trade_journal:
+        for t in trade_journal[-4:]:
+            ts = t.get("open_ts", "")[11:19]
+            act = t.get("action", "BUY")
+            act_str = f"{C_GREEN}L{C_RESET}" if act == "BUY" else f"{C_RED}S{C_RESET}"
+            ep = f"{t.get('entry_price', 0):,.0f}"
+            out = t.get("outcome")
+            if out == "OPEN":
+                xp = " ---  "
+                pnl_str = f"{C_YELLOW}ACTIVE{C_RESET}"
+                r_mult  = " +0.0R"
+                reas = f"PHASE {portfolio.get('phase', 1)} IN PLAY"
+            else:
+                xp = f"{t.get('exit_price', 0):,.0f}"
+                pnl_val = t.get("pnl_usd", 0.0)
+                if pnl_val >= 0:
+                    pnl_str = f"{C_GREEN}+${pnl_val:.2f}{C_RESET}"
+                    r_mult  = f"{C_GREEN}+2.5R{C_RESET}" if pnl_val > 5.0 else f"{C_GREEN}+0.4R{C_RESET}"
+                else:
+                    pnl_str = f"{C_RED}-${abs(pnl_val):.2f}{C_RESET}"
+                    r_mult  = f"{C_RED}-1.0R{C_RESET}"
+                reas = t.get("exit_reason", "CLOSED")
+
+            lead = t.get("lead_alpha", "")
+            lead_tag = f"[{lead}]" if lead else ""
+            log_line = f" {ts}   {act_str}   {ep:>6}    {xp:>6}    {pnl_str:>16}   {r_mult:>14}   {reas} {lead_tag}"
+            buf.append(row(log_line))
+    else:
+        buf.append(row(f" {C_DIM}No trades recorded in current tournament yet.{C_RESET}"))
+
+    buf.append(border_bot)
+    buf.append("\033[J")
+
+    print("\n".join(buf), end="", flush=True)
+
+
+# ---------------------------------------------------------
+# WEBSOCKET STREAM HANDLERS
+# ---------------------------------------------------------
 async def binance_ws():
-    url = "wss://fstream.binance.com/stream?streams=btcusdt@trade/btcusdt@bookTicker/btcusdt@depth20@100ms/btcusdt@forceOrder"
-    
+    url = ("wss://fstream.binance.com/stream?streams="
+           "btcusdt@trade/btcusdt@bookTicker/btcusdt@depth20@100ms/btcusdt@forceOrder")
     while True:
         try:
-            async with websockets.connect(url) as ws:
-                state["ws_connected"] = True
+            async with websockets.connect(url, ping_interval=20, ping_timeout=10) as ws:
+                market_state["ws_connected"] = True
                 while True:
-                    msg = await ws.recv()
+                    msg  = await ws.recv()
                     data = json.loads(msg)
-                    stream = data.get("stream")
-                    payload = data.get("data")
-                    
-                    if stream == "btcusdt@trade":
-                        price = float(payload["p"])
-                        qty = float(payload["q"])
-                        is_buyer_maker = payload["m"]
-                        process_trade(price, qty, is_buyer_maker)
-                        clean_liquidations()
-                        execute_signal()
-                        check_exits()
-                        
-                    elif stream == "btcusdt@bookTicker":
-                        state["bid"] = float(payload["b"])
-                        state["ask"] = float(payload["a"])
-                        
-                    elif stream == "btcusdt@depth20@100ms":
+                    st   = data.get("stream")
+                    pay  = data.get("data")
+
+                    if st == "btcusdt@trade":
+                        process_trade_tick(float(pay["p"]), float(pay["q"]), pay["m"])
+                        update_session()
+                        c1, c2, c3, consensus = update_alpha_evaluations()
+                        run_meta_decision(c1, c2, c3, consensus)
+                        check_exits(consensus)
+
+                    elif st == "btcusdt@bookTicker":
+                        market_state["bid"] = float(pay["b"])
+                        market_state["ask"] = float(pay["a"])
+
+                    elif st == "btcusdt@depth20@100ms":
                         try:
-                            bids = payload.get("b", [])
-                            asks = payload.get("a", [])
-                            
-                            total_bid_vol = sum(float(b[1]) for b in bids)
-                            total_ask_vol = sum(float(a[1]) for a in asks)
-                            
-                            total_vol = total_bid_vol + total_ask_vol
-                            if total_vol > 0:
-                                state["obi"] = (total_bid_vol - total_ask_vol) / total_vol
-                        except Exception:
-                            pass
-                            
-                    elif stream == "btcusdt@forceOrder":
-                        try:
-                            order = payload.get("o", {})
-                            side = order.get("S")
-                            qty = float(order.get("q", 0))
-                            price = float(order.get("p", 0))
-                            
-                            usd_value = qty * price
-                            current_time = time.time()
-                            
-                            liquidation_events.append({"side": side, "usd_value": usd_value, "time": current_time})
-                            if side == "SELL":
-                                liquidations["longs_usd"] += usd_value
-                            else:
-                                liquidations["shorts_usd"] += usd_value
+                            bids = pay.get("b", [])
+                            asks = pay.get("a", [])
+                            tb = sum(float(b[1]) for b in bids)
+                            ta = sum(float(a[1]) for a in asks)
+                            if tb + ta > 0:
+                                market_state["obi"] = (tb - ta) / (tb + ta)
                         except Exception:
                             pass
 
-                        
+                    elif st == "btcusdt@forceOrder":
+                        try:
+                            o = pay.get("o", {})
+                            s = o.get("S")
+                            uv = float(o.get("q", 0)) * float(o.get("p", 0))
+                            if s == "SELL":
+                                liquidations["longs_usd"]  += uv
+                            else:
+                                liquidations["shorts_usd"] += uv
+                        except Exception:
+                            pass
+
         except Exception as e:
-            state["ws_connected"] = False
-            await asyncio.sleep(2)
+            market_state["ws_connected"] = False
+            await asyncio.sleep(3)
+
 
 async def ui_loop():
     while True:
-        if state["ws_connected"] and state["ticks_today"] > 0:
-            render_dashboard()
+        if market_state["ws_connected"] and market_state["ticks_today"] > 0:
+            render_survival_dashboard()
         await asyncio.sleep(1)
 
+
 async def main():
-    load_ml_state()
     prewarm_engine()
-    await asyncio.gather(
-        binance_ws(),
-        ui_loop()
-    )
+    update_survival_health()
+    await asyncio.gather(binance_ws(), ui_loop())
+
 
 if __name__ == "__main__":
     asyncio.run(main())

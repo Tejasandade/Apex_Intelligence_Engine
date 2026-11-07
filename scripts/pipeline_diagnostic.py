@@ -32,66 +32,49 @@ async def run_diagnostic():
     if 'time' in df.columns:
         df = df.rename(columns={'time': 'timestamp'})
     
-    # Limit to 3000 bars for speed
-    df = df.iloc[-3000:].reset_index(drop=True)
+    # Limit to 50000 bars for enough 15m candles
+    df = df.iloc[-50000:].reset_index(drop=True)
     # Convert timestamps to Unix ms for the signal engine
-    df['timestamp'] = pd.to_datetime(df['timestamp']).astype(np.int64) // 10**6
-    print(f"  Using {len(df):,} bars")
+    df['datetime'] = pd.to_datetime(df['timestamp'])
+    df.set_index('datetime', inplace=True)
+    df_15m = df.resample('15Min').agg({
+        'timestamp': 'first',
+        'open': 'first',
+        'high': 'max',
+        'low': 'min',
+        'close': 'last',
+        'volume': 'sum'
+    }).dropna()
+    df_15m['timestamp'] = df_15m.index.astype('int64') // 10**6
+    df_15m.reset_index(drop=True, inplace=True)
+    df = df_15m
+    print(f"  Aggregated to {len(df):,} 15-minute candles")
     
-    # Load models
-    from src.models.xgboost_model import ApexXGBoostModel
-    from src.core.config import DATA_DIR
-    MODELS_DIR = DATA_DIR / "models"
-    feature_store = FeatureStore(market_type)
-    
+    # We no longer need to load all 18 ML models for the diagnostic since 
+    # we are bypassing them for the Mathematical Trigger, but we'll leave the
+    # models dict empty to save memory.
     models = {}
-    regimes = ["trending_high_vol", "trending_low_vol", "ranging_high_vol", "ranging_low_vol"]
-    for regime in regimes:
-        for bag in [1, 2, 3]:
-            model_name = f"{symbol}_{market_type}_{regime}_bag{bag}"
-            model_path = MODELS_DIR / f"{model_name}.json"
-            if model_path.exists():
-                model = ApexXGBoostModel(
-                    name=model_name,
-                    feature_columns=feature_store.feature_columns,
-                )
-                model.load(MODELS_DIR)
-                models[f"{regime}_bag{bag}"] = model
-                print(f"  Loaded {model_name}")
-    
-    print(f"  Loaded {len(models)} models")
+    print(f"  Using Statistical Alpha Engine (Bypassing ML)")
     
     # ================================================================
     # TEST CONFIGURATIONS
     # ================================================================
     configs = [
         {
-            "name": "FULL PIPELINE (current - all filters ON)",
-            "enable_ensemble": True,
-            "enable_council": True,
-            "consensus_threshold": 0.50,
-            "conviction_threshold": 0.58,
-        },
-        {
-            "name": "NO COUNCIL (model + ensemble only)",
-            "enable_ensemble": True,
-            "enable_council": False,
-            "consensus_threshold": 0.50,
-            "conviction_threshold": 0.58,
-        },
-        {
-            "name": "NO ENSEMBLE (single model + council)",
+            "name": "15M HYBRID (Statistical Trigger + AI Council)",
             "enable_ensemble": False,
             "enable_council": True,
-            "consensus_threshold": 0.50,
-            "conviction_threshold": 0.58,
+            "enable_statistical_alpha": True,
+            "consensus_threshold": 0.20,  # Strict Circuit Breaker Mode
+            "conviction_threshold": 0.65,
         },
         {
-            "name": "MINIMAL (single model, no council, no ensemble)",
+            "name": "15M RAW MATH (No AI Brakes)",
             "enable_ensemble": False,
             "enable_council": False,
+            "enable_statistical_alpha": True,
             "consensus_threshold": 0.50,
-            "conviction_threshold": 0.58,
+            "conviction_threshold": 0.65,
         },
     ]
     
@@ -141,6 +124,7 @@ async def run_diagnostic():
             enable_monitoring=False,
             enable_council=config["enable_council"],
             enable_walk_forward=False,
+            enable_statistical_alpha=config.get("enable_statistical_alpha", True),
             max_concurrent=3,
             consensus_threshold=config["consensus_threshold"],
         )

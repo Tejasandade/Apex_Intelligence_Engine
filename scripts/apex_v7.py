@@ -444,14 +444,16 @@ def is_rollover_or_maintenance() -> tuple[bool, str]:
     """
     Detects daily broker server rollover spikes and maintenance windows.
     Protects against artificial spread widening (e.g. 23:55-00:10 UTC on XM).
+    Configurable via APEX_WEEKEND_SHIELD (default true).
     """
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     # 1. Daily Broker Rollover window: 23:55 UTC to 00:10 UTC
     if (now_utc.hour == 23 and now_utc.minute >= 55) or (now_utc.hour == 0 and now_utc.minute <= 10):
         return True, "XM DAILY ROLLOVER WINDOW (23:55-00:10 UTC) — SPREAD SHIELD"
     # 2. Weekend Maintenance window on XM: Saturday 06:00 to 12:00 UTC
-    if now_utc.weekday() == 5 and (6 <= now_utc.hour < 12):
-        return True, "WEEKEND SERVER MAINTENANCE WINDOW — TRADING PAUSED"
+    weekend_shield_enabled = os.getenv("APEX_WEEKEND_SHIELD", "true").lower() == "true"
+    if weekend_shield_enabled and now_utc.weekday() == 5 and (6 <= now_utc.hour < 12):
+        return True, "WEEKEND SERVER MAINTENANCE WINDOW (06:00-12:00 UTC) — TRADING PAUSED"
     # 3. Abnormal Broker Spread (> 12.0 bps for BTC)
     current_spread = market.get("spread_bps", 0.0)
     if current_spread > 12.0:
@@ -624,26 +626,6 @@ def size_position(sl_dist: float, prob: float, entry: float, council_score: floa
     notional = round(lots * entry, 2)
     actual_risk = round(lots * sl_dist * contract_size, 2)
     return notional, actual_risk
-    funding_bias   = funding_monitor.get_signal_bias(SYMBOL)
-    # Reduce size if crowd is strongly against our direction
-    if direction == "LONG" and funding_bias < -0.2:
-        risk_pct *= 0.75
-    elif direction == "SHORT" and funding_bias > 0.2:
-        risk_pct *= 0.75
-    # Apply funding size multiplier (reduces size in extreme crowding)
-    risk_pct *= funding_monitor.size_multiplier(SYMBOL, direction)
-    # Apply sentiment modifier
-    risk_pct *= sentiment_mult
-
-    risk_usd = account["balance"] * risk_pct
-    sl_frac  = sl_dist / entry
-    fee_frac = ROUNDTRIP_BPS / 10000.0
-    total_loss = sl_frac + fee_frac
-    if total_loss <= 0: return 0.0, 0.0
-
-    notional = min(risk_usd / total_loss, account["balance"] * MAX_LEVERAGE)
-    if notional < 80: return 0.0, 0.0
-    return round(notional, 2), round(risk_usd, 2)
 
 # ─── ENTRY EXECUTION ──────────────────────────────────────────────────────────
 def execute_signal(signal: TradingSignal, symbol: str = SYMBOL):
@@ -1548,7 +1530,7 @@ def render():
     global _first
     if _first: os.system('cls' if os.name=='nt' else 'clear'); _first=False
 
-    W = 94
+    W = 98
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     def row(c):
         vl = vlen(c)
@@ -1559,12 +1541,12 @@ def render():
     DIV=f"{CYN}╟{'─'*(W+2)}╢{R}\033[K"; BOT=f"{CYN}╚{'═'*(W+2)}╝{R}\033[K"
 
     buf=["\033[H", TOP]
-    buf.append(row(f"{BOLD}{WHT}⚡ APEX INTELLIGENCE ENGINE v7.1 — FULL ML STACK (Council + Ensemble + Monitor) ⚡{R}"))
-    ws = f"{GRN}LIVE ●{R}" if market["ws_connected"] else f"{RED}DISCONNECTED{R}"
+    buf.append(row(f"{BOLD}{WHT}⚡ APEX INTELLIGENCE ENGINE v7.2 — CONCURRENT MULTI-ASSET CORE (BTC · ETH · GOLD) ⚡{R}"))
+    ws = f"{GRN}LIVE ● (3 Symbols Active){R}" if market["ws_connected"] else f"{RED}DISCONNECTED{R}"
     buf.append(row(f"{DIM}Time:{R} {now} IST  │  {CYN}{session['name']} ({session['risk_mult']:.0%}){R}  │  WS: {ws}"))
     buf.append(MID)
 
-    # Account
+    # 1. ACCOUNT & PROP FIRM HEADER
     pnl_c = GRN if account["net_pnl"]>=0 else RED
     dd_c  = GRN if account["drawdown_pct"]<3 else (YLW if account["drawdown_pct"]<8 else RED)
     pf_c  = GRN if account["profit_factor"]>=1.5 else (YLW if account["profit_factor"]>=1.0 else RED)
@@ -1577,6 +1559,7 @@ def render():
     if account["halted"]: buf.append(row(f" {RED}{BOLD}⛔ {account['halt_reason']}{R}"))
     elif not ok:          buf.append(row(f" {YLW}⏸  {reason}{R}"))
     else:                 buf.append(row(f" {GRN}✓  ALL GATES CLEAR  │  Trades today: {account['trades_today']}/{MAX_TRADES_DAY}{R}"))
+
     if PROP_FIRM_MODE and prop_firm_manager:
         pf = prop_firm_manager.get_hud_metrics()
         pf_st_c = GRN if pf["status"] in ("IN_PROGRESS", "PHASE_1_PASSED") else RED
@@ -1585,11 +1568,13 @@ def render():
         dd_str = f"-${pf['total_dd_usd']:.2f} / -${pf['max_dd_usd']:.0f} ({pf['total_dd_pct']:.1f}%)"
         buf.append(DIV)
         buf.append(row(f"{BOLD}{YLW}🏆 PROP FIRM CHALLENGE [{pf['challenge_name']}]:{R}  Status: {pf_st_c}{pf['status']}{R}"))
-        buf.append(row(f" Virtual Equity: {BOLD}${pf['virtual_balance']:,.2f}{R}  │  Target: {GRN}{target_str}{R}  │  Daily Loss: {daily_loss_str}  │  Max DD: {dd_str}"))
+        buf.append(row(f" Virtual Equity: {BOLD}${pf['virtual_balance']:,.2f}{R}  │  Target: {GRN}{target_str}{R}"))
+        buf.append(row(f" Daily Loss: {daily_loss_str}  │  Max DD: {dd_str}"))
     buf.append(DIV)
 
-    # ── CONCURRENT MULTI-ASSET MATRIX ──
+    # 2. CONCURRENT MULTI-ASSET MATRIX
     buf.append(row(f"{BOLD}{CYN}CONCURRENT MULTI-ASSET MATRIX:{R}"))
+    buf.append(row(f" {BOLD}{'ASSET':<8} {'PRICE':<10} │ {'POSITION':<16} │ {'ML PROB (L / S)':<15} │ {'MOMENTUM / OFI':<15} │ {'REGIME (ATR)':<18}{R}"))
     for sym in TRADED_SYMBOLS:
         m = symbol_markets.get(sym, {})
         p = portfolios.get(sym, {})
@@ -1604,8 +1589,7 @@ def render():
             d_c = GRN if d == "LONG" else RED
             pnl = p.get("broker_pnl") if p.get("broker_ticket") else p.get("unrealized_pnl", 0.0)
             pnl_c = GRN if pnl >= 0 else RED
-            lots = p.get("entry_lots", 0.0)
-            pos_str = f"{d_c}{BOLD}{d}{R} ({pnl_c}${pnl:+.2f}{R}, {lots:.2f}L)"
+            pos_str = f"{d_c}{BOLD}{d}{R} ({pnl_c}${pnl:+.2f}{R})"
         else:
             pos_str = f"{GRY}FLAT{R}"
 
@@ -1613,79 +1597,92 @@ def render():
         ps = lp.get("short", 0.5)
         pl_c = GRN if pl >= MIN_PROB else (YLW if pl >= 0.52 else GRY)
         ps_c = RED if ps >= MIN_PROB else (YLW if ps >= 0.52 else GRY)
+
+        m_eng = momentum_engines.get(sym, momentum_eng)
+        mom_d = m_eng.get_diagnostics() if m_eng else {}
+        mom_sig_str = mom_d.get("signal", "FLAT")
+        mom_c = GRN if mom_sig_str == "LONG" else (RED if mom_sig_str == "SHORT" else GRY)
+        ofi_v = float(mom_d.get("ofi", 0.0))
+        mom_display = f"{mom_c}{mom_sig_str:<5}{R} (OFI:{ofi_v:+.2f})"
+
         reg = s_reg.get("current", lp.get("regime", "UNKNOWN"))
+        reg_short = reg.replace("TRENDING_", "TREND_").replace("RANGING_", "RANGE_").replace("_VOL", "")
         atr = s_reg.get("atr", 0.0)
+        reg_display = f"{reg_short} (${atr:.1f})"
 
-        buf.append(row(f" {BOLD}{sym:<9}{R} {ltp_str:>11} │ {pos_str:<26} │ L:{pl_c}{pl:.3f}{R} S:{ps_c}{ps:.3f}{R} │ {reg} (${atr:.1f})"))
+        buf.append(row(f" {BOLD}{sym:<8}{R} {ltp_str:>10} │ {pos_str:<25} │ L:{pl_c}{pl:.3f}{R} S:{ps_c}{ps:.3f}{R} │ {mom_display:<24} │ {reg_display:<18}"))
     buf.append(DIV)
 
-    # Signal Engine status
-    buf.append(row(f"{BOLD}{CYN}ML SIGNAL ENGINE:{R}"))
-    if signal_engine:
-        reg = regime_info["current"]
-        atr = regime_info["atr"]
-        reg_c = GRN if "TRENDING" in reg else YLW
-        halted_str = f" {RED}[MODEL DECAY — HALTED]{R}" if signal_engine.is_halted else ""
-        supp = signal_engine._suppression_counter
-        supp_str = f"  {YLW}[SUPPRESSED {supp} candles]{R}" if supp > 0 else ""
-        buf.append(row(f" Regime: {reg_c}{reg}{R}{halted_str}{supp_str}  │  ATR:${atr:,.0f}  │  Candles:{signal_engine._candles_processed}  │  Signals:{signal_engine._signals_generated}"))
+    # 3. ACTIVE POSITIONS & PORTFOLIO RISK POOL SUPERVISOR
+    buf.append(row(f"{BOLD}{CYN}ACTIVE POSITIONS & PORTFOLIO RISK POOL:{R}"))
+    open_ports = [p for p in portfolios.values() if p.get("position") == "OPEN"]
+    open_count = len(open_ports)
+    open_risk = sum(p.get("risk_usd", 25.0) for p in open_ports)
+    corr_str = "CLEAR"
+    if any(p.get("symbol") == "BTCUSDT" and p.get("position") == "OPEN" for p in portfolios.values()):
+        btc_dir = portfolios["BTCUSDT"]["direction"]
+        corr_str = f"BTC {btc_dir} (ETH {btc_dir} Shielded)"
+    elif any(p.get("symbol") == "ETHUSDT" and p.get("position") == "OPEN" for p in portfolios.values()):
+        eth_dir = portfolios["ETHUSDT"]["direction"]
+        corr_str = f"ETH {eth_dir} (BTC {eth_dir} Shielded)"
 
-        # Live probability bars (updated every 5m close)
-        pl = live_probs["long"]; ps = live_probs["short"]
-        pl_c = GRN if pl >= MIN_PROB else (YLW if pl >= 0.52 else GRY)
-        ps_c = RED if ps >= MIN_PROB else (YLW if ps >= 0.52 else GRY)
-        pl_bar = "█" * int(pl * 12) + "░" * (12 - int(pl * 12))
-        ps_bar = "█" * int(ps * 12) + "░" * (12 - int(ps * 12))
-        thr_tag = f"threshold {MIN_PROB}"
-        buf.append(row(f" LONG  p:{pl_c}{pl_bar} {pl:.4f}{R}  │  SHORT p:{ps_c}{ps_bar} {ps:.4f}{R}  [{thr_tag}]"))
+    risk_pool_str = f"Positions: {open_count}/2 max  │  Open Risk: ${open_risk:.2f}/$50.00 max  │  Correlation Shield: {corr_str}"
+    buf.append(row(f" {risk_pool_str}"))
 
-        # Last signal details
-        ls = last_signal
-        if ls:
-            ls_dir = "LONG" if ls.direction == "BUY" else "SHORT"
-            ls_c = GRN if ls.direction == "BUY" else RED
-            council_c = GRN if ls.council_approved else RED
-            buf.append(row(f" Last: {ls_c}{ls_dir}{R} p={ls.conviction:.3f}  Council: {council_c}{'APPROVED' if ls.council_approved else 'BLOCKED'}{R} score={ls.council_score:.2f}  [{ls.council_summary}]"))
-            # P3: Show if approved but gated
-            gr = last_gate_rejection
-            if gr["reason"] and gr["signal"] and (time.time() - gr["ts"]) < 600:
-                age = int(time.time() - gr["ts"])
-                buf.append(row(f" {YLW}⚠  Approved {gr['signal']} NOT executed — {gr['reason']} ({age}s ago){R}"))
-        else:
-            n_eval = len(candles_5m)
-            buf.append(row(f" {GRY}Scanning 5m candles ({n_eval} loaded) — Waiting for signal (p ≥ {MIN_PROB:.2f}){R}"))
-
-        # Momentum engine
-        mom_d = momentum_eng.get_diagnostics()
-        mom_sig_str = mom_d["signal"]
-        mom_c = GRN if mom_sig_str=="LONG" else (RED if mom_sig_str=="SHORT" else GRY)
-        buf.append(row(f" Momentum: {mom_c}{mom_sig_str}{R}  OFI:{mom_d['ofi']:+.3f}  Ticks:{mom_d['ticks_ingested']}  OBI:{market['obi']:+.3f}"))
+    if open_ports:
+        for op in open_ports:
+            sym_o = op["symbol"]
+            d = op["direction"]
+            d_c = GRN if d == "LONG" else RED
+            pnl_val = op.get("broker_pnl") if op.get("broker_ticket") else op.get("unrealized_pnl", 0.0)
+            pnl_c = GRN if pnl_val >= 0 else RED
+            lots = op.get("entry_lots", 0.0)
+            entry = op.get("entry_price", 0.0)
+            sl_p = op.get("sl_price", 0.0)
+            tp1_p = op.get("tp1_price", 0.0)
+            tp2_p = op.get("tp2_price", 0.0)
+            t_id = op.get("broker_ticket", "PAPER")
+            ph = "FULL" if op.get("phase") == 1 else "RUNNER(50%)"
+            dur = (time.time() - op.get("entry_time", time.time())) / 60.0
+            buf.append(row(f"  ► {BOLD}{sym_o}{R}: {d_c}{BOLD}{d}{R} {lots}L @${entry:,.1f} │ PnL: {pnl_c}{BOLD}${pnl_val:+.2f}{R} │ Phase:{ph} │ Age:{dur:.0f}m │ Ticket:#{t_id}"))
+            buf.append(row(f"    SL:${sl_p:,.1f} │ TP1:${tp1_p:,.1f} │ TP2:${tp2_p:,.1f} │ P:{op.get('prob',0.0):.3f} Cncl:{op.get('council_score',0.0):.2f}"))
     else:
-        buf.append(row(f" {GRY}Engine not initialized{R}"))
+        buf.append(row(f"  {GRY}► All assets FLAT — Monitoring 5m candles across 3 symbols for Council-approved entry (p ≥ {MIN_PROB:.2f}){R}"))
     buf.append(DIV)
 
-    # ─── MARKET INTELLIGENCE (APEX v7.2) ──────────────────────────────────────
+    # 4. LAST SIGNAL & GATE REJECTION
+    ls = last_signal
+    if ls:
+        ls_sym = getattr(ls, "symbol", PRIMARY_SYMBOL)
+        ls_dir = "LONG" if ls.direction == "BUY" else "SHORT"
+        ls_c = GRN if ls.direction == "BUY" else RED
+        council_c = GRN if ls.council_approved else RED
+        buf.append(row(f"{BOLD}{CYN}LATEST SIGNAL:{R} {BOLD}{ls_sym}{R} {ls_c}{ls_dir}{R} p={ls.conviction:.3f} │ Council: {council_c}{'APPROVED' if ls.council_approved else 'BLOCKED'}{R} score={ls.council_score:.2f} [{ls.council_summary}]"))
+    gr = last_gate_rejection
+    if gr.get("reason") and gr.get("signal") and (time.time() - gr.get("ts", 0)) < 600:
+        age = int(time.time() - gr["ts"])
+        buf.append(row(f" {YLW}⚠  Approved {gr['signal']} NOT executed — {gr['reason']} ({age}s ago){R}"))
+    if ls or (gr.get("reason") and gr.get("signal")):
+        buf.append(DIV)
+
+    # 5. MARKET INTELLIGENCE
     buf.append(row(f"{BOLD}{CYN}MARKET INTEL:{R}"))
-    # Fear & Greed
     fg_val   = sentiment_monitor.get_fear_greed()
     fg_label = sentiment_monitor.get_label()
     fg_col   = sentiment_monitor.get_color_tag()
-    # Funding rate
-    fr_pct   = funding_monitor.get_funding_pct(SYMBOL)
-    fr_label = funding_monitor.get_label(SYMBOL)
-    fr_col   = RED if funding_monitor.is_extreme(SYMBOL) else (YLW if abs(fr_pct) > 0.03 else GRN)
-    # Next event
+    fr_btc   = funding_monitor.get_funding_pct("BTCUSDT")
+    fr_eth   = funding_monitor.get_funding_pct("ETHUSDT")
     nxt = news_guard.get_next_event()
     if nxt:
         mins_to = (nxt["time"] - datetime.datetime.now(datetime.timezone.utc)).total_seconds() / 60.0
-        evt_str = f"{nxt['name'][:35]} in {mins_to:.0f}m"
+        evt_str = f"{nxt['name'][:30]} in {mins_to:.0f}m"
         evt_col = RED if mins_to < 30 else (YLW if mins_to < 90 else GRY)
     else:
         evt_str, evt_col = "No events scheduled", GRY
-    # Blackout status
-    is_blk, blk_rsn = news_guard.is_blackout(SYMBOL)
+    is_blk, _ = news_guard.is_blackout("BTCUSDT")
     news_str = f"{RED}⛔ BLACKOUT{R}" if is_blk else f"{GRN}✓ CLEAR{R}"
-    buf.append(row(f" F&G: {fg_col}{fg_val} ({fg_label}){R}  │  Funding: {fr_col}{fr_pct:+.4f}% ({fr_label}){R}  │  News: {news_str}"))
+
+    buf.append(row(f" F&G: {fg_col}{fg_val} ({fg_label}){R}  │  Funding: BTC {fr_btc:+.4f}%, ETH {fr_eth:+.4f}%  │  News: {news_str}"))
     cm_dxy = cross_market_monitor.dxy_trend
     cm_dxy_c = RED if cm_dxy == "USD_SURGING" else (GRN if cm_dxy == "USD_WEAKENING" else GRY)
     cm_eth = cross_market_monitor.eth_trend
@@ -1698,23 +1695,9 @@ def render():
         buf.append(row(f" Retrain: {rt_str}  │  Count: {rs['retrain_count']}  │  Candles: {rs['candles_accumulated']}"))
     buf.append(DIV)
 
-    # Position
-    buf.append(row(f"{BOLD}{CYN}POSITION:{R}"))
-    if portfolio["position"] == "OPEN":
-        d = portfolio["direction"]
-        d_c = GRN if d=="LONG" else RED
-        ur_c = GRN if portfolio["unrealized_pnl"]>=0 else RED
-        ph = "FULL" if portfolio["phase"]==1 else "RUNNER(50%)"
-        dur = (time.time() - portfolio["entry_time"]) / 60.0
-        buf.append(row(f" {d_c}{BOLD}{d}{R} @${portfolio['entry_price']:,.1f}  │  PnL: {ur_c}{BOLD}${portfolio['unrealized_pnl']:+.2f}{R}  │  Phase:{ph}  │  Age:{dur:.0f}m"))
-        buf.append(row(f" SL:${portfolio['sl_price']:,.1f}(${portfolio['sl_distance']:.0f})  │  TP1:${portfolio['tp1_price']:,.1f}  │  TP2:${portfolio['tp2_price']:,.1f}  │  P:{portfolio['prob']:.3f}  Cncl:{portfolio['council_score']:.2f}"))
-    else:
-        buf.append(row(f" {GRY}FLAT @${market['ltp']:,.1f}  │  Waiting for Council-approved ML signal{R}"))
-    buf.append(DIV)
-
-    # Trade log
+    # 6. TRADE LOG
     buf.append(row(f"{BOLD}{CYN}TRADE LOG:{R}"))
-    logs = list(trade_log)[-7:]
+    logs = list(trade_log)[-6:]
     if logs:
         for l in logs:
             c = GRN if "+$" in l or "TP" in l else (RED if "-$" in l or "STOP" in l or "LOSS" in l else GRY)

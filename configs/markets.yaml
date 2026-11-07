@@ -44,6 +44,25 @@ markets:
       warmup_candles: 60
       features_version: "crypto_v1"
 
+    paxgusdt:
+      exchange: binance
+      display_name: "Gold / USDT"
+      base_currency: PAXG
+      quote_currency: USDT
+      tick_size: 0.01
+      lot_size: 0.001
+      min_notional: 5.0
+      session: "24/7"
+      timezone: UTC
+      commission_bps: 2.0
+      taker_commission_bps: 4.0
+      expected_slippage_bps: 1.5
+      max_slippage_bps: 4.0
+      data_source: binance
+      candle_intervals: ["1m", "5m", "15m", "1h"]
+      warmup_candles: 60
+      features_version: "crypto_v1"
+
   india_equity:
     banknifty:
       exchange: dhan

@@ -57,10 +57,10 @@
         "weight": 0.0
       }
     },
-    "outcome": "OPEN",
+    "outcome": "CANCELLED",
     "exit_price": 0.0,
     "pnl_usd": 0.0,
-    "exit_reason": ""
+    "exit_reason": "STALE"
   },
   {
     "id": 2,
@@ -131,5 +131,713 @@
     "exit_reason": "STOP LOSS",
     "exit_ts": "2026-11-05T18:13:17.290208",
     "dur_min": 138.3
+  },
+  {
+    "id": 3,
+    "open_ts": "2026-11-05T23:37:03.770807",
+    "action": "SELL",
+    "entry_price": 75802.7,
+    "sl_price": 76246.6,
+    "tp1_price": 74914.9,
+    "tp2_price": 74027.09999999999,
+    "sl_dist": 443.9,
+    "notional": 1418.1,
+    "risk_usd": 10.29,
+    "leverage": 1.38,
+    "prob": 0.6408577809731165,
+    "council_score": 0.5307692307692308,
+    "regime": "RANGING_LOW_VOL",
+    "signal_id": "sig_BTCUSDT_6bcc4ca7",
+    "council_votes": {
+      "Momentum": {
+        "vote": "ABSTAIN",
+        "conviction": 0.3333333333333333,
+        "weight": 1.0
+      },
+      "Structure": {
+        "vote": "ABSTAIN",
+        "conviction": 0.3,
+        "weight": 2.5
+      },
+      "Volume": {
+        "vote": "ABSTAIN",
+        "conviction": 0.4,
+        "weight": 1.0
+      },
+      "Regime": {
+        "vote": "ABSTAIN",
+        "conviction": 0.4,
+        "weight": 2.0
+      },
+      "Session": {
+        "vote": "APPROVE",
+        "conviction": 0.8,
+        "weight": 1.0
+      },
+      "Exhaustion": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 2.0
+      },
+      "Velocity": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 2.5
+      },
+      "Sentiment": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.0
+      },
+      "Risk": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 0.0
+      }
+    },
+    "outcome": "LOSS",
+    "exit_price": 76251.9,
+    "pnl_usd": -10.39,
+    "exit_reason": "STOP LOSS",
+    "exit_ts": "2026-11-06T00:45:02.042922",
+    "dur_min": 68.0
+  },
+  {
+    "id": 4,
+    "open_ts": "2026-11-06T02:21:02.009090",
+    "action": "SELL",
+    "entry_price": 76250.7,
+    "sl_price": 76614.9,
+    "tp1_price": 75522.3,
+    "tp2_price": 74793.9,
+    "sl_dist": 364.2,
+    "notional": 577.21,
+    "risk_usd": 3.57,
+    "leverage": 0.57,
+    "prob": 0.6159683962663015,
+    "council_score": 0.5307692307692308,
+    "regime": "RANGING_HIGH_VOL",
+    "signal_id": "sig_BTCUSDT_2d9c8f87",
+    "council_votes": {
+      "Momentum": {
+        "vote": "ABSTAIN",
+        "conviction": 0.3333333333333333,
+        "weight": 1.0
+      },
+      "Structure": {
+        "vote": "ABSTAIN",
+        "conviction": 0.3,
+        "weight": 2.5
+      },
+      "Volume": {
+        "vote": "ABSTAIN",
+        "conviction": 0.4,
+        "weight": 1.0
+      },
+      "Regime": {
+        "vote": "ABSTAIN",
+        "conviction": 0.4,
+        "weight": 2.0
+      },
+      "Session": {
+        "vote": "APPROVE",
+        "conviction": 0.8,
+        "weight": 1.0
+      },
+      "Exhaustion": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 2.0
+      },
+      "Velocity": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 2.5
+      },
+      "Sentiment": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.0
+      },
+      "Risk": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 0.0
+      }
+    },
+    "outcome": "WIN",
+    "exit_price": 75666.8,
+    "pnl_usd": 4.17,
+    "exit_reason": "STOP LOSS",
+    "exit_ts": "2026-11-06T04:32:18.529532",
+    "dur_min": 131.3
+  },
+  {
+    "id": 5,
+    "open_ts": "2026-11-06T04:56:01.916709",
+    "action": "SELL",
+    "entry_price": 75917.8,
+    "sl_price": 76569.4,
+    "tp1_price": 74614.6,
+    "tp2_price": 73311.40000000001,
+    "sl_dist": 651.6,
+    "notional": 307.35,
+    "risk_usd": 3.07,
+    "leverage": 0.3,
+    "prob": 0.6270939086874326,
+    "council_score": 0.5814102564102565,
+    "regime": "RANGING_HIGH_VOL",
+    "signal_id": "sig_BTCUSDT_a8e93b84",
+    "council_votes": {
+      "Momentum": {
+        "vote": "APPROVE",
+        "conviction": 0.6666666666666666,
+        "weight": 1.0
+      },
+      "Structure": {
+        "vote": "ABSTAIN",
+        "conviction": 0.3,
+        "weight": 2.5
+      },
+      "Volume": {
+        "vote": "APPROVE",
+        "conviction": 0.75,
+        "weight": 1.0
+      },
+      "Regime": {
+        "vote": "ABSTAIN",
+        "conviction": 0.4,
+        "weight": 2.0
+      },
+      "Session": {
+        "vote": "APPROVE",
+        "conviction": 0.7,
+        "weight": 1.0
+      },
+      "Exhaustion": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 2.0
+      },
+      "Velocity": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 2.5
+      },
+      "Sentiment": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.0
+      },
+      "Risk": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 0.0
+      }
+    },
+    "outcome": "WIN",
+    "exit_price": 75627.1,
+    "pnl_usd": 0.75,
+    "exit_reason": "MAX DURATION 6h",
+    "exit_ts": "2026-11-06T11:12:16.012864",
+    "dur_min": 376.2
+  },
+  {
+    "id": 6,
+    "open_ts": "2026-11-06T12:03:01.769731",
+    "action": "SELL",
+    "entry_price": 75591.8,
+    "sl_price": 76155.1,
+    "tp1_price": 74465.2,
+    "tp2_price": 73338.6,
+    "sl_dist": 563.3,
+    "notional": 433.59,
+    "risk_usd": 3.84,
+    "leverage": 0.42,
+    "prob": 0.612067182858785,
+    "council_score": 0.5641025641025641,
+    "regime": "RANGING_LOW_VOL",
+    "signal_id": "sig_BTCUSDT_f2741a64",
+    "council_votes": {
+      "Momentum": {
+        "vote": "APPROVE",
+        "conviction": 0.6666666666666666,
+        "weight": 1.0
+      },
+      "Structure": {
+        "vote": "ABSTAIN",
+        "conviction": 0.3,
+        "weight": 2.5
+      },
+      "Volume": {
+        "vote": "APPROVE",
+        "conviction": 1.0,
+        "weight": 1.0
+      },
+      "Regime": {
+        "vote": "ABSTAIN",
+        "conviction": 0.4,
+        "weight": 2.0
+      },
+      "Session": {
+        "vote": "ABSTAIN",
+        "conviction": 0.5,
+        "weight": 1.0
+      },
+      "Exhaustion": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 2.0
+      },
+      "Velocity": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 2.5
+      },
+      "Sentiment": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.0
+      },
+      "Risk": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 0.0
+      }
+    },
+    "outcome": "CANCELLED",
+    "exit_price": 0.0,
+    "pnl_usd": 0.0,
+    "exit_reason": "STALE"
+  },
+  {
+    "id": 7,
+    "open_ts": "2026-11-06T13:23:03.769268",
+    "action": "SELL",
+    "entry_price": 75586.9,
+    "sl_price": 75891.0,
+    "tp1_price": 74978.7,
+    "tp2_price": 74370.5,
+    "sl_dist": 304.1,
+    "notional": 943.63,
+    "risk_usd": 5.12,
+    "leverage": 0.92,
+    "prob": 0.6323243677616119,
+    "council_score": 0.5192307692307693,
+    "regime": "TRENDING_HIGH_VOL",
+    "signal_id": "sig_BTCUSDT_dd598b68",
+    "council_votes": {
+      "Momentum": {
+        "vote": "REJECT",
+        "conviction": 0.7,
+        "weight": 1.0
+      },
+      "Structure": {
+        "vote": "ABSTAIN",
+        "conviction": 0.3,
+        "weight": 2.5
+      },
+      "Volume": {
+        "vote": "REJECT",
+        "conviction": 0.6,
+        "weight": 1.0
+      },
+      "Regime": {
+        "vote": "APPROVE",
+        "conviction": 0.9,
+        "weight": 2.0
+      },
+      "Session": {
+        "vote": "ABSTAIN",
+        "conviction": 0.5,
+        "weight": 1.0
+      },
+      "Exhaustion": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 2.0
+      },
+      "Velocity": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 2.5
+      },
+      "Sentiment": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.0
+      },
+      "Risk": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 0.0
+      }
+    },
+    "outcome": "CANCELLED",
+    "exit_price": 0.0,
+    "pnl_usd": 0.0,
+    "exit_reason": "STALE"
+  },
+  {
+    "id": 8,
+    "open_ts": "2026-11-06T13:57:03.529786",
+    "action": "SELL",
+    "entry_price": 75650.0,
+    "sl_price": 75950.3,
+    "tp1_price": 75049.4,
+    "tp2_price": 74448.8,
+    "sl_dist": 300.3,
+    "notional": 5117.48,
+    "risk_usd": 51.17,
+    "leverage": 5.0,
+    "prob": 0.6676147133111954,
+    "council_score": 0.5269230769230769,
+    "regime": "RANGING_HIGH_VOL",
+    "signal_id": "sig_BTCUSDT_fd5b90a5",
+    "council_votes": {
+      "Momentum": {
+        "vote": "ABSTAIN",
+        "conviction": 0.3333333333333333,
+        "weight": 1.0
+      },
+      "Structure": {
+        "vote": "ABSTAIN",
+        "conviction": 0.3,
+        "weight": 2.5
+      },
+      "Volume": {
+        "vote": "ABSTAIN",
+        "conviction": 0.4,
+        "weight": 1.0
+      },
+      "Regime": {
+        "vote": "ABSTAIN",
+        "conviction": 0.4,
+        "weight": 2.0
+      },
+      "Session": {
+        "vote": "APPROVE",
+        "conviction": 0.7,
+        "weight": 1.0
+      },
+      "Exhaustion": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 2.0
+      },
+      "Velocity": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 2.5
+      },
+      "Sentiment": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.0
+      },
+      "Risk": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 0.0
+      }
+    },
+    "outcome": "LOSS",
+    "exit_price": 75954.7,
+    "pnl_usd": -27.78,
+    "exit_reason": "STOP LOSS",
+    "exit_ts": "2026-11-06T14:36:55.513618",
+    "dur_min": 39.9
+  },
+  {
+    "id": 9,
+    "open_ts": "2026-11-06T14:57:04.616253",
+    "action": "SELL",
+    "entry_price": 76246.2,
+    "sl_price": 76538.9,
+    "tp1_price": 75660.8,
+    "tp2_price": 75075.4,
+    "sl_dist": 292.7,
+    "notional": 665.22,
+    "risk_usd": 3.49,
+    "leverage": 0.67,
+    "prob": 0.6168746228019396,
+    "council_score": 0.5461538461538461,
+    "regime": "TRENDING_HIGH_VOL",
+    "signal_id": "sig_BTCUSDT_76dbc56d",
+    "council_votes": {
+      "Momentum": {
+        "vote": "REJECT",
+        "conviction": 0.7,
+        "weight": 1.0
+      },
+      "Structure": {
+        "vote": "ABSTAIN",
+        "conviction": 0.3,
+        "weight": 2.5
+      },
+      "Volume": {
+        "vote": "REJECT",
+        "conviction": 0.6,
+        "weight": 1.0
+      },
+      "Regime": {
+        "vote": "APPROVE",
+        "conviction": 0.9,
+        "weight": 2.0
+      },
+      "Session": {
+        "vote": "APPROVE",
+        "conviction": 0.7,
+        "weight": 1.0
+      },
+      "Exhaustion": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 2.0
+      },
+      "Velocity": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 2.5
+      },
+      "Sentiment": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.0
+      },
+      "Risk": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 0.0
+      }
+    },
+    "outcome": "WIN",
+    "exit_price": 75870.0,
+    "pnl_usd": 3.35,
+    "exit_reason": "STOP LOSS",
+    "exit_ts": "2026-11-06T19:00:39.307445",
+    "dur_min": 243.6
+  },
+  {
+    "id": 10,
+    "open_ts": "2026-11-06T22:11:02.123449",
+    "action": "SELL",
+    "entry_price": 75640.1,
+    "sl_price": 76054.4,
+    "tp1_price": 74811.5,
+    "tp2_price": 73982.90000000001,
+    "sl_dist": 414.3,
+    "notional": 726.36,
+    "risk_usd": 5.0,
+    "leverage": 0.73,
+    "prob": 0.6106583749254545,
+    "council_score": 0.5868544600938966,
+    "regime": "RANGING_LOW_VOL",
+    "signal_id": "sig_BTCUSDT_d86b6fdd",
+    "council_votes": {
+      "Momentum": {
+        "vote": "APPROVE",
+        "conviction": 0.6666666666666666,
+        "weight": 1.0
+      },
+      "Structure": {
+        "vote": "ABSTAIN",
+        "conviction": 0.3,
+        "weight": 2.5
+      },
+      "Volume": {
+        "vote": "APPROVE",
+        "conviction": 1.0,
+        "weight": 1.0
+      },
+      "Regime": {
+        "vote": "ABSTAIN",
+        "conviction": 0.4,
+        "weight": 2.0
+      },
+      "Session": {
+        "vote": "APPROVE",
+        "conviction": 0.8,
+        "weight": 1.0
+      },
+      "Exhaustion": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 2.0
+      },
+      "Velocity": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 2.5
+      },
+      "CrossMarket": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.2
+      },
+      "Sentiment": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.0
+      },
+      "Risk": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 0.0
+      }
+    },
+    "outcome": "CANCELLED",
+    "exit_price": 0.0,
+    "pnl_usd": 0.0,
+    "exit_reason": "STALE"
+  },
+  {
+    "id": 11,
+    "open_ts": "2026-11-06T23:03:06.490956",
+    "action": "SELL",
+    "entry_price": 75762.3,
+    "sl_price": 76170.6,
+    "tp1_price": 74945.7,
+    "tp2_price": 74129.1,
+    "sl_dist": 408.3,
+    "notional": 735.77,
+    "risk_usd": 5.0,
+    "leverage": 0.74,
+    "prob": 0.6271588280797005,
+    "council_score": 0.5281690140845071,
+    "regime": "RANGING_LOW_VOL",
+    "signal_id": "sig_BTCUSDT_ca952c12",
+    "council_votes": {
+      "Momentum": {
+        "vote": "ABSTAIN",
+        "conviction": 0.3333333333333333,
+        "weight": 1.0
+      },
+      "Structure": {
+        "vote": "ABSTAIN",
+        "conviction": 0.3,
+        "weight": 2.5
+      },
+      "Volume": {
+        "vote": "ABSTAIN",
+        "conviction": 0.4,
+        "weight": 1.0
+      },
+      "Regime": {
+        "vote": "ABSTAIN",
+        "conviction": 0.4,
+        "weight": 2.0
+      },
+      "Session": {
+        "vote": "APPROVE",
+        "conviction": 0.8,
+        "weight": 1.0
+      },
+      "Exhaustion": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 2.0
+      },
+      "Velocity": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 2.5
+      },
+      "CrossMarket": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.2
+      },
+      "Sentiment": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.0
+      },
+      "Risk": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 0.0
+      }
+    },
+    "outcome": "LOSS",
+    "exit_price": 75698.4,
+    "pnl_usd": -0.41,
+    "exit_reason": "TIME DECAY 4h adverse",
+    "exit_ts": "2026-11-07T03:03:03.004709",
+    "dur_min": 240.0
+  },
+  {
+    "id": 12,
+    "open_ts": "2026-11-07T03:23:01.717721",
+    "action": "SELL",
+    "entry_price": 75799.9,
+    "sl_price": 76049.9,
+    "tp1_price": 75299.9,
+    "tp2_price": 74799.9,
+    "sl_dist": 250.0,
+    "notional": 446.38,
+    "risk_usd": 2.1,
+    "leverage": 0.45,
+    "prob": 0.6205291350682577,
+    "council_score": 0.5093896713615023,
+    "regime": "TRENDING_LOW_VOL",
+    "signal_id": "sig_BTCUSDT_27ee0cae",
+    "council_votes": {
+      "Momentum": {
+        "vote": "APPROVE",
+        "conviction": 0.6666666666666666,
+        "weight": 1.0
+      },
+      "Structure": {
+        "vote": "REJECT",
+        "conviction": 0.6,
+        "weight": 2.5
+      },
+      "Volume": {
+        "vote": "APPROVE",
+        "conviction": 1.0,
+        "weight": 1.0
+      },
+      "Regime": {
+        "vote": "APPROVE",
+        "conviction": 0.9,
+        "weight": 2.0
+      },
+      "Session": {
+        "vote": "APPROVE",
+        "conviction": 0.8,
+        "weight": 1.0
+      },
+      "Exhaustion": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 2.0
+      },
+      "Velocity": {
+        "vote": "REJECT",
+        "conviction": 1.0,
+        "weight": 2.5
+      },
+      "CrossMarket": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.2
+      },
+      "Sentiment": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.0
+      },
+      "Risk": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 0.0
+      }
+    },
+    "outcome": "LOSS",
+    "exit_price": 76072.95,
+    "pnl_usd": -2.51,
+    "exit_reason": "MT5 [sl 76071.85]",
+    "exit_ts": "2026-11-07T03:32:36.091187"
   }
 ]
