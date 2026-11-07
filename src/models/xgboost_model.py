@@ -120,6 +120,8 @@ class ApexXGBoostModel(BaseModel):
         neg_count = len(y) - pos_count
         scale_pos_weight = neg_count / max(pos_count, 1)
 
+        early_stopping = self._hyperparams.get("early_stopping_rounds", 20)
+
         # Build XGBoost params
         params = {
             "n_estimators": self._hyperparams.get("n_estimators", 300),
@@ -133,12 +135,11 @@ class ApexXGBoostModel(BaseModel):
             "reg_lambda": self._hyperparams.get("reg_lambda", 1.0),
             "scale_pos_weight": scale_pos_weight,
             "eval_metric": "logloss",
+            "early_stopping_rounds": early_stopping,
             "random_state": 42,
             "n_jobs": -1,
             "verbosity": 0,
         }
-
-        early_stopping = self._hyperparams.get("early_stopping_rounds", 20)
 
         logger.info(
             "training_started",

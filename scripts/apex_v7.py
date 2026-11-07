@@ -1225,14 +1225,15 @@ def prewarm():
     print("  APEX INTELLIGENCE ENGINE v7.1 — FULL STACK INITIALIZATION")
     print("=" * 72)
 
-    # 1. Load all XGBoost models
-    print("  Loading XGBoost ensemble models...")
+    # 1. Load all XGBoost models for active symbol
+    sym_key = SYMBOL.lower()
+    print(f"  Loading XGBoost ensemble models for {sym_key.upper()}...")
     models: dict[str, ApexXGBoostModel] = {}
     regimes_dir = ["ranging_high_vol", "ranging_low_vol", "trending_low_vol", "trending_high_vol"]
     for regime in regimes_dir:
         for direction in ["LONG", "SHORT"]:
             for bag_n in [1, 2, 3]:
-                name = f"btcusdt_crypto_{regime}_{direction}_bag{bag_n}"
+                name = f"{sym_key}_crypto_{regime}_{direction}_bag{bag_n}"
                 meta_path = MODEL_DIR / f"{name}_metadata.json"
                 model_path = MODEL_DIR / f"{name}.json"
                 if model_path.exists() and meta_path.exists():
@@ -1240,20 +1241,19 @@ def prewarm():
                         meta = json.load(open(meta_path))
                         m = ApexXGBoostModel(name=name, feature_columns=meta["feature_columns"])
                         m.load(path=MODEL_DIR)
-                        key = f"btcusdt_crypto_{regime}_{direction}_bag{bag_n}"
-                        models[key] = m
+                        models[name] = m
                     except Exception as e:
                         print(f"    WARN: Could not load {name}: {e}")
 
     # Also try to load transformer model if available
     try:
         from src.models.transformer_model import ApexTransformerModel
-        tf_path = MODEL_DIR / "btcusdt_crypto_transformer.pth"
+        tf_path = MODEL_DIR / f"{sym_key}_crypto_transformer.pth"
         if tf_path.exists():
-            tf_model = ApexTransformerModel.load("btcusdt_crypto_transformer", str(MODEL_DIR))
+            tf_model = ApexTransformerModel.load(f"{sym_key}_crypto_transformer", str(MODEL_DIR))
             if tf_model:
-                models["btcusdt_crypto_transformer"] = tf_model
-                print(f"  ✓ Transformer model loaded")
+                models[f"{sym_key}_crypto_transformer"] = tf_model
+                print(f"  ✓ Transformer model loaded ({sym_key})")
     except Exception:
         pass
 
