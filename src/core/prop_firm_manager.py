@@ -659,7 +659,16 @@ class PropFirmManager:
             import MetaTrader5 as mt5
             term = mt5.terminal_info()
             if term and term.connected:
-                for cand in [symbol, f"{symbol}#", "GOLD.i#", "BTCUSD#", "ETHUSD#"]:
+                if "BTC" in sym_upper:
+                    cands = ["BTCUSD#", "BTCUSD", "BTCUSD.i", "BTCUSDm", symbol, f"{symbol}#"]
+                elif "ETH" in sym_upper:
+                    cands = ["ETHUSD#", "ETHUSD", "ETHUSD.i", "ETHUSDm", symbol, f"{symbol}#"]
+                elif "GOLD" in sym_upper or "XAU" in sym_upper or "PAXG" in sym_upper:
+                    cands = ["GOLD.i#", "GOLD#", "GOLD", "XAUUSD#", "XAUUSD", symbol, f"{symbol}#"]
+                else:
+                    cands = [symbol, f"{symbol}#"]
+
+                for cand in cands:
                     s_info = mt5.symbol_info(cand)
                     if s_info:
                         contract_size = float(getattr(s_info, "trade_contract_size", contract_size))

@@ -1,14 +1,9 @@
-# Railway deployment config
-# https://railway.app — connect GitHub repo, set env vars, deploy
-
+# Railway deployment config — PAUSED (Running locally in Windows terminal)
 [build]
 builder = "DOCKERFILE"
 dockerfilePath = "Dockerfile"
 
 [deploy]
-startCommand = "python scripts/apex_v7.py"
-healthcheckPath = "/health"
-healthcheckTimeout = 120
-restartPolicyType = "ON_FAILURE"
-restartPolicyMaxRetries = 10
+startCommand = "echo 'Railway cloud instance paused. Local terminal execution active.' && sleep 86400"
+restartPolicyType = "NEVER"
 

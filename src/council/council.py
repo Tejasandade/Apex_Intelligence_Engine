@@ -60,8 +60,8 @@ class Council:
 
     def __init__(
         self,
-        consensus_threshold: float = 0.50,
-        min_voting_advisors: int = 3,
+        consensus_threshold: float = 0.55,
+        min_voting_advisors: int = 2,
         enable_veto: bool = True,
         scalp_mode: bool = False,
     ):
@@ -266,7 +266,11 @@ class Council:
             
         # Apply risk penalty
         consensus = max(0.0, raw_score - risk_penalty)
-        approved = consensus >= self.consensus_threshold
+        approve_count = sum(1 for v in votes if v.vote == Vote.APPROVE)
+        reject_count = sum(1 for v in votes if v.vote == Vote.REJECT)
+
+        # Institutional confirmation: must have at least 1 affirmative APPROVE and positive net weight
+        approved = (consensus >= self.consensus_threshold) and (approve_count > 0) and (weight_approve > weight_reject)
 
         # ── Build explanation ────────────────────────────────────────────────
         explanation = self._build_explanation(votes, consensus, approved, direction)

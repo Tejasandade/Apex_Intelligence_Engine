@@ -895,7 +895,7 @@ def find_sl(direction: str, entry: float, symbol: str = SYMBOL, trade_mode: str 
     return round(sl_price, 2), round(sl_dist, 2)
 
 # ─── SIZING ───────────────────────────────────────────────────────────────────
-def size_position(sl_dist: float, prob: float, entry: float, council_score: float = 0.7, direction: str = "LONG", symbol: str = SYMBOL) -> tuple[float, float]:
+def size_position(sl_dist: float, prob: float, entry: float, council_score: float = 0.7, direction: str = "LONG", symbol: str = SYMBOL) -> tuple[float, float, float]:
     sym = symbol.upper()
     # ── PROP FIRM MODE: Size directly to Challenge Target & Drawdown Limits ──
     if PROP_FIRM_MODE and prop_firm_manager:
@@ -909,7 +909,7 @@ def size_position(sl_dist: float, prob: float, entry: float, council_score: floa
             symbol=sym,
         )
         notional = round(lots * entry, 2)
-        return notional, risk_usd
+        return lots, risk_usd, notional
 
     # ── STANDARD BALANCE SIZING (Personal Account / Demo) ──
     if prob >= STRONG_PROB or council_score >= 0.80:
@@ -939,7 +939,7 @@ def size_position(sl_dist: float, prob: float, entry: float, council_score: floa
     lots = max(min_vol, round(raw_lots, 2))
     notional = round(lots * entry, 2)
     actual_risk = round(lots * sl_dist * contract_size, 2)
-    return notional, actual_risk
+    return lots, actual_risk, notional
 
 # ─── ENTRY EXECUTION ──────────────────────────────────────────────────────────
 def execute_signal(signal: TradingSignal, symbol: str = SYMBOL):
@@ -1021,13 +1021,8 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL):
     except Exception:
         pass
 
-    notional, risk_usd = size_position(sl_dist, prob, entry, council, direction, symbol=sym)
-    if notional <= 0: return
-
-    contract_size = 100.0 if ("GOLD" in sym or "XAU" in sym or "PAXG" in sym) else 1.0
-    entry_lots = round(risk_usd / max(sl_dist * contract_size, 0.0001), 2)
-    min_vol = 0.02 if "ETH" in sym else 0.01
-    entry_lots = max(min_vol, entry_lots)
+    entry_lots, risk_usd, notional = size_position(sl_dist, prob, entry, council, direction, symbol=sym)
+    if entry_lots <= 0 or notional <= 0: return
 
     now_t   = time.time()
     now_str = datetime.datetime.now().strftime("%H:%M:%S")
@@ -3163,6 +3158,11 @@ async def _telegram_command_loop():
 
 
 async def main():
+    if os.getenv("RAILWAY_PROJECT_ID") or os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_SERVICE_ID"):
+        print("🛑 [RAILWAY DETECTED] Cloud instance disabled in favor of local terminal execution.")
+        print("🛑 Exiting to eliminate duplicate Telegram messages and MT5 desync.")
+        return
+
     global _candle_queue
     _candle_queue = asyncio.Queue(maxsize=50)  # Must be created inside running event loop
     prewarm()
