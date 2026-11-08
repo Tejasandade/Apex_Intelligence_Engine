@@ -146,9 +146,12 @@ class MT5Broker:
 
         t_up = target.upper()
 
-        # Priority list for Bitcoin
+        # Priority list for Bitcoin (supports all prop firm brokers: XM, Eightcap, FTMO, ThinkMarkets)
         if "BTC" in t_up:
-            preferred = ["BTCUSD#", "BTCUSD", "BTCUSD.i", "BTCUSDm", "BTCUSDT"]
+            preferred = [
+                "BTCUSD#", "BTCUSD", "BTCUSD.i", "BTCUSDm", "BTCUSDT", "BTCUSDT#",
+                "BTCUSD.pro", "BTCUSD.m", "BTCUSD+", "BTCUSD_i", "BTC_USD"
+            ]
             for p in preferred:
                 info = mt5.symbol_info(p)
                 if info is not None:
@@ -157,16 +160,22 @@ class MT5Broker:
 
         # Priority list for Ethereum
         if "ETH" in t_up:
-            preferred = ["ETHUSD#", "ETHUSD", "ETHUSD.i", "ETHUSDm", "ETHUSDT"]
+            preferred = [
+                "ETHUSD#", "ETHUSD", "ETHUSD.i", "ETHUSDm", "ETHUSDT", "ETHUSDT#",
+                "ETHUSD.pro", "ETHUSD.m", "ETHUSD+", "ETHUSD_i", "ETH_USD"
+            ]
             for p in preferred:
                 info = mt5.symbol_info(p)
                 if info is not None:
                     mt5.symbol_select(p, True)
                     return p
 
-        # Priority list for Gold
+        # Priority list for Gold (XAU / PAXG)
         if "GOLD" in t_up or "XAU" in t_up or "PAXG" in t_up:
-            preferred = ["GOLD.i#", "GOLD#", "GOLD", "XAUUSD#", "XAUUSD", "GOLD.i"]
+            preferred = [
+                "GOLD.i#", "GOLD#", "GOLD", "XAUUSD#", "XAUUSD", "GOLD.i",
+                "XAUUSD.pro", "XAUUSD.m", "XAUUSD+", "XAUUSD_i", "XAUUSDm"
+            ]
             for p in preferred:
                 info = mt5.symbol_info(p)
                 if info is not None:
@@ -179,17 +188,23 @@ class MT5Broker:
             mt5.symbol_select(target, True)
             return target
 
-        # Fallback search
+        # Fallback search across available broker symbols
         clean_target = t_up.replace("USDT", "USD")
         symbols = mt5.symbols_get()
         if not symbols:
             return None
 
+        is_gold_search = ("GOLD" in t_up or "XAU" in t_up or "PAXG" in t_up)
         for s in symbols:
             name = s.name.upper()
-            if clean_target in name and not name.startswith("G") and not name.startswith("F"):
-                mt5.symbol_select(s.name, True)
-                return s.name
+            if is_gold_search:
+                if "XAU" in name or "GOLD" in name:
+                    mt5.symbol_select(s.name, True)
+                    return s.name
+            else:
+                if clean_target in name:
+                    mt5.symbol_select(s.name, True)
+                    return s.name
 
         return None
 

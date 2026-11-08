@@ -685,13 +685,17 @@ def update_session():
 def is_rollover_or_maintenance() -> tuple[bool, str]:
     """
     Detects daily broker server rollover spikes and maintenance windows.
-    Protects against artificial spread widening (e.g. 23:55-00:10 UTC on XM).
+    Protects against artificial spread widening (e.g. 21:50-22:15 UTC and 23:55-00:15 UTC).
     Configurable via APEX_WEEKEND_SHIELD (default true).
     """
     now_utc = datetime.datetime.now(datetime.timezone.utc)
-    # 1. Daily Broker Rollover window: 23:55 UTC to 00:10 UTC
-    if (now_utc.hour == 23 and now_utc.minute >= 55) or (now_utc.hour == 0 and now_utc.minute <= 10):
-        return True, "XM DAILY ROLLOVER WINDOW (23:55-00:10 UTC) — SPREAD SHIELD"
+    # 1. Daily Broker Rollover windows:
+    # A. 21:50 to 22:15 UTC (GMT+2 / GMT+3 broker midnight rollover: XM, Eightcap, IC Markets, ThinkMarkets)
+    if (now_utc.hour == 21 and now_utc.minute >= 50) or (now_utc.hour == 22 and now_utc.minute <= 15):
+        return True, "BROKER SERVER ROLLOVER WINDOW (21:50-22:15 UTC) — SPREAD SHIELD"
+    # B. 23:55 to 00:15 UTC (UTC midnight day rollover)
+    if (now_utc.hour == 23 and now_utc.minute >= 55) or (now_utc.hour == 0 and now_utc.minute <= 15):
+        return True, "UTC MIDNIGHT ROLLOVER WINDOW (23:55-00:15 UTC) — SPREAD SHIELD"
     # 2. Weekend Maintenance window on XM: Saturday 06:00 to 12:00 UTC
     weekend_shield_enabled = os.getenv("APEX_WEEKEND_SHIELD", "true").lower() == "true"
     if weekend_shield_enabled and now_utc.weekday() == 5 and (6 <= now_utc.hour < 12):
@@ -768,8 +772,8 @@ def can_trade_symbol(symbol: str = SYMBOL, direction: str = "LONG") -> tuple[boo
     if blackout:
         return False, f"NEWS BLACKOUT: {blackout_reason}"
 
-    # ── Metals CFD Weekend Closure Guard (XM MT5 closes Friday 21:00 UTC to Sunday 22:00 UTC) ──
-    if ("GOLD" in sym or "PAXG" in sym) and DEMO_MODE and BROKER_TYPE.upper() == "MT5":
+    # ── Metals CFD Weekend Closure Guard (MT5 Gold closes Friday 21:00 UTC to Sunday 22:00 UTC) ──
+    if ("GOLD" in sym or "PAXG" in sym) and BROKER_TYPE.upper() == "MT5":
         now_dt = datetime.datetime.now(datetime.timezone.utc)
         weekday = now_dt.weekday()  # 4=Friday, 5=Saturday, 6=Sunday
         hour = now_dt.hour
@@ -1275,7 +1279,51 @@ def _check_exit_for_symbol(sym: str):
     fav_dist = (cur - entry) if direction == "LONG" else (entry - cur)
     r_mult = fav_dist / sl_dist
     t_id = port.get("broker_ticket")
-    now_str = datetime.datetime.now().strftime("%H:%M:%S")
+    now_str = datetime.datetime.now(datetime.timezone.utc).strftime("%H:%M:%S")
+
+    # Anti-Tick Scalping: calculate seconds elapsed in trade to respect prop firm minimum duration rules
+    min_dur_sec = prop_firm_manager.get_min_trade_duration_sec() if (PROP_FIRM_MODE and prop_firm_manager) else 45
+    entry_ts = float(port.get("entry_time", 0.0))
+    time_in_trade_sec = (time.time() - entry_ts) if entry_ts > 0 else (dur_min * 60.0)
+    is_past_min_hold = (time_in_trade_sec >= min_dur_sec)
+
+    # ── FRIDAY WEEKEND AUTO-FLATTEN (Commodities & Non-Crypto Protection) ──
+    now_dt = datetime.datetime.now(datetime.timezone.utc)
+    if ("GOLD" in sym or "PAXG" in sym) and now_dt.weekday() == 4 and (now_dt.hour > 20 or (now_dt.hour == 20 and now_dt.minute >= 45)):
+        close(cur, "FRIDAY WEEKEND AUTO-FLATTEN (Metals market closes 22:00 UTC / Gap shield)")
+        return
+
+    # ── PRE-NEWS EVENT RISK SHIELD (High-Impact FOMC / CPI / NFP Protection) ──
+    if news_guard:
+        try:
+            nxt_ev = news_guard.get_next_event()
+            if nxt_ev and nxt_ev.get("mins_until", 999) <= 3.0:
+                ev_name = nxt_ev.get("event", "HIGH-IMPACT NEWS")
+                m_left = nxt_ev.get("mins_until", 0.0)
+                news_allowed = prop_firm_manager.is_news_trading_allowed() if (PROP_FIRM_MODE and prop_firm_manager) else True
+                if not news_allowed or r_mult >= 0.5:
+                    if is_past_min_hold:
+                        close(cur, f"PRE-NEWS RISK SHIELD ({ev_name} in {m_left:.1f}m)")
+                        return
+                elif r_mult >= 0.1 and port.get("risk_tier", 0) < 2:
+                    fee_buf = entry * (ROUNDTRIP_BPS * 1.5 / 10000.0)
+                    new_sl = entry + fee_buf if direction == "LONG" else entry - fee_buf
+                    port["sl_price"] = round(new_sl, 1)
+                    port["risk_tier"] = 2
+                    if DEMO_MODE and _active_broker is not None and t_id:
+                        async def _exec_modify_news(ticket_id, sl_v, tp_v):
+                            try:
+                                if hasattr(_active_broker, "modify_position_stops"):
+                                    await _active_broker.modify_position_stops(int(ticket_id), new_sl=sl_v, new_tp=tp_v)
+                            except Exception:
+                                pass
+                        try:
+                            import asyncio as _aio
+                            _aio.get_event_loop().create_task(_exec_modify_news(t_id, port["sl_price"], port["tp2_price"]))
+                        except Exception:
+                            pass
+        except Exception:
+            pass
 
     # 1. SL (Delegated to broker matching engine when active; otherwise managed in memory)
     if not (DEMO_MODE and port.get("broker_ticket")):
@@ -1332,7 +1380,7 @@ def _check_exit_for_symbol(sym: str):
                 pass
 
     # ── DYNAMIC EARLY PROFIT HARVEST: Violent OFI Reversal Protection ──
-    if r_mult >= 1.0:
+    if r_mult >= 1.0 and is_past_min_hold:
         try:
             m_eng = momentum_engines.get(sym, momentum_eng)
             mom_d = m_eng.get_diagnostics()
@@ -1396,7 +1444,7 @@ def _check_exit_for_symbol(sym: str):
 
     # ── DYNAMIC TIER 4: Dynamic Runner Chandelier Trail + Full TP2 + Stagnant Runner Harvest ──
     if port["phase"] == 2:
-        if not is_swing and r_mult >= 1.0 and dur_min >= 75.0:
+        if not is_swing and r_mult >= 1.0 and dur_min >= 75.0 and is_past_min_hold:
             try:
                 m_eng = momentum_engines.get(sym, momentum_eng)
                 mom_d = m_eng.get_diagnostics()
@@ -2853,12 +2901,14 @@ async def _broker_sync_loop():
                             p_profit = float(active_pos["profit"])
                             sl_dist_val = abs(p_entry - p_sl) if p_sl > 0 else (10.0 if "ETH" in sym else (5.0 if "GOLD" in sym else 300.0))
 
+                            p_time = float(active_pos.get("time", time.time()))
                             sym_port.update({
                                 "symbol": sym,
                                 "position": "OPEN",
                                 "direction": p_dir,
                                 "entry_price": p_entry,
-                                "entry_time": time.time(),
+                                "entry_time": p_time,
+                                "entry_lots": p_vol,
                                 "sl_price": p_sl,
                                 "sl_distance": sl_dist_val,
                                 "tp1_price": p_entry + sl_dist_val if p_dir == "LONG" else p_entry - sl_dist_val,
@@ -2874,6 +2924,8 @@ async def _broker_sync_loop():
                                              f"BROKER ADOPT [{sym}]: Linked active MT5 ticket {p_ticket} ({p_dir} {p_vol} {sym} @ ${p_entry:,.2f})")
                             if sym == PRIMARY_SYMBOL:
                                 portfolio.update(sym_port)
+                            if PROP_FIRM_MODE and prop_firm_manager:
+                                prop_firm_manager.update_multi_floating_pnl(portfolios)
                             state_manager.save_state(portfolio, account)
                 except Exception:
                     pass

@@ -196,7 +196,11 @@ FIRM_TEMPLATES: dict[str, dict[str, Any]] = {
                 "max_total_loss_pct": 6.0,
                 "total_safety_buffer_pct": 4.8,
                 "base_risk_pct": 0.5,
-                "max_concurrent_trades": 1,
+                "max_concurrent_trades": 2,
+                "weekend_holding_allowed": True,
+                "news_trading_allowed": True,
+                "min_trade_duration_sec": 45,
+                "daily_dd_type": "balance",
             },
             "phase1": {
                 "name": "Phase 1 (Assessment)",
@@ -207,6 +211,10 @@ FIRM_TEMPLATES: dict[str, dict[str, Any]] = {
                 "total_safety_buffer_pct": 6.5,
                 "base_risk_pct": 0.5,
                 "max_concurrent_trades": 2,
+                "weekend_holding_allowed": True,
+                "news_trading_allowed": True,
+                "min_trade_duration_sec": 45,
+                "daily_dd_type": "balance",
             },
             "phase2": {
                 "name": "Phase 2 (Verification)",
@@ -217,6 +225,10 @@ FIRM_TEMPLATES: dict[str, dict[str, Any]] = {
                 "total_safety_buffer_pct": 6.5,
                 "base_risk_pct": 0.5,
                 "max_concurrent_trades": 2,
+                "weekend_holding_allowed": True,
+                "news_trading_allowed": True,
+                "min_trade_duration_sec": 45,
+                "daily_dd_type": "balance",
             },
             "funded": {
                 "name": "Funded Master Account",
@@ -227,6 +239,10 @@ FIRM_TEMPLATES: dict[str, dict[str, Any]] = {
                 "total_safety_buffer_pct": 4.8,
                 "base_risk_pct": 0.4,
                 "max_concurrent_trades": 2,
+                "weekend_holding_allowed": True,
+                "news_trading_allowed": True,
+                "min_trade_duration_sec": 45,
+                "daily_dd_type": "balance",
             }
         }
     },
@@ -244,6 +260,10 @@ FIRM_TEMPLATES: dict[str, dict[str, Any]] = {
                 "total_safety_buffer_pct": 8.0,
                 "base_risk_pct": 0.5,
                 "max_concurrent_trades": 2,
+                "weekend_holding_allowed": False,
+                "news_trading_allowed": False,
+                "min_trade_duration_sec": 30,
+                "daily_dd_type": "equity",
             },
             "phase2": {
                 "name": "Phase 2 (Verification)",
@@ -254,6 +274,24 @@ FIRM_TEMPLATES: dict[str, dict[str, Any]] = {
                 "total_safety_buffer_pct": 8.0,
                 "base_risk_pct": 0.5,
                 "max_concurrent_trades": 2,
+                "weekend_holding_allowed": False,
+                "news_trading_allowed": False,
+                "min_trade_duration_sec": 30,
+                "daily_dd_type": "equity",
+            },
+            "swing": {
+                "name": "FTMO Swing Account",
+                "profit_target_pct": 10.0,
+                "max_daily_loss_pct": 5.0,
+                "daily_safety_buffer_pct": 4.0,
+                "max_total_loss_pct": 10.0,
+                "total_safety_buffer_pct": 8.0,
+                "base_risk_pct": 0.5,
+                "max_concurrent_trades": 2,
+                "weekend_holding_allowed": True,
+                "news_trading_allowed": True,
+                "min_trade_duration_sec": 30,
+                "daily_dd_type": "equity",
             },
             "funded": {
                 "name": "FTMO Trader (Funded)",
@@ -262,8 +300,12 @@ FIRM_TEMPLATES: dict[str, dict[str, Any]] = {
                 "daily_safety_buffer_pct": 4.0,
                 "max_total_loss_pct": 10.0,
                 "total_safety_buffer_pct": 8.0,
-                "base_risk_pct": 0.5,
+                "base_risk_pct": 0.4,
                 "max_concurrent_trades": 2,
+                "weekend_holding_allowed": False,
+                "news_trading_allowed": False,
+                "min_trade_duration_sec": 30,
+                "daily_dd_type": "equity",
             }
         }
     },
@@ -281,6 +323,10 @@ FIRM_TEMPLATES: dict[str, dict[str, Any]] = {
                 "total_safety_buffer_pct": 4.8,
                 "base_risk_pct": 0.5,
                 "max_concurrent_trades": 2,
+                "weekend_holding_allowed": True,
+                "news_trading_allowed": True,
+                "min_trade_duration_sec": 45,
+                "daily_dd_type": "balance",
             },
             "phase1": {
                 "name": "Stellar 2-Step (Phase 1)",
@@ -291,6 +337,10 @@ FIRM_TEMPLATES: dict[str, dict[str, Any]] = {
                 "total_safety_buffer_pct": 8.0,
                 "base_risk_pct": 0.5,
                 "max_concurrent_trades": 2,
+                "weekend_holding_allowed": True,
+                "news_trading_allowed": True,
+                "min_trade_duration_sec": 45,
+                "daily_dd_type": "equity",
             },
             "phase2": {
                 "name": "Stellar 2-Step (Phase 2)",
@@ -301,6 +351,10 @@ FIRM_TEMPLATES: dict[str, dict[str, Any]] = {
                 "total_safety_buffer_pct": 8.0,
                 "base_risk_pct": 0.5,
                 "max_concurrent_trades": 2,
+                "weekend_holding_allowed": True,
+                "news_trading_allowed": True,
+                "min_trade_duration_sec": 45,
+                "daily_dd_type": "equity",
             },
             "funded": {
                 "name": "FundedNext Master (Funded)",
@@ -309,8 +363,12 @@ FIRM_TEMPLATES: dict[str, dict[str, Any]] = {
                 "daily_safety_buffer_pct": 4.0,
                 "max_total_loss_pct": 10.0,
                 "total_safety_buffer_pct": 8.0,
-                "base_risk_pct": 0.5,
+                "base_risk_pct": 0.4,
                 "max_concurrent_trades": 2,
+                "weekend_holding_allowed": True,
+                "news_trading_allowed": True,
+                "min_trade_duration_sec": 45,
+                "daily_dd_type": "equity",
             }
         }
     },
@@ -319,6 +377,20 @@ FIRM_TEMPLATES: dict[str, dict[str, Any]] = {
         "sizes": [5000, 10000, 20000, 60000, 100000],
         "default_size": 5000,
         "phases": {
+            "highstakes": {
+                "name": "High Stakes (Phase 1)",
+                "profit_target_pct": 8.0,
+                "max_daily_loss_pct": 5.0,
+                "daily_safety_buffer_pct": 4.0,
+                "max_total_loss_pct": 10.0,
+                "total_safety_buffer_pct": 8.0,
+                "base_risk_pct": 0.5,
+                "max_concurrent_trades": 2,
+                "weekend_holding_allowed": False,
+                "news_trading_allowed": True,
+                "min_trade_duration_sec": 60,
+                "daily_dd_type": "equity",
+            },
             "bootcamp": {
                 "name": "Bootcamp (Phase 1)",
                 "profit_target_pct": 6.0,
@@ -328,6 +400,10 @@ FIRM_TEMPLATES: dict[str, dict[str, Any]] = {
                 "total_safety_buffer_pct": 4.8,
                 "base_risk_pct": 0.4,
                 "max_concurrent_trades": 1,
+                "weekend_holding_allowed": False,
+                "news_trading_allowed": True,
+                "min_trade_duration_sec": 60,
+                "daily_dd_type": "balance",
             },
             "hyper": {
                 "name": "Hyper Growth (Phase 1)",
@@ -338,6 +414,10 @@ FIRM_TEMPLATES: dict[str, dict[str, Any]] = {
                 "total_safety_buffer_pct": 8.0,
                 "base_risk_pct": 0.5,
                 "max_concurrent_trades": 2,
+                "weekend_holding_allowed": False,
+                "news_trading_allowed": True,
+                "min_trade_duration_sec": 60,
+                "daily_dd_type": "balance",
             },
             "phase2": {
                 "name": "Phase 2 Verification",
@@ -348,6 +428,10 @@ FIRM_TEMPLATES: dict[str, dict[str, Any]] = {
                 "total_safety_buffer_pct": 6.5,
                 "base_risk_pct": 0.5,
                 "max_concurrent_trades": 2,
+                "weekend_holding_allowed": False,
+                "news_trading_allowed": True,
+                "min_trade_duration_sec": 60,
+                "daily_dd_type": "equity",
             },
             "funded": {
                 "name": "The5ers Funded Trader",
@@ -358,6 +442,10 @@ FIRM_TEMPLATES: dict[str, dict[str, Any]] = {
                 "total_safety_buffer_pct": 4.8,
                 "base_risk_pct": 0.4,
                 "max_concurrent_trades": 2,
+                "weekend_holding_allowed": False,
+                "news_trading_allowed": True,
+                "min_trade_duration_sec": 60,
+                "daily_dd_type": "equity",
             }
         }
     },
@@ -366,6 +454,20 @@ FIRM_TEMPLATES: dict[str, dict[str, Any]] = {
         "sizes": [5000, 10000, 25000, 50000, 100000],
         "default_size": 5000,
         "phases": {
+            "1-step": {
+                "name": "1-Step Evaluation",
+                "profit_target_pct": 10.0,
+                "max_daily_loss_pct": 3.0,
+                "daily_safety_buffer_pct": 2.25,
+                "max_total_loss_pct": 6.0,
+                "total_safety_buffer_pct": 4.8,
+                "base_risk_pct": 0.5,
+                "max_concurrent_trades": 2,
+                "weekend_holding_allowed": True,
+                "news_trading_allowed": False,
+                "min_trade_duration_sec": 45,
+                "daily_dd_type": "equity",
+            },
             "phase1": {
                 "name": "Student (Phase 1)",
                 "profit_target_pct": 8.0,
@@ -375,6 +477,10 @@ FIRM_TEMPLATES: dict[str, dict[str, Any]] = {
                 "total_safety_buffer_pct": 8.0,
                 "base_risk_pct": 0.5,
                 "max_concurrent_trades": 2,
+                "weekend_holding_allowed": False,
+                "news_trading_allowed": False,
+                "min_trade_duration_sec": 45,
+                "daily_dd_type": "equity",
             },
             "phase2": {
                 "name": "Practitioner (Phase 2)",
@@ -385,6 +491,10 @@ FIRM_TEMPLATES: dict[str, dict[str, Any]] = {
                 "total_safety_buffer_pct": 8.0,
                 "base_risk_pct": 0.5,
                 "max_concurrent_trades": 2,
+                "weekend_holding_allowed": False,
+                "news_trading_allowed": False,
+                "min_trade_duration_sec": 45,
+                "daily_dd_type": "equity",
             },
             "funded": {
                 "name": "Master (Funded)",
@@ -395,6 +505,108 @@ FIRM_TEMPLATES: dict[str, dict[str, Any]] = {
                 "total_safety_buffer_pct": 8.0,
                 "base_risk_pct": 0.5,
                 "max_concurrent_trades": 2,
+                "weekend_holding_allowed": False,
+                "news_trading_allowed": False,
+                "min_trade_duration_sec": 45,
+                "daily_dd_type": "equity",
+            }
+        }
+    },
+    "alphacapital": {
+        "name": "Alpha Capital Group",
+        "sizes": [10000, 25000, 50000, 100000, 200000],
+        "default_size": 10000,
+        "phases": {
+            "phase1": {
+                "name": "Alpha Pro (Phase 1)",
+                "profit_target_pct": 8.0,
+                "max_daily_loss_pct": 5.0,
+                "daily_safety_buffer_pct": 4.0,
+                "max_total_loss_pct": 10.0,
+                "total_safety_buffer_pct": 8.0,
+                "base_risk_pct": 0.5,
+                "max_concurrent_trades": 2,
+                "weekend_holding_allowed": False,
+                "news_trading_allowed": True,
+                "min_trade_duration_sec": 45,
+                "daily_dd_type": "balance",
+            },
+            "phase2": {
+                "name": "Alpha Pro (Phase 2)",
+                "profit_target_pct": 5.0,
+                "max_daily_loss_pct": 5.0,
+                "daily_safety_buffer_pct": 4.0,
+                "max_total_loss_pct": 10.0,
+                "total_safety_buffer_pct": 8.0,
+                "base_risk_pct": 0.5,
+                "max_concurrent_trades": 2,
+                "weekend_holding_allowed": False,
+                "news_trading_allowed": True,
+                "min_trade_duration_sec": 45,
+                "daily_dd_type": "balance",
+            },
+            "funded": {
+                "name": "Alpha Qualified Trader",
+                "profit_target_pct": 0.0,
+                "max_daily_loss_pct": 5.0,
+                "daily_safety_buffer_pct": 4.0,
+                "max_total_loss_pct": 10.0,
+                "total_safety_buffer_pct": 8.0,
+                "base_risk_pct": 0.4,
+                "max_concurrent_trades": 2,
+                "weekend_holding_allowed": False,
+                "news_trading_allowed": True,
+                "min_trade_duration_sec": 45,
+                "daily_dd_type": "balance",
+            }
+        }
+    },
+    "toptier": {
+        "name": "TopTier Trader",
+        "sizes": [10000, 25000, 50000, 100000, 200000],
+        "default_size": 10000,
+        "phases": {
+            "phase1": {
+                "name": "TopTier Phase 1",
+                "profit_target_pct": 10.0,
+                "max_daily_loss_pct": 5.0,
+                "daily_safety_buffer_pct": 4.0,
+                "max_total_loss_pct": 10.0,
+                "total_safety_buffer_pct": 8.0,
+                "base_risk_pct": 0.5,
+                "max_concurrent_trades": 2,
+                "weekend_holding_allowed": False,
+                "news_trading_allowed": False,
+                "min_trade_duration_sec": 60,
+                "daily_dd_type": "balance",
+            },
+            "phase2": {
+                "name": "TopTier Phase 2",
+                "profit_target_pct": 5.0,
+                "max_daily_loss_pct": 5.0,
+                "daily_safety_buffer_pct": 4.0,
+                "max_total_loss_pct": 10.0,
+                "total_safety_buffer_pct": 8.0,
+                "base_risk_pct": 0.5,
+                "max_concurrent_trades": 2,
+                "weekend_holding_allowed": False,
+                "news_trading_allowed": False,
+                "min_trade_duration_sec": 60,
+                "daily_dd_type": "balance",
+            },
+            "funded": {
+                "name": "TopTier Funded Trader",
+                "profit_target_pct": 0.0,
+                "max_daily_loss_pct": 5.0,
+                "daily_safety_buffer_pct": 4.0,
+                "max_total_loss_pct": 10.0,
+                "total_safety_buffer_pct": 8.0,
+                "base_risk_pct": 0.4,
+                "max_concurrent_trades": 2,
+                "weekend_holding_allowed": False,
+                "news_trading_allowed": False,
+                "min_trade_duration_sec": 60,
+                "daily_dd_type": "balance",
             }
         }
     },
@@ -412,6 +624,10 @@ FIRM_TEMPLATES: dict[str, dict[str, Any]] = {
                 "total_safety_buffer_pct": 8.0,
                 "base_risk_pct": 0.5,
                 "max_concurrent_trades": 2,
+                "weekend_holding_allowed": True,
+                "news_trading_allowed": True,
+                "min_trade_duration_sec": 45,
+                "daily_dd_type": "balance",
             }
         }
     }
@@ -464,7 +680,15 @@ class PropFirmManager:
                 closing_daily_pnl=self.daily_realized_pnl,
             )
             self.today_date = current_utc_date
-            self.day_start_balance = self.virtual_balance
+
+            # Universal Daily Drawdown baseline: balance-based vs equity-based
+            dd_type = str(self.config.get("daily_dd_type", "balance")).lower()
+            if dd_type == "equity":
+                # Prop firms like FTMO & Funding Pips anchor to midnight equity if higher
+                self.day_start_balance = max(self.virtual_balance, self.virtual_balance + self.daily_unrealized_pnl)
+            else:
+                self.day_start_balance = self.virtual_balance
+
             self.daily_realized_pnl = 0.0
             self.daily_unrealized_pnl = 0.0
             if self.status == "DAILY_HALT":
@@ -643,6 +867,9 @@ class PropFirmManager:
         contract_size = 1.0
         step = 0.01
         min_v = 0.01
+        max_v = 100.0
+        tick_val = 0.0
+        tick_sz = 0.0
 
         if "GOLD" in sym_upper or "XAU" in sym_upper or "PAXG" in sym_upper:
             contract_size = 100.0   # 1 standard lot = 100 oz
@@ -660,11 +887,20 @@ class PropFirmManager:
             term = mt5.terminal_info()
             if term and term.connected:
                 if "BTC" in sym_upper:
-                    cands = ["BTCUSD#", "BTCUSD", "BTCUSD.i", "BTCUSDm", symbol, f"{symbol}#"]
+                    cands = [
+                        "BTCUSD#", "BTCUSD", "BTCUSD.i", "BTCUSDm", "BTCUSDT", "BTCUSDT#",
+                        "BTCUSD.pro", "BTCUSD.m", "BTCUSD+", "BTCUSD_i", symbol, f"{symbol}#"
+                    ]
                 elif "ETH" in sym_upper:
-                    cands = ["ETHUSD#", "ETHUSD", "ETHUSD.i", "ETHUSDm", symbol, f"{symbol}#"]
+                    cands = [
+                        "ETHUSD#", "ETHUSD", "ETHUSD.i", "ETHUSDm", "ETHUSDT", "ETHUSDT#",
+                        "ETHUSD.pro", "ETHUSD.m", "ETHUSD+", "ETHUSD_i", symbol, f"{symbol}#"
+                    ]
                 elif "GOLD" in sym_upper or "XAU" in sym_upper or "PAXG" in sym_upper:
-                    cands = ["GOLD.i#", "GOLD#", "GOLD", "XAUUSD#", "XAUUSD", symbol, f"{symbol}#"]
+                    cands = [
+                        "GOLD.i#", "GOLD#", "GOLD", "XAUUSD#", "XAUUSD", "GOLD.i",
+                        "XAUUSD.pro", "XAUUSD.m", "XAUUSD+", "XAUUSD_i", symbol, f"{symbol}#"
+                    ]
                 else:
                     cands = [symbol, f"{symbol}#"]
 
@@ -674,18 +910,38 @@ class PropFirmManager:
                         contract_size = float(getattr(s_info, "trade_contract_size", contract_size))
                         step = float(getattr(s_info, "volume_step", step))
                         min_v = float(getattr(s_info, "volume_min", min_v))
+                        max_v = float(getattr(s_info, "volume_max", 100.0))
+                        tick_val = float(getattr(s_info, "trade_tick_value", 0.0))
+                        tick_sz = float(getattr(s_info, "trade_tick_size", 0.0))
                         break
         except Exception:
             pass
 
-        raw_lots = risk_usd / max(sl_distance * contract_size, 0.0001)
+        if tick_val > 0 and tick_sz > 0:
+            risk_per_lot = (sl_distance / tick_sz) * tick_val
+            raw_lots = risk_usd / max(risk_per_lot, 0.0001)
+        else:
+            risk_per_lot = sl_distance * contract_size
+            raw_lots = risk_usd / max(risk_per_lot, 0.0001)
 
-        # Clamp to broker volume step
-        lots = max(min_v, round(raw_lots / step) * step)
+        # Clamp to broker volume step and limits
+        lots = max(min_v, min(max_v, round(raw_lots / step) * step))
         lots = round(lots, 2)
 
-        actual_risk_usd = round(lots * sl_distance * contract_size, 2)
+        actual_risk_usd = round(lots * risk_per_lot, 2)
         return lots, actual_risk_usd
+
+    def is_weekend_holding_allowed(self) -> bool:
+        """Returns whether the active prop firm allows holding trades over Friday close."""
+        return bool(self.config.get("weekend_holding_allowed", True))
+
+    def is_news_trading_allowed(self) -> bool:
+        """Returns whether the active prop firm allows trading through high-impact news."""
+        return bool(self.config.get("news_trading_allowed", True))
+
+    def get_min_trade_duration_sec(self) -> int:
+        """Returns the anti-tick scalping minimum hold duration in seconds."""
+        return int(self.config.get("min_trade_duration_sec", 45))
 
     def on_trade_closed(self, pnl_usd: float, exit_reason: str = "") -> None:
         """Update virtual balance, daily stats, and target progression upon trade close."""
