@@ -1085,6 +1085,23 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     // State tracking for audio alerts & toasts
     let knownPositions = {};
     let lastKnownTradeCount = null;
+    let sharedAudioCtx = null;
+
+    function getAudioContext() {
+      if (!sharedAudioCtx) {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (AudioCtx) sharedAudioCtx = new AudioCtx();
+      }
+      if (sharedAudioCtx && sharedAudioCtx.state === 'suspended') {
+        sharedAudioCtx.resume().catch(() => {});
+      }
+      return sharedAudioCtx;
+    }
+
+    // Auto-unlock audio on first user interaction
+    ['click', 'touchstart', 'keydown'].forEach(evt => {
+      document.addEventListener(evt, () => getAudioContext(), { passive: true });
+    });
 
     function toggleAudio() {
       audioEnabled = !audioEnabled;
@@ -1094,6 +1111,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         text.textContent = 'Audio: ON';
         icon.innerHTML = '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>';
         showToast('AUDIO ALERTS ENABLED', 'Execution chimes active', 'info');
+        playChime(true); // Test chime to confirm audio works
       } else {
         text.textContent = 'Audio: OFF';
         icon.innerHTML = '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1="23" y1="9" x2="17" y2="15"></line><line x1="17" y1="9" x2="23" y2="15"></line>';
@@ -1103,27 +1121,51 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     function playChime(isWin = true) {
       if (!audioEnabled) return;
       try {
-        const AudioCtx = window.AudioContext || window.webkitAudioContext;
-        if (!AudioCtx) return;
-        const ctx = new AudioCtx();
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-        osc.type = 'sine';
-        const now = ctx.currentTime;
-        if (isWin) {
-          osc.frequency.setValueAtTime(587.33, now); // D5
-          osc.frequency.exponentialRampToValueAtTime(880.00, now + 0.1); // A5
+        const ctx = getAudioContext();
+        if (!ctx) return;
+        if (ctx.state === 'suspended') {
+          ctx.resume().then(() => _emitChime(ctx, isWin)).catch(() => {});
         } else {
-          osc.frequency.setValueAtTime(440.00, now); // A4
-          osc.frequency.exponentialRampToValueAtTime(349.23, now + 0.12); // F4
+          _emitChime(ctx, isWin);
         }
-        gain.gain.setValueAtTime(0.08, now);
-        gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.35);
-        osc.start(now);
-        osc.stop(now + 0.35);
       } catch (e) {}
+    }
+
+    function _emitChime(ctx, isWin) {
+      const now = ctx.currentTime;
+      const osc1 = ctx.createOscillator();
+      const osc2 = ctx.createOscillator();
+      const gain = ctx.createGain();
+
+      osc1.connect(gain);
+      osc2.connect(gain);
+      gain.connect(ctx.destination);
+
+      osc1.type = 'sine';
+      osc2.type = 'triangle';
+
+      if (isWin) {
+        // Melodic ascending major chime: C5 -> G5
+        osc1.frequency.setValueAtTime(523.25, now);
+        osc1.frequency.exponentialRampToValueAtTime(783.99, now + 0.12);
+        osc2.frequency.setValueAtTime(659.25, now);
+        osc2.frequency.exponentialRampToValueAtTime(1046.50, now + 0.15);
+      } else {
+        // Muted descending tone: A4 -> F4
+        osc1.frequency.setValueAtTime(440.00, now);
+        osc1.frequency.exponentialRampToValueAtTime(329.63, now + 0.14);
+        osc2.frequency.setValueAtTime(349.23, now);
+        osc2.frequency.exponentialRampToValueAtTime(261.63, now + 0.14);
+      }
+
+      gain.gain.setValueAtTime(0.0001, now);
+      gain.gain.linearRampToValueAtTime(0.28, now + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.45);
+
+      osc1.start(now);
+      osc2.start(now);
+      osc1.stop(now + 0.45);
+      osc2.stop(now + 0.45);
     }
 
     function showToast(title, body, type = 'info') {
