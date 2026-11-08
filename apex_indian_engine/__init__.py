@@ -6,3 +6,4 @@ Powered by Angel One SmartAPI WebSocket 2.0 and Black-Scholes Greeks.
 """
 
 __version__ = "1.0.0"
+

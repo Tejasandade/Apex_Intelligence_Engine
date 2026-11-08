@@ -19,3 +19,4 @@ echo [%date% %time%] Indian Engine process stopped.
 echo Auto-restarting in 5 seconds (Press Ctrl+C to stop)...
 timeout /t 5 >nul
 goto run_loop
+

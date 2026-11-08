@@ -43,6 +43,36 @@ class GreeksEngine:
         # 7.0% Reserve Bank of India (RBI) 91-day T-bill repo rate
         self.r = risk_free_rate
 
+    def calc_black_scholes(
+        self,
+        S: float,
+        K: float,
+        T: float,
+        r: float = 0.07,
+        sigma: float = 0.15,
+        option_type: str = "CE",
+    ) -> Any:
+        """Standard Black-Scholes theoretical pricing for option contracts."""
+        t = max(T, 0.0001)
+        sig = max(sigma, 0.01)
+        d1 = (math.log(S / K) + (r + 0.5 * sig * sig) * t) / (sig * math.sqrt(t))
+        d2 = d1 - sig * math.sqrt(t)
+
+        opt = option_type.upper()
+        if opt == "CE":
+            price = S * _norm_cdf(d1) - K * math.exp(-r * t) * _norm_cdf(d2)
+            delta = _norm_cdf(d1)
+        else:
+            price = K * math.exp(-r * t) * _norm_cdf(-d2) - S * _norm_cdf(-d1)
+            delta = _norm_cdf(d1) - 1.0
+
+        class BSPricingResult:
+            def __init__(self, p: float, d: float):
+                self.price = round(max(p, 0.5), 2)
+                self.delta = round(d, 3)
+
+        return BSPricingResult(price, delta)
+
     def calculate_greeks(
         self,
         spot: float,
@@ -139,3 +169,4 @@ class GreeksEngine:
                 break
 
         return max(0.01, min(iv, 2.5))
+

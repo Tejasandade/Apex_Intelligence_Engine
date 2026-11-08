@@ -69,24 +69,25 @@ class IndianRiskManager:
             self.halt_until_ts = 0.0
             self.save_state()
 
-    def can_enter_trade(self, now_time: Optional[dtime] = None) -> tuple[bool, str]:
+    def can_enter_trade(self, now_time: Optional[dtime] = None, skip_time_check: bool = False) -> tuple[bool, str]:
         """
         Validates whether opening a new option trade is permitted right now.
         Checks IST market hours, killzones, daily loss limits, and trade caps.
         """
         self.check_day_reset()
 
-        # 1. Trading Schedule & Kill Zone Check
-        cur_t = now_time or datetime.now().time()
-        if cur_t < self.schedule.trade_start:
-            return False, f"Pre-market / opening discovery window (Trading starts at {self.schedule.trade_start.strftime('%H:%M')} IST)"
+        if not skip_time_check:
+            # 1. Trading Schedule & Kill Zone Check
+            cur_t = now_time or datetime.now().time()
+            if cur_t < self.schedule.trade_start:
+                return False, f"Pre-market / opening discovery window (Trading starts at {self.schedule.trade_start.strftime('%H:%M')} IST)"
 
-        if cur_t >= self.schedule.afternoon_killzone_end:
-            return False, f"Afternoon session cutoff passed ({self.schedule.afternoon_killzone_end.strftime('%H:%M')} IST) — No new entries"
+            if cur_t >= self.schedule.afternoon_killzone_end:
+                return False, f"Afternoon session cutoff passed ({self.schedule.afternoon_killzone_end.strftime('%H:%M')} IST) — No new entries"
 
-        # Check Lunch Chop
-        if self.schedule.lunch_chop_start <= cur_t < self.schedule.lunch_chop_end:
-            return False, "European open lunch chop (11:30-13:00 IST) — Trading paused to avoid sideways Theta burn"
+            # Check Lunch Chop
+            if self.schedule.lunch_chop_start <= cur_t < self.schedule.lunch_chop_end:
+                return False, "European open lunch chop (11:30-13:00 IST) — Trading paused to avoid sideways Theta burn"
 
         # 2. Cooling pause from consecutive losses
         if time.time() < self.halt_until_ts:
@@ -108,6 +109,25 @@ class IndianRiskManager:
             return False, self.halt_reason
 
         return True, "CLEAR"
+
+    can_trade = can_enter_trade
+
+    def calculate_position_size(
+        self,
+        index_name: str,
+        option_premium: float,
+        sl_points: float,
+        lot_size: int,
+        conviction: float = 0.60,
+    ) -> dict[str, Any]:
+        """Calculates sizing dictionary compatible with engine order execution."""
+        lots, qty, risk_inr = self.calculate_lot_size(sl_points=sl_points, lot_size=lot_size, conviction=conviction)
+        return {
+            "lots": lots,
+            "quantity": qty,
+            "risk_inr": risk_inr,
+            "premium": option_premium,
+        }
 
     def calculate_lot_size(
         self,

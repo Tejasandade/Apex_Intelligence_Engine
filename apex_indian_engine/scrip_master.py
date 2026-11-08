@@ -218,3 +218,11 @@ class ScripMaster:
             target_strike = atm_strike + (offset_steps * step)
 
         return self.resolve_strike_contract(index_name, exp, target_strike, opt_upper)
+
+    def get_atm_strike(self, index_name: str, spot_price: float) -> float:
+        """Returns the rounded ATM strike price float."""
+        spec = INDEX_SPECS.get(index_name.upper())
+        step = spec.step_size if spec else 100.0
+        return float(round(spot_price / step) * step)
+
+    get_option_contract = resolve_strike_contract

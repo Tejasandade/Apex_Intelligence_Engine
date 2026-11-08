@@ -14,6 +14,7 @@ from datetime import datetime
 from typing import Any, Optional
 
 from apex_indian_engine.config import FrictionModel
+from apex_indian_engine.theta_harvester import ThetaHarvester
 
 logger = logging.getLogger("apex.indian.executor")
 
@@ -54,6 +55,7 @@ class IndianOrderExecutor:
         self.active_trade: Optional[ActiveOptionTrade] = None
         self.trade_history: list[dict[str, Any]] = []
         self.friction = FrictionModel()
+        self.theta_harvester = ThetaHarvester(max_stagnant_minutes=35.0, reversal_r_threshold=1.0)
 
     def has_open_position(self) -> bool:
         return self.active_trade is not None and self.active_trade.status == "OPEN"
@@ -131,10 +133,10 @@ class IndianOrderExecutor:
         )
         return trade
 
-    def update_ticks(self, current_option_price: float) -> Optional[dict[str, Any]]:
+    def update_ticks(self, current_option_price: float, underlying_momentum_reversed: bool = False) -> Optional[dict[str, Any]]:
         """
         Process tick updates for the active position.
-        Evaluates Stop Loss, Break-Even Lock (+1.0R), TP1, and TP2.
+        Evaluates Stop Loss, Break-Even Lock (+1.0R), TP1, TP2, and Theta Decay / Reversal Harvesting.
         Returns closed trade dict if exited, else None.
         """
         if not self.has_open_position():
@@ -155,7 +157,18 @@ class IndianOrderExecutor:
         if cur <= trade.sl_price:
             return self.close_trade(cur, reason="STOP LOSS HIT")
 
-        # 2. Dynamic Tier 1: Risk Reduction (+0.8R) -> Tighten SL to -0.25R
+        # 2. Theta Decay & Reversal Harvesting Check
+        should_harvest, harvest_reason = self.theta_harvester.evaluate_harvest(
+            entry_price=trade.entry_price,
+            current_price=cur,
+            sl_price=trade.sl_price,
+            entry_time=trade.entry_time,
+            underlying_momentum_reversed=underlying_momentum_reversed,
+        )
+        if should_harvest:
+            return self.close_trade(cur, reason=harvest_reason)
+
+        # 3. Dynamic Tier 1: Risk Reduction (+0.8R) -> Tighten SL to -0.25R
         if trade.trailing_tier < 1 and r_mult >= 0.8:
             new_sl = round(entry - (sl_dist * 0.25), 2)
             trade.sl_price = new_sl
