@@ -57,3 +57,4 @@ class ThetaHarvester:
         # 3. Expiry Afternoon Time Decay Acceleration (After 14:30 IST)
         # On weekly expiry day, options after 14:30 decay exponentially
         return False, "HOLD"
+

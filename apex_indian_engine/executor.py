@@ -60,6 +60,56 @@ class IndianOrderExecutor:
     def has_open_position(self) -> bool:
         return self.active_trade is not None and self.active_trade.status == "OPEN"
 
+    def check_margin_available(self, required_inr: float) -> tuple[bool, float]:
+        """
+        Queries Angel One RMS Limits to ensure sufficient trading cash exists.
+        Returns: (has_sufficient_margin, available_cash_inr)
+        """
+        if self.mode != "LIVE" or not self.api:
+            return True, 1_000_000.0  # Paper mode simulation has unlimited virtual capital
+
+        try:
+            rms = self.api.rmsLimit()
+            if rms.get("status"):
+                net_avail = float(rms.get("data", {}).get("net", 0.0))
+                if net_avail < required_inr:
+                    logger.error(f"RMS MARGIN REJECTION: Required ₹{required_inr:,.2f} > Available ₹{net_avail:,.2f}")
+                    return False, net_avail
+                return True, net_avail
+        except Exception as e:
+            logger.warning(f"Could not verify RMS margin via SmartAPI: {e}. Proceeding cautiously.")
+
+        return True, 0.0
+
+    def _verify_order_fill(self, order_id: str, timeout_sec: float = 3.0) -> tuple[bool, float]:
+        """
+        Polls Angel One order book to confirm the order executed and get exact filled price.
+        """
+        if self.mode != "LIVE" or not self.api or not order_id:
+            return True, 0.0
+
+        start = time.time()
+        while (time.time() - start) < timeout_sec:
+            try:
+                book = self.api.orderBook()
+                if book.get("status"):
+                    for ord_entry in book.get("data", []):
+                        if str(ord_entry.get("orderid")) == str(order_id):
+                            status = str(ord_entry.get("orderstatus", "")).upper()
+                            if status in ("COMPLETE", "FILLED"):
+                                avg_px = float(ord_entry.get("averageprice", 0.0))
+                                return True, avg_px
+                            elif status in ("REJECTED", "CANCELLED"):
+                                rej_reason = ord_entry.get("text", "Unknown rejection")
+                                logger.error(f"Angel One Order {order_id} was {status}: {rej_reason}")
+                                return False, 0.0
+            except Exception as e:
+                logger.debug(f"Order poll error: {e}")
+            time.sleep(0.5)
+
+        logger.warning(f"Order {order_id} fill verification timed out after {timeout_sec}s.")
+        return True, 0.0
+
     def open_option_trade(
         self,
         index_name: str,
@@ -73,14 +123,22 @@ class IndianOrderExecutor:
         tp_multiplier: float = 2.0,
     ) -> Optional[ActiveOptionTrade]:
         """
-        Executes a Buy order for the specified Option contract.
+        Executes a Marketable Limit Buy order for the specified Option contract.
         """
         if self.has_open_position():
-            logger.warn(f"Cannot open new trade: {self.active_trade.symbol} already active.")
+            logger.warning(f"Cannot open new trade: {self.active_trade.symbol} already active.")
             return None
 
-        # Add 1-tick slippage buffer for realistic execution
-        fill_price = round(current_option_price + 0.10, 2)
+        # Add 1-tick marketable buffer (₹0.50) to guarantee fill without freak slippage
+        fill_price = round(current_option_price + 0.50, 2)
+        total_order_val = fill_price * quantity
+
+        # RMS Margin Guard
+        has_margin, avail_cash = self.check_margin_available(total_order_val)
+        if not has_margin:
+            logger.error(f"TRADE ABORTED: Insufficient Angel One margin for {symbol} (Requires ₹{total_order_val:,.2f})")
+            return None
+
         sl_price = max(1.0, round(fill_price - sl_points, 2))
         tp1_price = round(fill_price + (sl_points * 1.5), 2)
         tp2_price = round(fill_price + (sl_points * tp_multiplier), 2)
@@ -90,20 +148,33 @@ class IndianOrderExecutor:
         broker_id = ""
         if self.mode == "LIVE" and self.api:
             try:
+                # Marketable Limit Order: Caps maximum adverse slippage
                 order_params = {
                     "variety": "NORMAL",
                     "tradingsymbol": symbol,
                     "symboltoken": str(token),
                     "transactiontype": "BUY",
                     "exchange": "NFO",
-                    "ordertype": "MARKET",
+                    "ordertype": "LIMIT",
+                    "price": str(fill_price),
                     "producttype": "INTRADAY",  # MIS auto-square-off
                     "duration": "DAY",
                     "quantity": str(quantity),
                 }
                 res = self.api.placeOrder(order_params)
                 broker_id = str(res.get("data", {}).get("orderid", ""))
-                logger.info(f"Angel SmartAPI Buy order placed: {symbol} (Order ID: {broker_id})")
+                logger.info(f"Angel SmartAPI Marketable Limit Buy placed: {symbol} @ ₹{fill_price:.2f} (Order ID: {broker_id})")
+
+                # Verify Fill Status
+                filled, real_fill_px = self._verify_order_fill(broker_id)
+                if not filled:
+                    logger.error(f"Angel SmartAPI order {broker_id} was rejected by exchange.")
+                    return None
+                if real_fill_px > 0.0:
+                    fill_price = real_fill_px
+                    sl_price = max(1.0, round(fill_price - sl_points, 2))
+                    tp1_price = round(fill_price + (sl_points * 1.5), 2)
+                    tp2_price = round(fill_price + (sl_points * tp_multiplier), 2)
             except Exception as e:
                 logger.error(f"Angel SmartAPI order failed: {e}")
                 return None

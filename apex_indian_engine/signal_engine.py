@@ -57,8 +57,8 @@ class IndianSignalEngine:
         self.candles_5m: list[dict[str, Any]] = []
         self.min_consensus_threshold = 0.55
 
-        # Initialize ML Predictor (XGBoost models for BankNifty)
-        self.ml_predictor = IndianMLPredictor()
+        # Initialize ML Predictor (XGBoost models for BankNifty / Nifty)
+        self.ml_predictor = IndianMLPredictor(index_name=self.index_name)
 
         # Initialize OI Wall Shield (buffer: 60 pts for BankNifty, 30 pts for Nifty)
         wall_buf = 60.0 if "BANK" in self.index_name else 30.0

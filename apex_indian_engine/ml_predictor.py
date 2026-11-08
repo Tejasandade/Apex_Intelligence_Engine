@@ -27,11 +27,29 @@ class IndianMLPredictor:
 
     def __init__(
         self,
-        trending_model_path: str = "data/models/banknifty_india_equity_trending.json",
-        ranging_model_path: str = "data/models/banknifty_india_equity_ranging.json",
+        index_name: str = "BANKNIFTY",
+        trending_model_path: Optional[str] = None,
+        ranging_model_path: Optional[str] = None,
     ):
-        self.trending_path = Path(trending_model_path)
-        self.ranging_path = Path(ranging_model_path)
+        self.index_name = index_name.upper()
+        idx_prefix = self.index_name.lower()
+
+        default_trend = f"data/models/{idx_prefix}_india_equity_trending.json"
+        default_range = f"data/models/{idx_prefix}_india_equity_ranging.json"
+
+        # Fallback to banknifty model if dedicated index model is not present
+        if trending_model_path:
+            self.trending_path = Path(trending_model_path)
+        else:
+            cand = Path(default_trend)
+            self.trending_path = cand if cand.exists() else Path("data/models/banknifty_india_equity_trending.json")
+
+        if ranging_model_path:
+            self.ranging_path = Path(ranging_model_path)
+        else:
+            cand = Path(default_range)
+            self.ranging_path = cand if cand.exists() else Path("data/models/banknifty_india_equity_ranging.json")
+
         self.feature_store = FeatureStore("india_equity")
         
         self.model_trending: Optional[xgb.Booster] = None
@@ -100,3 +118,4 @@ class IndianMLPredictor:
         except Exception as e:
             logger.error(f"ML inference error: {e}")
             return 0.50, "ERROR", 0.0
+
