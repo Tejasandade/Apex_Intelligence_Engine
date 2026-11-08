@@ -2902,8 +2902,9 @@ async def _telegram_command_loop():
     Polls getUpdates from Telegram Bot API with long-polling.
     Authenticates every message against TELEGRAM_CHAT_ID for rock-solid security.
     Supported commands:
-      /help, /start       - Command cheatsheet
+      /menu, /help, /start- Command menu & interactive quick-action buttons
       /status             - Real-time engine health, DD, win rate, prop firm metrics
+      /report             - Full performance audit & deal journal
       /positions          - Detailed view of open positions across BTC, ETH, and GOLD
       /closeall, /flatten - Emergency close all open positions across all assets
       /close <symbol>     - Close specific symbol (e.g. /close btc)
@@ -2923,6 +2924,46 @@ async def _telegram_command_loop():
 
     import aiohttp
 
+    # Register native Telegram command popup menu
+    try:
+        set_commands_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setMyCommands"
+        commands_payload = {
+            "commands": [
+                {"command": "menu", "description": "Interactive command buttons"},
+                {"command": "status", "description": "Live health, balance, PnL & target"},
+                {"command": "report", "description": "Performance audit & deal history"},
+                {"command": "positions", "description": "View open trades across BTC/ETH/Gold"},
+                {"command": "pause", "description": "Pause new order execution"},
+                {"command": "resume", "description": "Resume trading engine"},
+                {"command": "flatten", "description": "Emergency close all positions"},
+                {"command": "help", "description": "Full cheatsheet & commands"}
+            ]
+        }
+        async with aiohttp.ClientSession() as init_s:
+            await init_s.post(set_commands_url, json=commands_payload, timeout=5)
+    except Exception:
+        pass
+
+    inline_menu_markup = {
+        "inline_keyboard": [
+            [
+                {"text": "📊 Live Status", "callback_data": "/status"},
+                {"text": "📈 Full Report", "callback_data": "/report"}
+            ],
+            [
+                {"text": "💼 Open Positions", "callback_data": "/positions"},
+                {"text": "🏆 Prop Challenge", "callback_data": "/propfirm"}
+            ],
+            [
+                {"text": "⏸️ Pause Bot", "callback_data": "/pause"},
+                {"text": "▶️ Resume Bot", "callback_data": "/resume"}
+            ],
+            [
+                {"text": "🛑 Flatten All", "callback_data": "/flatten"}
+            ]
+        ]
+    }
+
     async with aiohttp.ClientSession() as session_http:
         while True:
             try:
@@ -2932,13 +2973,27 @@ async def _telegram_command_loop():
                         data = await resp.json()
                         for update in data.get("result", []):
                             offset = max(offset, update["update_id"] + 1)
-                            msg = update.get("message", {})
-                            chat_id = str(msg.get("chat", {}).get("id", ""))
+                            
+                            cb = update.get("callback_query")
+                            if cb:
+                                cb_id = cb.get("id")
+                                msg = cb.get("message", {})
+                                chat_id = str(msg.get("chat", {}).get("id", ""))
+                                text = cb.get("data", "").strip()
+                                try:
+                                    ans_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery"
+                                    await session_http.post(ans_url, json={"callback_query_id": cb_id}, timeout=3)
+                                except Exception:
+                                    pass
+                            else:
+                                msg = update.get("message", {})
+                                chat_id = str(msg.get("chat", {}).get("id", ""))
+                                text = msg.get("text", "").strip()
+
                             # Security: only process commands from authorized chat ID
                             if chat_id != str(TELEGRAM_CHAT_ID):
                                 continue
 
-                            text = msg.get("text", "").strip()
                             if not text:
                                 continue
 
@@ -2947,21 +3002,14 @@ async def _telegram_command_loop():
                             arg = parts[1] if len(parts) > 1 else ""
 
                             reply_txt = ""
+                            reply_markup = None
 
-                            if cmd in ("/help", "/start"):
+                            if cmd in ("/menu", "/help", "/start"):
                                 reply_txt = (
-                                    "⚡ *APEX 2-Way Command Center*\n\n"
-                                    "📊 */status* - Real-time bot & challenge health\n"
-                                    "📈 */report* - Full performance audit & deal journal\n"
-                                    "💼 */positions* - View all open positions\n"
-                                    "🛑 */closeall* - Emergency flatten all positions\n"
-                                    "🎯 */close <symbol>* - Close symbol (e.g. `/close btc`)\n"
-                                    "⏸️ */pause* - Pause trading engine\n"
-                                    "▶️ */resume* - Resume trading engine\n"
-                                    "🏆 */propfirm [profile]* - Switch/view challenge profiles\n"
-                                    "🔄 */reset* - Reset challenge balance/drawdown\n"
-                                    "⚙️ */mode <prop|personal>* - Toggle Prop Firm mode"
+                                    "⚡ *APEX Interactive Command Center*\n"
+                                    "Select an action from the buttons below or use the command menu:"
                                 )
+                                reply_markup = inline_menu_markup
 
                             elif cmd == "/report":
                                 now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -3145,9 +3193,12 @@ async def _telegram_command_loop():
                                     reply_txt = f"Current mode: *{'Prop Firm' if PROP_FIRM_MODE else 'Personal'}*. Usage: `/mode prop` or `/mode personal`."
 
                             if reply_txt:
+                                payload = {"chat_id": chat_id, "text": reply_txt, "parse_mode": "Markdown"}
+                                if reply_markup:
+                                    payload["reply_markup"] = reply_markup
                                 await session_http.post(
                                     send_url,
-                                    json={"chat_id": chat_id, "text": reply_txt, "parse_mode": "Markdown"},
+                                    json=payload,
                                     timeout=5
                                 )
             except asyncio.CancelledError:

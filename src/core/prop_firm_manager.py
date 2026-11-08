@@ -616,13 +616,13 @@ class PropFirmManager:
         risk_usd = self.virtual_balance * (risk_pct / 100.0)
 
         # ── SOFT-LANDING RISK DECELERATION ──
-        # When approaching challenge victory (within $50 of profit target),
+        # When approaching challenge victory (within $100 of profit target),
         # smoothly taper down risk so banked profits are protected and victory is locked in.
         target_usd = self.initial_balance * (self.config["profit_target_pct"] / 100.0)
         current_profit = self.virtual_balance - self.initial_balance
         remaining_target = target_usd - current_profit
-        if 0 < remaining_target <= 50.0:
-            soft_risk = max(10.0, remaining_target * 0.50)
+        if 0 < remaining_target <= 100.0:
+            soft_risk = max(10.0, remaining_target * 0.35)
             if soft_risk < risk_usd:
                 logger.info(
                     "prop_firm_soft_landing_deceleration",
@@ -730,7 +730,7 @@ class PropFirmManager:
 
         win_rate = round((self.wins / self.total_trades) * 100.0, 1) if self.total_trades > 0 else 0.0
         remaining_target_usd = max(0.0, target_usd - current_profit)
-        soft_landing_active = (0 < remaining_target_usd <= 50.0) and (current_profit > 0)
+        soft_landing_active = (0 < remaining_target_usd <= 100.0) and (current_profit > 0)
 
         return {
             "challenge_name": self.config["name"],
