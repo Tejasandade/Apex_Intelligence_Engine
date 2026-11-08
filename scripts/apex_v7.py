@@ -1243,7 +1243,6 @@ def _check_exit_for_symbol(sym: str):
                           "exit_reason": reason, "dur_min": round(dur_min,1)})
                 break
         save_journal()
-        state_manager.save_state(portfolio, account)   # APEX v7.2: crash-resume
 
         # ── Physical Broker Execution: Close on MT5/Broker ──
         if DEMO_MODE and _active_broker is not None:
@@ -1268,6 +1267,9 @@ def _check_exit_for_symbol(sym: str):
 
         port.update({"position": "FLAT", "direction": None,
                      "unrealized_pnl": 0.0, "banked_pnl": 0.0, "phase": 0, "broker_ticket": "", "broker_pnl": 0.0})
+        if sym == PRIMARY_SYMBOL:
+            portfolio.update(port)
+        state_manager.save_state(portfolio, account)   # APEX v7.2: crash-resume
 
     sl = port["sl_price"]
     tp1 = port["tp1_price"]
@@ -1472,133 +1474,138 @@ async def _candle_worker():
     """Async worker: drains _candle_queue and processes each 5m candle through the symbol's ML engine."""
     global last_signal
     while True:
-        item = await _candle_queue.get()
-        if isinstance(item, tuple):
-            sym, c5 = item
-        else:
-            sym, c5 = PRIMARY_SYMBOL, item
-
-        eng = signal_engines.get(sym, signal_engine)
-        if not eng:
-            _candle_queue.task_done()
-            continue
         try:
-            sig = await eng.process_candle(c5)
+            item = await _candle_queue.get()
+            try:
+                if isinstance(item, tuple):
+                    sym, c5 = item
+                else:
+                    sym, c5 = PRIMARY_SYMBOL, item
 
-            # APEX v7.2: Feed candle to multi-asset retrain scheduler (non-blocking)
-            r_sched = retrain_schedulers.get(sym, retrain_scheduler if sym == PRIMARY_SYMBOL else None)
-            if r_sched:
+                eng = signal_engines.get(sym, signal_engine)
+                if not eng:
+                    continue
+
+                sig = await eng.process_candle(c5)
+
+                # APEX v7.2: Feed candle to multi-asset retrain scheduler (non-blocking)
+                r_sched = retrain_schedulers.get(sym, retrain_scheduler if sym == PRIMARY_SYMBOL else None)
+                if r_sched:
+                    try:
+                        r_sched.on_candle(c5)
+                        r_sched.check_pending_swap()   # pick up new models if ready
+                    except Exception:
+                        pass
+
+                # Update Institutional Liquidity Levels (PDH/PDL, Asian Range, FVG, Sweeps)
                 try:
-                    r_sched.on_candle(c5)
-                    r_sched.check_pending_swap()   # pick up new models if ready
+                    c1d = symbol_candles_1d.get(sym, [])
+                    c1h = symbol_candles_1h.get(sym, [])
+                    c5m = symbol_candles_5m.get(sym, [])
+                    liquidity_engine.update_levels(sym, candles_1d=c1d, candles_1h=c1h, candles_5m=c5m)
                 except Exception:
                     pass
 
-            # Update Institutional Liquidity Levels (PDH/PDL, Asian Range, FVG, Sweeps)
-            try:
-                c1d = symbol_candles_1d.get(sym, [])
-                c1h = symbol_candles_1h.get(sym, [])
-                c5m = symbol_candles_5m.get(sym, [])
-                liquidity_engine.update_levels(sym, candles_1d=c1d, candles_1h=c1h, candles_5m=c5m)
-            except Exception:
-                pass
+                # Update Cross-Asset Lead-Lag & Spillover Diagnostics
+                try:
+                    btc_ofi = 0.0
+                    if "BTCUSDT" in momentum_engines:
+                        btc_ofi = float(momentum_engines["BTCUSDT"].get_diagnostics().get("ofi", 0.0))
+                    lead_lag_engine.compute_spillover(dxy_trend=cross_market_monitor.dxy_trend, btc_ofi=btc_ofi)
+                except Exception:
+                    pass
 
-            # Update Cross-Asset Lead-Lag & Spillover Diagnostics
-            try:
-                btc_ofi = 0.0
-                if "BTCUSDT" in momentum_engines:
-                    btc_ofi = float(momentum_engines["BTCUSDT"].get_diagnostics().get("ofi", 0.0))
-                lead_lag_engine.compute_spillover(dxy_trend=cross_market_monitor.dxy_trend, btc_ofi=btc_ofi)
-            except Exception:
-                pass
+                # Always extract live probabilities from the ensemble — even if no signal
+                try:
+                    feats = eng.live_store.update(c5)  # already called inside; uses cached
+                    if feats is not None and eng.ensemble_long and eng.ensemble_short:
+                        re = eng.regime_detector.current_regime
+                        pl, _, _ = eng.ensemble_long.predict(feats, current_regime=re.value)
+                        ps, _, _ = eng.ensemble_short.predict(feats, current_regime=re.value)
+                        if sym in symbol_live_probs:
+                            symbol_live_probs[sym]["long"]    = round(pl, 4)
+                            symbol_live_probs[sym]["short"]   = round(ps, 4)
+                            symbol_live_probs[sym]["updated"] = True
+                            symbol_live_probs[sym]["regime"]  = re.value
+                        if sym == PRIMARY_SYMBOL:
+                            live_probs["long"]    = round(pl, 4)
+                            live_probs["short"]   = round(ps, 4)
+                            live_probs["updated"] = True
+                            regime_info["current"] = re.value
+                except Exception:
+                    pass
 
-            # Always extract live probabilities from the ensemble — even if no signal
-            try:
-                feats = eng.live_store.update(c5)  # already called inside; uses cached
-                if feats is not None and eng.ensemble_long and eng.ensemble_short:
-                    re = eng.regime_detector.current_regime
-                    pl, _, _ = eng.ensemble_long.predict(feats, current_regime=re.value)
-                    ps, _, _ = eng.ensemble_short.predict(feats, current_regime=re.value)
-                    if sym in symbol_live_probs:
-                        symbol_live_probs[sym]["long"]    = round(pl, 4)
-                        symbol_live_probs[sym]["short"]   = round(ps, 4)
-                        symbol_live_probs[sym]["updated"] = True
-                        symbol_live_probs[sym]["regime"]  = re.value
+                if sig is not None:
+                    last_signal = sig
                     if sym == PRIMARY_SYMBOL:
-                        live_probs["long"]    = round(pl, 4)
-                        live_probs["short"]   = round(ps, 4)
-                        live_probs["updated"] = True
-                        regime_info["current"] = re.value
+                        regime_info["current"] = sig.regime
+                        regime_info["atr"]     = sig.atr
+
+                    compute_macro_structure(sym)
+                    direction = "LONG" if sig.direction == "BUY" else "SHORT"
+
+                    # ── Apply Institutional Market Intelligence Synergy ──
+                    liq_delta, liq_reason = liquidity_engine.evaluate_signal_synergy(sym, direction)
+                    ll_delta, ll_reason = lead_lag_engine.evaluate_synergy(sym, direction)
+                    
+                    # Microstructure CVD & L2 Order Book Imbalance (OBI)
+                    micro_delta, micro_reason = (0.0, "")
+                    if sym in microstructure_engines:
+                        sym_mkt = symbol_markets.get(sym, market)
+                        sym_obi = sym_mkt.get("obi", 0.0)
+                        micro_delta, micro_reason = microstructure_engines[sym].evaluate(direction, obi=sym_obi)
+
+                    # Extreme Funding Squeeze & Liquidation Cascade Alpha
+                    fund_pct = funding_monitor.get_funding_pct(sym)
+                    fund_delta, fund_reason = (0.0, "")
+                    if direction == "LONG" and fund_pct <= -0.025:
+                        fund_delta = +0.04
+                        fund_reason = f"Short Squeeze Setup (Funding {fund_pct:+.4f}%)"
+                    elif direction == "SHORT" and fund_pct >= 0.040:
+                        fund_delta = +0.04
+                        fund_reason = f"Long Liquidation Cascade (Funding {fund_pct:+.4f}%)"
+                    elif direction == "LONG" and fund_pct >= 0.060:
+                        fund_delta = -0.03
+                        fund_reason = f"Warning: Overcrowded Longs (Funding {fund_pct:+.4f}%)"
+                    elif direction == "SHORT" and fund_pct <= -0.045:
+                        fund_delta = -0.03
+                        fund_reason = f"Warning: Overcrowded Shorts (Funding {fund_pct:+.4f}%)"
+
+                    total_intel_delta = liq_delta + ll_delta + micro_delta + fund_delta
+                    calibrated_conviction = round(float(np.clip(sig.conviction + total_intel_delta, 0.0, 1.0)), 4)
+                    required_threshold = get_calibrated_threshold(sym, sig.regime)
+
+                    # Update signal conviction with market intelligence calibration
+                    sig.conviction = calibrated_conviction
+
+                    # Check if post-intelligence conviction satisfies asset-calibrated threshold
+                    if sig.conviction < required_threshold:
+                        intel_notes = [n for n in (liq_reason, ll_reason, micro_reason, fund_reason) if n and n != "NEUTRAL"]
+                        intel_str = " | ".join(intel_notes) if intel_notes else "Low Intel Delta"
+                        last_gate_rejection["reason"] = f"[{sym}] Intel Conviction {sig.conviction:.3f} < {required_threshold:.3f} ({intel_str})"
+                        last_gate_rejection["signal"] = f"[{sym}] {direction} raw={sig.conviction - total_intel_delta:.3f} adj={sig.conviction:.3f}"
+                        last_gate_rejection["ts"] = time.time()
+                        continue
+
+                    ok, reason = can_trade_symbol(sym, direction)
+                    sym_port = portfolios.get(sym, portfolio)
+                    if sym_port["position"] == "FLAT" and ok:
+                        if sig.council_approved and sig.direction in ("BUY", "SELL"):
+                            execute_signal(sig, symbol=sym)
+                    elif sym_port["position"] == "FLAT" and sig.council_approved and sig.direction in ("BUY", "SELL"):
+                        # P3: Approved but gated — track for dashboard
+                        last_gate_rejection["reason"] = f"[{sym}] {reason}"
+                        last_gate_rejection["signal"] = f"[{sym}] {direction} p={sig.conviction:.3f}"
+                        last_gate_rejection["ts"] = time.time()
             except Exception:
                 pass
-
-            if sig is not None:
-                last_signal = sig
-                if sym == PRIMARY_SYMBOL:
-                    regime_info["current"] = sig.regime
-                    regime_info["atr"]     = sig.atr
-
-                compute_macro_structure(sym)
-                direction = "LONG" if sig.direction == "BUY" else "SHORT"
-
-                # ── Apply Institutional Market Intelligence Synergy ──
-                liq_delta, liq_reason = liquidity_engine.evaluate_signal_synergy(sym, direction)
-                ll_delta, ll_reason = lead_lag_engine.evaluate_synergy(sym, direction)
-                
-                # Microstructure CVD & L2 Order Book Imbalance (OBI)
-                micro_delta, micro_reason = (0.0, "")
-                if sym in microstructure_engines:
-                    sym_mkt = symbol_markets.get(sym, market)
-                    sym_obi = sym_mkt.get("obi", 0.0)
-                    micro_delta, micro_reason = microstructure_engines[sym].evaluate(direction, obi=sym_obi)
-
-                # Extreme Funding Squeeze & Liquidation Cascade Alpha
-                fund_pct = funding_monitor.get_funding_pct(sym)
-                fund_delta, fund_reason = (0.0, "")
-                if direction == "LONG" and fund_pct <= -0.025:
-                    fund_delta = +0.04
-                    fund_reason = f"Short Squeeze Setup (Funding {fund_pct:+.4f}%)"
-                elif direction == "SHORT" and fund_pct >= 0.040:
-                    fund_delta = +0.04
-                    fund_reason = f"Long Liquidation Cascade (Funding {fund_pct:+.4f}%)"
-                elif direction == "LONG" and fund_pct >= 0.060:
-                    fund_delta = -0.03
-                    fund_reason = f"Warning: Overcrowded Longs (Funding {fund_pct:+.4f}%)"
-                elif direction == "SHORT" and fund_pct <= -0.045:
-                    fund_delta = -0.03
-                    fund_reason = f"Warning: Overcrowded Shorts (Funding {fund_pct:+.4f}%)"
-
-                total_intel_delta = liq_delta + ll_delta + micro_delta + fund_delta
-                calibrated_conviction = round(float(np.clip(sig.conviction + total_intel_delta, 0.0, 1.0)), 4)
-                required_threshold = get_calibrated_threshold(sym, sig.regime)
-
-                # Update signal conviction with market intelligence calibration
-                sig.conviction = calibrated_conviction
-
-                # Check if post-intelligence conviction satisfies asset-calibrated threshold
-                if sig.conviction < required_threshold:
-                    intel_notes = [n for n in (liq_reason, ll_reason, micro_reason, fund_reason) if n and n != "NEUTRAL"]
-                    intel_str = " | ".join(intel_notes) if intel_notes else "Low Intel Delta"
-                    last_gate_rejection["reason"] = f"[{sym}] Intel Conviction {sig.conviction:.3f} < {required_threshold:.3f} ({intel_str})"
-                    last_gate_rejection["signal"] = f"[{sym}] {direction} raw={sig.conviction - total_intel_delta:.3f} adj={sig.conviction:.3f}"
-                    last_gate_rejection["ts"] = time.time()
+            finally:
+                try:
                     _candle_queue.task_done()
-                    continue
-
-                ok, reason = can_trade_symbol(sym, direction)
-                sym_port = portfolios.get(sym, portfolio)
-                if sym_port["position"] == "FLAT" and ok:
-                    if sig.council_approved and sig.direction in ("BUY", "SELL"):
-                        execute_signal(sig, symbol=sym)
-                elif sym_port["position"] == "FLAT" and sig.council_approved and sig.direction in ("BUY", "SELL"):
-                    # P3: Approved but gated — track for dashboard
-                    last_gate_rejection["reason"] = f"[{sym}] {reason}"
-                    last_gate_rejection["signal"] = f"[{sym}] {direction} p={sig.conviction:.3f}"
-                    last_gate_rejection["ts"] = time.time()
+                except ValueError:
+                    pass
         except Exception:
-            pass
-        finally:
-            _candle_queue.task_done()
+            await asyncio.sleep(0.5)
 
 
 def process_tick_for_symbol(sym: str, price: float, qty: float, is_buyer_maker: bool):

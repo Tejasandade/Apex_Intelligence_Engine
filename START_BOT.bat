@@ -28,12 +28,15 @@ if not exist "%PYTHON%" (
     exit /b 1
 )
 
+:run_loop
 echo  Starting bot... (Press Ctrl+C to stop)
 echo.
 
 "%PYTHON%" "%ROOT%scripts\apex_v7.py"
 
 echo.
-echo  Bot stopped. Press any key to exit.
-pause
+echo  [GUARDIAN] Engine process exited at %TIME%.
+echo  Auto-restarting in 5 seconds to ensure 24/7 coverage... (Press Ctrl+C to abort)
+timeout /t 5
+goto run_loop
 
