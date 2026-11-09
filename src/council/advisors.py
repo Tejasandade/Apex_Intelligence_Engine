@@ -296,10 +296,40 @@ class StructureAdvisor(BaseAdvisor):
                 {"ema_50": ema_50_val, "ema_200": ema_200_val, "price": price}
             )
 
-        if opposing_fvg_detected and not liquidity_sweep_confirmed and not scalp_mode:
+        # ── 1d. Dedicated Gold MTL / FVG Structural Shield (Adapted from xau_c) ──
+        symbol_str = str(kwargs.get("symbol", "")).upper()
+        if any(g in symbol_str for g in ("GOLD", "PAXG")):
+            try:
+                from src.intelligence.gold_structure_engine import gold_structure_engine
+                c_15 = kwargs.get("candles_15m") or (df_15m.reset_index().to_dict("records") if df_15m is not None else [])
+                c_1h = kwargs.get("candles_1h") or (df_1h.reset_index().to_dict("records") if df_1h is not None else [])
+                if c_15 or c_1h:
+                    g_struct = gold_structure_engine.evaluate_gold_structure(price, c_15, c_1h)
+                    if direction in ("SELL", "SHORT") and g_struct.get("veto_short"):
+                        return self._make_vote(
+                            Vote.REJECT, 0.85,
+                            g_struct["veto_reason"],
+                            {"fvg_demand": g_struct.get("nearest_demand_fvg"), "c1": g_struct.get("c1_level")}
+                        )
+                    elif direction in ("BUY", "LONG") and g_struct.get("veto_long"):
+                        return self._make_vote(
+                            Vote.REJECT, 0.85,
+                            g_struct["veto_reason"],
+                            {"fvg_supply": g_struct.get("nearest_supply_fvg"), "c1": g_struct.get("c1_level")}
+                        )
+                    if direction in ("BUY", "LONG") and g_struct.get("in_bullish_fvg"):
+                        factors += 2.0
+                        reasons.append("Resting at Institutional Bullish FVG Demand Floor")
+                    elif direction in ("SELL", "SHORT") and g_struct.get("in_bearish_fvg"):
+                        factors += 2.0
+                        reasons.append("Resting at Institutional Bearish FVG Supply Ceiling")
+            except Exception as e:
+                logger.debug("gold_structure_engine_eval_error", error=str(e))
+
+        if opposing_fvg_detected and not liquidity_sweep_confirmed:
             return self._make_vote(
-                Vote.REJECT, 0.60,
-                f"Structure REJECT: {direction} fired directly into opposing 15m FVG zone/trap",
+                Vote.REJECT, 0.65,
+                f"Structure REJECT: {direction} fired directly into opposing 15m/1H FVG zone/trap",
                 {"price": price}
             )
 
@@ -1288,6 +1318,39 @@ class CrossMarketAdvisor(BaseAdvisor):
 
         is_long = direction in ("BUY", "LONG")
         reasons: list[str] = []
+        sym_upper = str(kwargs.get("symbol", "")).upper()
+        dir_upper = "LONG" if is_long else "SHORT"
+
+        # ── Cross-Asset Cannibalization Guard (Adapted from xau_c) ──
+        # Prevent holding opposing bets between Gold and Crypto when moving in tandem
+        active_positions = kwargs.get("portfolios") or kwargs.get("active_positions")
+        if active_positions and isinstance(active_positions, dict):
+            is_gold_curr = ("GOLD" in sym_upper or "PAXG" in sym_upper)
+            is_crypto_curr = ("BTC" in sym_upper or "ETH" in sym_upper)
+
+            for p_sym, pos in active_positions.items():
+                if pos.get("position") == "OPEN":
+                    p_dir = str(pos.get("direction", "")).upper()
+                    is_gold_p = ("GOLD" in p_sym.upper() or "PAXG" in p_sym.upper())
+                    is_crypto_p = ("BTC" in p_sym.upper() or "ETH" in p_sym.upper())
+
+                    # Conflict 1: Gold vs Crypto opposing directions (e.g. BUY Gold + SELL BTC)
+                    if (is_gold_curr and is_crypto_p) or (is_crypto_curr and is_gold_p):
+                        if p_dir != dir_upper:
+                            return self._make_vote(
+                                Vote.REJECT, 0.85,
+                                f"Cross-Market REJECT: Macro Directional Conflict — cannot {dir_upper} {sym_upper} while holding opposing {p_dir} {p_sym} (eating each other's profits)",
+                                {"conflict_symbol": p_sym, "conflict_direction": p_dir}
+                            )
+
+                    # Conflict 2: BTC vs ETH opposing directions (e.g. BUY BTC + SELL ETH)
+                    if is_crypto_curr and is_crypto_p and sym_upper != p_sym.upper():
+                        if p_dir != dir_upper:
+                            return self._make_vote(
+                                Vote.REJECT, 0.80,
+                                f"Cross-Market REJECT: Crypto Coherence Conflict — cannot {dir_upper} {sym_upper} while holding opposing {p_dir} {p_sym}",
+                                {"conflict_symbol": p_sym, "conflict_direction": p_dir}
+                            )
 
         # ── BUY / LONG EVALUATION ──
         if is_long:

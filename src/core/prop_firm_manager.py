@@ -814,7 +814,7 @@ class PropFirmManager:
         # Never hold opposing positions across macro-correlated assets (e.g. LONG Gold vs SHORT BTC/ETH).
         for p_sym, pos in active_positions.items():
             if pos.get("position") == "OPEN":
-                p_dir = pos.get("direction")
+                p_dir = str(pos.get("direction", "")).upper()
                 is_gold_p = ("GOLD" in p_sym.upper() or "PAXG" in p_sym.upper())
                 is_crypto_p = ("BTC" in p_sym.upper() or "ETH" in p_sym.upper())
                 is_curr_gold = ("GOLD" in sym_key or "PAXG" in sym_key)
@@ -826,7 +826,7 @@ class PropFirmManager:
                         return False, f"Coherence Guard: Cannot {dir_upper} {sym_key} while {p_sym} is {p_dir} (Macro Conflict)"
 
                 # Crypto-internal conflict: BTC & ETH should not hold opposing directions
-                if is_crypto_p and is_curr_crypto:
+                if is_crypto_p and is_curr_crypto and p_sym.upper() != sym_key:
                     if p_dir != dir_upper:
                         return False, f"Crypto Coherence: Cannot {dir_upper} {sym_key} while {p_sym} is {p_dir}"
 

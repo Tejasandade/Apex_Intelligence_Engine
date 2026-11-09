@@ -743,24 +743,26 @@ def can_trade_symbol(symbol: str = SYMBOL, direction: str = "LONG", is_high_prob
         if active_count >= max_c:
             return False, f"Max concurrent trades reached ({active_count}/{max_c})"
 
-        # 3. Portfolio Directional Coherence Guard (Cross-Asset Cannibalization Prevention)
-        for p_sym, pos in portfolios.items():
-            if pos.get("position") == "OPEN":
-                p_dir = pos.get("direction")
-                is_gold_p = ("GOLD" in p_sym.upper() or "PAXG" in p_sym.upper())
-                is_crypto_p = ("BTC" in p_sym.upper() or "ETH" in p_sym.upper())
-                is_curr_gold = ("GOLD" in sym or "PAXG" in sym)
-                is_curr_crypto = ("BTC" in sym or "ETH" in sym)
+    # ── Universal Portfolio Directional Coherence Guard (Cross-Asset Cannibalization Lock) ──
+    # Runs unconditionally in both Prop Firm and Personal mode.
+    # Prevents holding opposing positions between macro-correlated assets (e.g. LONG Gold vs SHORT BTC/ETH).
+    for p_sym, pos in portfolios.items():
+        if pos.get("position") == "OPEN":
+            p_dir = str(pos.get("direction", "")).upper()
+            is_gold_p = ("GOLD" in p_sym.upper() or "PAXG" in p_sym.upper())
+            is_crypto_p = ("BTC" in p_sym.upper() or "ETH" in p_sym.upper())
+            is_curr_gold = ("GOLD" in sym or "PAXG" in sym)
+            is_curr_crypto = ("BTC" in sym or "ETH" in sym)
 
-                # Cross-asset conflict: Gold vs Crypto opposing directions cancel each other out
-                if (is_gold_p and is_curr_crypto) or (is_crypto_p and is_curr_gold):
-                    if p_dir != dir_upper:
-                        return False, f"Coherence Guard: Cannot {dir_upper} {sym} while {p_sym} is {p_dir} (Macro Conflict)"
+            # Cross-asset conflict: Gold vs Crypto opposing directions cancel each other out
+            if (is_gold_p and is_curr_crypto) or (is_crypto_p and is_curr_gold):
+                if p_dir != dir_upper:
+                    return False, f"Coherence Lock: Cannot {dir_upper} {sym} while {p_sym} is {p_dir} (Macro Conflict eating profits)"
 
-                # Crypto-internal conflict: BTC & ETH should never hold opposing directions
-                if is_crypto_p and is_curr_crypto:
-                    if p_dir != dir_upper:
-                        return False, f"Crypto Coherence: Cannot {dir_upper} {sym} while {p_sym} is {p_dir}"
+            # Crypto-internal conflict: BTC & ETH should never hold opposing directions
+            if is_crypto_p and is_curr_crypto and sym != p_sym.upper():
+                if p_dir != dir_upper:
+                    return False, f"Crypto Coherence: Cannot {dir_upper} {sym} while {p_sym} is {p_dir}"
 
     if account["halted"]:
         if account["halt_until"] <= now:
@@ -799,6 +801,23 @@ def can_trade_symbol(symbol: str = SYMBOL, direction: str = "LONG", is_high_prob
         is_metals_closed = (weekday == 5) or (weekday == 4 and hour >= 21) or (weekday == 6 and hour < 22)
         if is_metals_closed:
             return False, "METALS MARKET CLOSED (MT5 Gold reopens Sunday 22:00 UTC)"
+
+    # ── Gold Institutional Structure Veto (FVG & C1/C2 Demand/Supply Gate, adapted from xau_c) ──
+    if ("GOLD" in sym or "PAXG" in sym):
+        try:
+            from src.intelligence.gold_structure_engine import gold_structure_engine
+            cur_price = mkt.get("ltp", 0.0) or (mkt.get("bid", 0.0) if dir_upper == "SHORT" else mkt.get("ask", 0.0))
+            if cur_price > 0:
+                c_15m = list(symbol_candles_15m.get(sym, []))
+                c_1h = list(symbol_candles_1h.get(sym, []))
+                if c_15m or c_1h:
+                    g_eval = gold_structure_engine.evaluate_gold_structure(cur_price, c_15m, c_1h)
+                    if dir_upper == "SHORT" and g_eval.get("veto_short"):
+                        return False, g_eval.get("veto_reason", "Gold FVG Demand Zone: Shorts Prohibited")
+                    elif dir_upper == "LONG" and g_eval.get("veto_long"):
+                        return False, g_eval.get("veto_reason", "Gold FVG Supply Zone: Longs Prohibited")
+        except Exception as e:
+            logger.debug("gold_structure_check_error", error=str(e))
 
     # ── Strict Multi-Timeframe Alignment Guard (1D, 4H, and 1H Confluence) ──
     # Prohibits fighting higher timeframe trends and shorting into intraday relief rallies.
@@ -1049,6 +1068,22 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL):
     if entry <= 0: entry = mkt.get("ltp", 0.0)
     if entry <= 0: return
 
+    # ── NO-CHASE GATE (Adapted from xau_c / autonomous.py) ──
+    # Prohibit entering if market price has already slipped > 0.35 ATR away from trigger
+    sym_atr = symbol_regime_info.get(sym, {}).get("atr", 0.0)
+    sig_price = getattr(signal, "price", 0.0)
+    if sym_atr > 0 and sig_price > 0:
+        chase_dist = (entry - sig_price) if direction == "LONG" else (sig_price - entry)
+        max_chase = 0.35 * sym_atr
+        if chase_dist > max_chase:
+            log_msg = (
+                f"[{sym}] NO-CHASE GATE: Market price ${entry:,.2f} chased +${chase_dist:.2f} "
+                f"(> 0.35 ATR=${max_chase:.2f}) from trigger ${sig_price:,.2f} — Entry cancelled"
+            )
+            trade_log.append(log_msg)
+            if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
+            return
+
     # ── ANTI-TRAP GUARD: Dual Advisor Veto ──
     # If both Momentum AND Volume advisors explicitly vote REJECT, abort entry
     v_dict = getattr(signal, "metadata", {}).get("council_votes", {})
@@ -1077,6 +1112,22 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL):
 
     sl_price, sl_dist = find_sl(direction, entry, symbol=sym, trade_mode=trade_mode)
     if sl_dist <= 0: return
+
+    # ── SPREAD-TO-RISK GATE (Adapted from xau_c / breakout_admission.py) ──
+    # Prohibit entry if broker spread exceeds 10% of total stop-loss distance
+    bid = mkt.get("bid", 0.0)
+    ask = mkt.get("ask", 0.0)
+    if bid > 0 and ask > 0 and sl_dist > 0:
+        spread_usd = abs(ask - bid)
+        spread_share = spread_usd / sl_dist
+        if spread_share > 0.10:
+            log_msg = (
+                f"[{sym}] SPREAD-TO-RISK GATE: Spread (${spread_usd:.2f}) consumes {spread_share*100:.1f}% "
+                f"of stop distance (${sl_dist:.2f}), exceeding 10% cap — Entry cancelled"
+            )
+            trade_log.append(log_msg)
+            if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
+            return
 
     # ── VOLATILITY & HORIZON ADAPTIVE TARGETS (Regime-Adaptive R:R) ──
     if trade_mode == "SWING":
@@ -1760,6 +1811,17 @@ async def _candle_worker():
                     if sym in microstructure_engines:
                         sym_mkt = symbol_markets.get(sym, market)
                         sym_obi = sym_mkt.get("obi", 0.0)
+                        # Phase 3: Institutional Delta Exchange L2 Book Imbalance for Gold
+                        if any(g in sym for g in ("GOLD", "PAXG")):
+                            try:
+                                from src.data.providers.delta_feed import delta_gold_feed
+                                d_tel = delta_gold_feed.get_telemetry()
+                                if d_tel.get("fresh"):
+                                    sym_obi = d_tel["book_imbalance_5"]
+                                    sym_mkt["obi"] = sym_obi
+                                    sym_mkt["delta_aggressor"] = d_tel["aggressor_ratio"]
+                            except Exception:
+                                pass
                         micro_delta, micro_reason = microstructure_engines[sym].evaluate(direction, obi=sym_obi)
 
                     # Extreme Funding Squeeze & Liquidation Cascade Alpha
@@ -2927,6 +2989,28 @@ def get_dashboard_state() -> dict:
             diff = (cur_ltp - sym_port_obj["entry_price"]) if p_dir == "LONG" else (sym_port_obj["entry_price"] - cur_ltp)
             u_pnl = round((diff / sym_port_obj["entry_price"]) * sym_port_obj.get("notional", 2700.0), 2)
 
+        delta_info = {}
+        if any(g in sym for g in ("GOLD", "PAXG")):
+            try:
+                from src.data.providers.delta_feed import delta_gold_feed
+                from src.intelligence.gold_structure_engine import gold_structure_engine
+                d_tel = delta_gold_feed.get_telemetry()
+                c15 = list(symbol_candles_15m.get(sym, []))
+                c1h = list(symbol_candles_1h.get(sym, []))
+                g_eval = gold_structure_engine.evaluate_gold_structure(cur_ltp, c15, c1h)
+                delta_info = {
+                    "delta_connected": d_tel.get("connected", False),
+                    "delta_obi_5": d_tel.get("book_imbalance_5", 0.0),
+                    "delta_aggressor": d_tel.get("aggressor_ratio", 0.0),
+                    "fvg_demand": g_eval.get("in_bullish_fvg", False),
+                    "fvg_supply": g_eval.get("in_bearish_fvg", False),
+                    "c1_level": g_eval.get("c1_level", 0.0),
+                    "c2_level": g_eval.get("c2_level", 0.0),
+                    "structural_bias": g_eval.get("structural_bias", "NEUTRAL"),
+                }
+            except Exception:
+                pass
+
         symbols_payload[sym] = {
             "ltp": _safe_price(sym, "ltp"),
             "bid": _safe_price(sym, "bid"),
@@ -2948,6 +3032,9 @@ def get_dashboard_state() -> dict:
                 "1h": "BULL" if "BULL" in ms.get("trend_1h", "") else ("BEAR" if "BEAR" in ms.get("trend_1h", "") else "NEUT"),
                 "5m": trend_5m,
                 "bias": ms.get("macro_bias", "NEUTRAL"),
+            },
+            "microstructure": delta_info if any(g in sym for g in ("GOLD", "PAXG")) else {
+                "obi": symbol_markets.get(sym, {}).get("obi", 0.0)
             }
         }
 
@@ -3575,8 +3662,12 @@ async def main():
     )
     await web_server.start()
 
+    # Phase 3: Launch Delta Exchange Gold Microstructure Feed in background
+    from src.data.providers.delta_feed import delta_gold_feed
+
     await asyncio.gather(
         binance_ws(),
+        delta_gold_feed.run(),
         ui_loop(),
         _candle_worker(),
         _market_intel_loop(),   # APEX v7.2: news + funding + sentiment
