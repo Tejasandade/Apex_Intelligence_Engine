@@ -1110,9 +1110,16 @@ class IndianWebServer:
     async def handle_state(self, request: web.Request) -> web.Response:
         try:
             metrics = self.engine.get_hud_metrics()
-            # Attach closed trades journal from executor
+            # Attach closed trades journal from executor or disk
             journal = []
-            for t in reversed(self.engine.executor.trade_history[-25:]):
+            history = list(self.engine.executor.trade_history)
+            if not history and Path("data/indian_trade_journal.json").exists():
+                try:
+                    with open("data/indian_trade_journal.json") as f:
+                        history = json.load(f)
+                except Exception:
+                    history = []
+            for t in reversed(history[-25:]):
                 g_pnl = t.get("gross_pnl", 0.0)
                 entry_p = t.get("entry_price", 0.0)
                 exit_p = t.get("exit_price", 0.0)

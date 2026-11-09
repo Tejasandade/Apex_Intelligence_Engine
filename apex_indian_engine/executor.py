@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import logging
 import time
+import json
+from pathlib import Path
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Optional
@@ -56,9 +58,28 @@ class IndianOrderExecutor:
         self.mode = mode.upper()
         self.api = smart_api_client
         self.active_trade: Optional[ActiveOptionTrade] = None
+        self.journal_file = Path("data/indian_trade_journal.json")
         self.trade_history: list[dict[str, Any]] = []
+        self._load_journal()
         self.friction = FrictionModel()
         self.theta_harvester = ThetaHarvester(max_stagnant_minutes=35.0, reversal_r_threshold=1.0)
+
+    def _load_journal(self) -> None:
+        try:
+            if self.journal_file.exists():
+                with open(self.journal_file, "r") as f:
+                    self.trade_history = json.load(f)
+                logger.info(f"Loaded {len(self.trade_history)} closed trades from {self.journal_file}")
+        except Exception as e:
+            logger.error(f"Failed to load Indian trade journal: {e}")
+
+    def _save_journal(self) -> None:
+        try:
+            self.journal_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.journal_file, "w") as f:
+                json.dump(self.trade_history, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save Indian trade journal: {e}")
 
     def has_open_position(self) -> bool:
         return self.active_trade is not None and self.active_trade.status == "OPEN"
@@ -350,6 +371,7 @@ class IndianOrderExecutor:
         }
 
         self.trade_history.append(closed_record)
+        self._save_journal()
         self.active_trade = None
         s = "+" if gross_pnl >= 0 else ""
         logger.info(f"CLOSED {trade.symbol} @ ₹{exit_price:.2f} | Total PnL: {s}₹{gross_pnl:,.2f} | Reason: {reason}")
