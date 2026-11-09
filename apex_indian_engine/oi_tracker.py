@@ -135,3 +135,4 @@ class OptionChainOITracker:
 
     def get_latest_snapshot(self) -> Optional[OIFlowSnapshot]:
         return self._history[-1] if self._history else None
+

@@ -238,9 +238,25 @@ class IndianWebSocketStreamer:
             c["vol_sum"] += delta_vol
             c["vwap"] = round(c["pv_sum"] / max(c["vol_sum"], 1.0), 2)
 
+    def update_external_tick(self, symbol: str, price: float, volume: float = 0.0) -> None:
+        """Allows engine fallback pollers to update latest prices and candle states."""
+        if price <= 0:
+            return
+        self.latest_prices[symbol] = price
+        self._aggregate_candle(symbol, price, volume)
+
     def _on_error(self, wsapp, error):
         logger.error(f"Angel One WebSocket Error: {error}")
 
     def _on_close(self, wsapp):
         self._connected = False
         logger.warning("Angel One WebSocket connection CLOSED.")
+        # Auto-reconnect if engine is still running
+        if self._running:
+            logger.info("Attempting WebSocket reconnection in 3 seconds...")
+            time.sleep(3.0)
+            try:
+                self._sws.connect()
+            except Exception as e:
+                logger.error(f"WebSocket reconnect failed: {e}")
+

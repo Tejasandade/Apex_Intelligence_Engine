@@ -231,3 +231,4 @@ class IndianTelegramNotifier:
         elif cmd in ("/resume", "/indian_resume"):
             if self.cmd_resume_trading:
                 self.send_message(self.cmd_resume_trading())
+

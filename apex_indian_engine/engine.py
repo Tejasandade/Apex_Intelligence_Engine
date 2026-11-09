@@ -10,11 +10,12 @@ dedicated Telegram alerts, and live Terminal ASCII HUD.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import sys
 import time
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
@@ -33,6 +34,7 @@ from apex_indian_engine.oi_tracker import OptionChainOITracker
 from apex_indian_engine.ws_streamer import IndianWebSocketStreamer
 from apex_indian_engine.telegram_bot import IndianTelegramNotifier
 from apex_indian_engine.hud import IndianTerminalHUD
+from apex_indian_engine.web_dashboard import IndianWebServer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -78,6 +80,7 @@ class ApexIndianEngine:
         self.telegram = IndianTelegramNotifier()
         self.hud = IndianTerminalHUD()
         self.ws_streamer: Optional[IndianWebSocketStreamer] = None
+        self.web_server: Optional[IndianWebServer] = None
 
         # Wire Telegram command hooks
         self.telegram.cmd_get_status = self._format_telegram_status
@@ -90,6 +93,9 @@ class ApexIndianEngine:
         self.jwt_token: Optional[str] = None
         self.is_running = False
         self.is_paused = False
+
+        self._prev_oi_map: dict[str, dict[Any, int]] = {"NIFTY": {}, "BANKNIFTY": {}}
+        self.candle_cache_file = Path("data/indian_candles_cache.json")
 
     def authenticate_angel_one(self) -> bool:
         """Fully automated, headless login via TOTP."""
@@ -113,6 +119,7 @@ class ApexIndianEngine:
                 self.feed_token = sess["data"]["feedToken"]
                 logger.info(f"Angel One Auth SUCCESS for client: {client_id}")
                 self.executor.api = self.smart_api
+                self.strike_selector.api = self.smart_api
                 
                 # Pass client to OI trackers
                 for tracker in self.oi_trackers.values():
@@ -125,6 +132,119 @@ class ApexIndianEngine:
         except Exception as e:
             logger.error(f"Angel One Auth Exception: {e}")
             return False
+
+    def load_cached_candles(self) -> None:
+        """Loads cached 5m candles from disk to ensure indicators are instantly warm on boot."""
+        if not self.candle_cache_file.exists():
+            return
+        try:
+            with open(self.candle_cache_file, "r", encoding="utf-8") as f:
+                cached = json.load(f)
+            for idx in ["BANKNIFTY", "NIFTY"]:
+                candles = cached.get(idx, [])
+                if candles:
+                    sig_engine = self.signal_engines[idx]
+                    sig_engine.candles_5m.clear()
+                    for c in candles:
+                        sig_engine.add_candle(c)
+                    logger.info(f"Loaded {len(candles)} cached 5m candles for {idx} from disk.")
+        except Exception as e:
+            logger.debug(f"Failed to load candle cache: {e}")
+
+    def save_cached_candles(self) -> None:
+        """Saves current 5m candle history to disk."""
+        try:
+            self.candle_cache_file.parent.mkdir(parents=True, exist_ok=True)
+            cached = {
+                "BANKNIFTY": self.signal_engines["BANKNIFTY"].candles_5m[-100:],
+                "NIFTY": self.signal_engines["NIFTY"].candles_5m[-100:],
+            }
+            with open(self.candle_cache_file, "w", encoding="utf-8") as f:
+                json.dump(cached, f, indent=2)
+        except Exception as e:
+            logger.debug(f"Failed to save candle cache: {e}")
+
+    def warmup_historical_candles(self) -> None:
+        """Preloads recent 5m historical candles from Angel One so indicators & ML models are ready immediately."""
+        self.load_cached_candles()
+
+        if not self.smart_api:
+            return
+
+        print("  ⏳ Synchronizing 5-Minute Historical Candles from Angel One...")
+        today = datetime.now()
+        from_date = (today - timedelta(days=3)).strftime("%Y-%m-%d 09:15")
+        to_date = today.strftime("%Y-%m-%d %H:%M")
+
+        configs = [
+            ("BANKNIFTY", "99926009"),
+            ("NIFTY", "99926000"),
+        ]
+
+        for idx, token in configs:
+            for attempt in range(2):
+                try:
+                    time.sleep(1.2)  # Respect rate limit
+                    params = {
+                        "exchange": "NSE",
+                        "symboltoken": token,
+                        "interval": "FIVE_MINUTE",
+                        "fromdate": from_date,
+                        "todate": to_date,
+                    }
+                    res = self.smart_api.getCandleData(params)
+                    data = res.get("data", [])
+                    if data:
+                        sig_engine = self.signal_engines[idx]
+                        sig_engine.candles_5m.clear()
+                        for row in data:
+                            candle_dict = {
+                                "timestamp": row[0],
+                                "open": float(row[1]),
+                                "high": float(row[2]),
+                                "low": float(row[3]),
+                                "close": float(row[4]),
+                                "volume": float(row[5]),
+                                "vwap": float(row[4]),
+                            }
+                            sig_engine.add_candle(candle_dict)
+                        print(f"  ✓ Synchronized {len(data)} candles for {idx} (LTP: ₹{data[-1][4]:,.2f})")
+                        break
+                except Exception as e:
+                    logger.debug(f"Candle sync attempt {attempt+1} for {idx}: {e}")
+                    time.sleep(2.0)
+
+            # If still fewer than 20 candles (e.g. rate limit), synthesize warm-up baseline
+            if len(sig_engine.candles_5m) < 20:
+                try:
+                    mkt = self.smart_api.getMarketData("FULL", {"NSE": [token]})
+                    fetched = mkt.get("data", {}).get("fetched", [])
+                    if fetched:
+                        item = fetched[0]
+                        prev_close = float(item.get("close", 0.0))
+                        open_px = float(item.get("open", prev_close))
+                        high_px = float(item.get("high", max(prev_close, open_px)))
+                        low_px = float(item.get("low", min(prev_close, open_px)))
+                        ltp = float(item.get("ltp", open_px))
+
+                        import numpy as np
+                        prices = np.linspace(prev_close, ltp, 30)
+                        for i, p in enumerate(prices):
+                            c_dict = {
+                                "timestamp": f"warmup_{i}",
+                                "open": round(float(p), 2),
+                                "high": round(float(max(p, high_px if i == 29 else p + 15)), 2),
+                                "low": round(float(min(p, low_px if i == 29 else p - 15)), 2),
+                                "close": round(float(p), 2),
+                                "volume": 100000.0,
+                                "vwap": round(float(p), 2),
+                            }
+                            sig_engine.add_candle(c_dict)
+                        print(f"  ✓ Initialized {len(sig_engine.candles_5m)} baseline candles for {idx} (LTP: ₹{ltp:,.2f})")
+                except Exception as e:
+                    logger.debug(f"Baseline candle initialization error for {idx}: {e}")
+
+        self.save_cached_candles()
 
     def initialize(self) -> bool:
         """Download scrip master and load initial market state."""
@@ -151,6 +271,10 @@ class ApexIndianEngine:
         bn_exp = self.scrip_master.get_nearest_expiry("BANKNIFTY")
         print(f"  ✓ Active NIFTY Weekly Expiry:     {nifty_exp}")
         print(f"  ✓ Active BANKNIFTY Weekly Expiry: {bn_exp}")
+
+        # 3. Warm up Historical Candles for Indicators & ML
+        self.warmup_historical_candles()
+
         print(f"  ✓ Risk Rules: Max Daily Loss 3% (₹{self.risk_manager.capital_inr * 0.03:,.0f}) | Max 4 Trades/Day")
         print("=" * 70)
         return True
@@ -382,14 +506,27 @@ class ApexIndianEngine:
         call_wall = snap.max_call_wall if snap else 0.0
         put_wall = snap.max_put_wall if snap else 0.0
 
-        # Spot prices from signal engine or streamer
+        # Live spot prices from streamer or Angel API
+        bn_live = self.ws_streamer.latest_prices.get("BANKNIFTY", 0.0) if self.ws_streamer else 0.0
+        nifty_live = self.ws_streamer.latest_prices.get("NIFTY", 0.0) if self.ws_streamer else 0.0
+
         bn_candles = self.signal_engines["BANKNIFTY"].candles_5m
-        bn_spot = bn_candles[-1]["close"] if bn_candles else 0.0
-        bn_vwap = bn_candles[-1].get("vwap", bn_spot) if bn_candles else 0.0
+        bn_spot = bn_live if bn_live > 0.0 else (bn_candles[-1]["close"] if bn_candles else 0.0)
 
         nifty_candles = self.signal_engines["NIFTY"].candles_5m
-        nifty_spot = nifty_candles[-1]["close"] if nifty_candles else 0.0
-        nifty_vwap = nifty_candles[-1].get("vwap", nifty_spot) if nifty_candles else 0.0
+        nifty_spot = nifty_live if nifty_live > 0.0 else (nifty_candles[-1]["close"] if nifty_candles else 0.0)
+
+        # Dynamic running VWAP from current active candle
+        bn_vwap = (
+            self.ws_streamer._candles_5m.get("BANKNIFTY", {}).get("vwap")
+            if self.ws_streamer and self.ws_streamer._candles_5m.get("BANKNIFTY")
+            else (bn_candles[-1].get("vwap", bn_spot) if bn_candles else bn_spot)
+        )
+        nifty_vwap = (
+            self.ws_streamer._candles_5m.get("NIFTY", {}).get("vwap")
+            if self.ws_streamer and self.ws_streamer._candles_5m.get("NIFTY")
+            else (nifty_candles[-1].get("vwap", nifty_spot) if nifty_candles else nifty_spot)
+        )
 
         return {
             "mode": self.config.mode,
@@ -460,6 +597,122 @@ class ApexIndianEngine:
         self.is_paused = False
         return "▶️ Indian Engine trading RESUMED. Scanning for setups."
 
+    async def _poll_live_ticks_loop(self):
+        """Continuous background poller for sub-second index LTP and active option prices."""
+        logger.info("Started background Angel One live LTP poller loop.")
+        while self.is_running:
+            try:
+                if self.smart_api:
+                    # 1. BankNifty Spot
+                    bn_res = self.smart_api.ltpData("NSE", "BANKNIFTY", "99926009")
+                    if bn_res.get("status"):
+                        bn_ltp = float(bn_res.get("data", {}).get("ltp", 0.0))
+                        if bn_ltp > 0 and self.ws_streamer:
+                            self.ws_streamer.update_external_tick("BANKNIFTY", bn_ltp)
+
+                    # 2. Nifty Spot
+                    nf_res = self.smart_api.ltpData("NSE", "NIFTY", "99926000")
+                    if nf_res.get("status"):
+                        nf_ltp = float(nf_res.get("data", {}).get("ltp", 0.0))
+                        if nf_ltp > 0 and self.ws_streamer:
+                            self.ws_streamer.update_external_tick("NIFTY", nf_ltp)
+
+                    # 3. India VIX
+                    vix_res = self.smart_api.ltpData("NSE", "INDIAVIX", "99926017")
+                    if vix_res.get("status"):
+                        vix_val = float(vix_res.get("data", {}).get("ltp", 0.0))
+                        if vix_val > 0:
+                            self.vix_manager.update_vix(vix_val)
+
+                    # 4. Active Option Position Live Tick
+                    if self.executor.has_open_position():
+                        trade = self.executor.active_trade
+                        opt_res = self.smart_api.ltpData("NFO", trade.symbol, trade.token)
+                        if opt_res.get("status"):
+                            opt_ltp = float(opt_res.get("data", {}).get("ltp", 0.0))
+                            if opt_ltp > 0:
+                                self.process_tick(current_option_price=opt_ltp)
+
+            except Exception as e:
+                logger.debug(f"Live tick poller exception: {e}")
+
+            await asyncio.sleep(1.5)
+
+    async def _poll_oi_loop(self):
+        """Periodic background poller (every 60s) for institutional Option Chain & Delta-OI."""
+        logger.info("Started background Option Chain OI poller loop.")
+        await asyncio.sleep(5.0)  # Initial grace delay
+        while self.is_running:
+            try:
+                if self.smart_api:
+                    for idx in ["BANKNIFTY", "NIFTY"]:
+                        expiry = self.scrip_master.get_nearest_expiry(idx)
+                        if not expiry:
+                            continue
+
+                        cur_spot = (
+                            self.ws_streamer.latest_prices.get(idx, 0.0)
+                            if self.ws_streamer else 0.0
+                        )
+                        if cur_spot <= 0:
+                            candles = self.signal_engines[idx].candles_5m
+                            cur_spot = candles[-1]["close"] if candles else (59000.0 if "BANK" in idx else 25000.0)
+
+                        step = 100 if "BANK" in idx else 50
+                        base_strike = round(cur_spot / step) * step
+                        strikes = [base_strike + (i * step) for i in range(-5, 6)]
+
+                        tokens_map = {}
+                        tokens_list = []
+                        for s in strikes:
+                            for opt in ["CE", "PE"]:
+                                c = self.scrip_master.get_option_contract(idx, expiry, s, opt)
+                                if c:
+                                    tok = str(c["token"])
+                                    tokens_list.append(tok)
+                                    tokens_map[tok] = {"strike": s, "option_type": opt, "symbol": c["symbol"]}
+
+                        if tokens_list:
+                            res = self.smart_api.getMarketData("FULL", {"NFO": tokens_list})
+                            fetched = res.get("data", {}).get("fetched", [])
+                            
+                            prev_map = self._prev_oi_map.get(idx, {})
+                            curr_map = {}
+                            chain_data = []
+
+                            for item in fetched:
+                                tok = str(item.get("symbolToken", ""))
+                                meta = tokens_map.get(tok)
+                                if meta:
+                                    s = meta["strike"]
+                                    opt = meta["option_type"]
+                                    oi = int(item.get("opnInterest", 0))
+                                    key = (s, opt)
+                                    curr_map[key] = oi
+                                    delta_oi = oi - prev_map.get(key, oi)
+
+                                    chain_data.append({
+                                        "strike": s,
+                                        "option_type": opt,
+                                        "open_interest": oi,
+                                        "change_oi": delta_oi,
+                                        "ltp": float(item.get("ltp", 0.0)),
+                                    })
+
+                            self._prev_oi_map[idx] = curr_map
+
+                            if chain_data:
+                                tracker = self.oi_trackers.get(idx)
+                                if tracker:
+                                    tracker.update_chain(chain_data, cur_spot)
+
+                        await asyncio.sleep(2.0)
+
+            except Exception as e:
+                logger.error(f"Option Chain OI poller exception: {e}")
+
+            await asyncio.sleep(60.0)
+
     async def run_loop(self):
         """Main asynchronous event loop for Indian Options."""
         self.is_running = True
@@ -467,6 +720,14 @@ class ApexIndianEngine:
 
         # Start Telegram Command Listener
         self.telegram.start_polling()
+
+        # Start Indian Web Dashboard on port 8081
+        try:
+            self.web_server = IndianWebServer(self, host="0.0.0.0", port=8081)
+            await self.web_server.start()
+            logger.info("🌐 Indian Web Dashboard live at http://localhost:8081")
+        except Exception as e:
+            logger.error(f"Failed to start Indian Web Dashboard: {e}")
 
         # Start WebSocket Streamer if Angel credentials active
         if self.jwt_token and self.feed_token and self.smart_api:
@@ -498,6 +759,10 @@ class ApexIndianEngine:
                 self.ws_streamer.start(asyncio.get_running_loop())
             except Exception as e:
                 logger.error(f"WebSocket streamer initialization error: {e}")
+
+        # Spawn Live LTP Poller and OI Tracker tasks
+        asyncio.create_task(self._poll_live_ticks_loop())
+        asyncio.create_task(self._poll_oi_loop())
 
         last_hud_render = 0.0
 

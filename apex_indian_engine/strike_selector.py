@@ -37,9 +37,15 @@ class DynamicStrikeSelector:
     Selects between ATM and 1-Strike ITM based on volatility regimes and conviction.
     """
 
-    def __init__(self, scrip_master: ScripMaster, greeks_engine: GreeksEngine):
+    def __init__(
+        self,
+        scrip_master: ScripMaster,
+        greeks_engine: GreeksEngine,
+        smart_api_client: Optional[Any] = None,
+    ):
         self.scrip_master = scrip_master
         self.greeks_engine = greeks_engine
+        self.api = smart_api_client
 
     def select_best_strike(
         self,
@@ -114,6 +120,17 @@ class DynamicStrikeSelector:
         )
         est_price = max(bs.price, 45.0)
 
+        # Check live market LTP from Angel One if API is active
+        if self.api:
+            try:
+                ltp_resp = self.api.ltpData("NFO", contract["symbol"], str(contract["token"]))
+                live_px = float(ltp_resp.get("data", {}).get("ltp", 0.0))
+                if live_px > 1.0:
+                    est_price = live_px
+                    reason += f" | Live Broker LTP: ₹{live_px:.2f}"
+            except Exception as e:
+                logger.debug(f"Could not fetch live LTP for strike: {e}")
+
         greeks = self.greeks_engine.calculate_greeks(
             spot=spot_price,
             strike=strike_px,
@@ -135,3 +152,4 @@ class DynamicStrikeSelector:
             greeks=greeks,
             reason=reason,
         )
+

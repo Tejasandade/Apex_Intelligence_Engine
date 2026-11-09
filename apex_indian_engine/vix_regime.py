@@ -94,3 +94,4 @@ class VixRegimeManager:
                 tp_multiplier=2.0,
                 description="Extreme VIX: Severe IV crush risk — Half sizing, ITM contracts, quick harvest",
             )
+
