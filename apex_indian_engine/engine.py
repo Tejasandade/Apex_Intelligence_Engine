@@ -188,6 +188,7 @@ class ApexIndianEngine:
         ]
 
         for idx, token in configs:
+            sig_engine = self.signal_engines[idx]
             for attempt in range(2):
                 try:
                     time.sleep(1.2)  # Respect rate limit
@@ -201,7 +202,6 @@ class ApexIndianEngine:
                     res = self.smart_api.getCandleData(params)
                     data = res.get("data", [])
                     if data:
-                        sig_engine = self.signal_engines[idx]
                         sig_engine.candles_5m.clear()
                         for row in data:
                             candle_dict = {
