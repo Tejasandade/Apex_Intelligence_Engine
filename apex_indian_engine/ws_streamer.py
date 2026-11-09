@@ -211,9 +211,10 @@ class IndianWebSocketStreamer:
                     asyncio.run_coroutine_threadsafe(self.on_candle_closed(symbol, closed_c), self._loop)
 
             # Start new candle
+            now_iso = datetime.fromtimestamp(now).strftime("%Y-%m-%dT%H:%M:%S+05:30")
             self._candle_start_ts[symbol] = now
             self._candles_5m[symbol] = {
-                "timestamp": now,
+                "timestamp": now_iso,
                 "symbol": symbol,
                 "open": price,
                 "high": price,

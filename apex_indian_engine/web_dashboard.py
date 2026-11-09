@@ -643,14 +643,14 @@ DASHBOARD_HTML = """<!DOCTYPE html>
               <div class="alpha-data" id="alpha-nf-flow">0.99 (Balanced)</div>
             </div>
             <div class="alpha-card">
-              <div class="alpha-title">0DTE Expiry Theta Shield</div>
-              <div class="alpha-data" id="alpha-shield" style="color:var(--green);">SHIELD ENGAGED</div>
+              <div class="alpha-title">Inter-Market SMT Flow</div>
+              <div class="alpha-data" id="alpha-smt" style="font-size:11px;">CONVERGENT</div>
             </div>
           </div>
         </div>
         <div class="alpha-footer">
-          <span id="session-info">Session: Morning Momentum (09:15 - 11:30 IST)</span>
-          <span id="feed-latency" style="font-family:var(--font-mono); color:var(--text-muted);">SmartAPI: Mode 1 Sub-Second</span>
+          <span id="alpha-shield" style="color:var(--green); font-weight:600;">0DTE Shield: ACTIVE</span>
+          <span id="feed-heavy" style="font-family:var(--font-mono); color:var(--text-muted);">SmartAPI: Mode 1 Sub-Second</span>
         </div>
       </section>
 
@@ -921,11 +921,34 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           const nowHour = new Date().getHours();
           const nowMinute = new Date().getMinutes();
           if (nowHour > 13 || (nowHour === 13 && nowMinute >= 30)) {
-            alphaShield.innerText = 'NEXT WEEK ROLL (Active)';
+            alphaShield.innerText = '0DTE Shield: NEXT WEEK ROLL (Active)';
             alphaShield.style.color = 'var(--amber)';
           } else {
-            alphaShield.innerText = 'SHIELD ENGAGED (0DTE < 13:30)';
+            alphaShield.innerText = '0DTE Shield: ENGAGED (Normal ATM)';
             alphaShield.style.color = 'var(--green)';
+          }
+        }
+
+        const alphaSmt = document.getElementById('alpha-smt');
+        if (alphaSmt) {
+          alphaSmt.innerText = data.smt_flow || 'BALANCED';
+          if (data.smt_flow && data.smt_flow.includes('BULLISH')) {
+            alphaSmt.style.color = 'var(--green)';
+          } else if (data.smt_flow && (data.smt_flow.includes('BEARISH') || data.smt_flow.includes('Dragging'))) {
+            alphaSmt.style.color = 'var(--red)';
+          } else {
+            alphaSmt.style.color = 'var(--amber)';
+          }
+        }
+
+        const feedHeavy = document.getElementById('feed-heavy');
+        if (feedHeavy) {
+          const hdfc = Number(data.hdfc_ltp || 0);
+          const icici = Number(data.icici_ltp || 0);
+          if (hdfc > 0 && icici > 0) {
+            feedHeavy.innerText = `Heavyweights: HDFC ₹${hdfc.toFixed(1)} | ICICI ₹${icici.toFixed(1)}`;
+          } else {
+            feedHeavy.innerText = `SmartAPI: Mode 1 Sub-Second`;
           }
         }
 

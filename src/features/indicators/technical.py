@@ -213,7 +213,7 @@ def compute_vwap_session(
     """
     df_v = df.copy()
     if timestamp_col in df_v.columns:
-        ts = pd.to_datetime(df_v[timestamp_col], utc=True)
+        ts = pd.to_datetime(df_v[timestamp_col], utc=True, format="mixed")
         df_v["_local_date"] = ts.dt.tz_convert(timezone).dt.date
     else:
         # Fallback: use index as date grouper

@@ -100,6 +100,7 @@ class ApexIndianEngine:
         self.is_paused = False
 
         self._prev_oi_map: dict[str, dict[Any, int]] = {"NIFTY": {}, "BANKNIFTY": {}}
+        self.heavyweight_prices: dict[str, float] = {"1333": 0.0, "4963": 0.0, "2885": 0.0}
         self.candle_cache_file = Path("data/indian_candles_cache.json")
 
     def authenticate_angel_one(self) -> bool:
@@ -630,6 +631,24 @@ class ApexIndianEngine:
         bn_mtf = self._compute_mtf_trends(bn_candles, bn_spot, bn_lvl.pdc, bn_lvl.pdh)
         nf_mtf = self._compute_mtf_trends(nifty_candles, nifty_spot, nf_lvl.pdc, nf_lvl.pdh)
 
+        # Inter-Market SMT Flow & Heavyweight Momentum
+        bn_chg = round(((bn_spot - bn_lvl.pdc) / max(bn_lvl.pdc, 1.0)) * 100, 2) if bn_lvl.pdc > 0 else 0.0
+        nf_chg = round(((nifty_spot - nf_lvl.pdc) / max(nf_lvl.pdc, 1.0)) * 100, 2) if nf_lvl.pdc > 0 else 0.0
+        
+        if bn_chg > 0.20 and nf_chg > 0.20:
+            smt_flow = "CONVERGENT_BULLISH"
+        elif bn_chg < -0.20 and nf_chg < -0.20:
+            smt_flow = "CONVERGENT_BEARISH"
+        elif bn_chg > 0.15 and nf_chg < -0.10:
+            smt_flow = "SMT DIVERGENT (Bank Leading)"
+        elif bn_chg < -0.15 and nf_chg > 0.10:
+            smt_flow = "SMT DIVERGENT (Bank Dragging)"
+        else:
+            smt_flow = "BALANCED_COUPLED"
+
+        hdfc_px = self.heavyweight_prices.get("1333", 0.0)
+        icici_px = self.heavyweight_prices.get("4963", 0.0)
+
         return {
             "mode": self.config.mode,
             "status": self.risk_manager.status if not self.is_paused else "PAUSED",
@@ -657,6 +676,11 @@ class ApexIndianEngine:
             "nifty_conviction": nf_conviction,
             "nifty_bias": nf_bias,
             "nifty_mtf": nf_mtf,
+            "smt_flow": smt_flow,
+            "bn_chg_pct": bn_chg,
+            "nf_chg_pct": nf_chg,
+            "hdfc_ltp": hdfc_px,
+            "icici_ltp": icici_px,
             "pcr": bn_pcr,
             "oi_flow": bn_flow,
             "call_wall": bn_call_wall,
@@ -748,7 +772,7 @@ class ApexIndianEngine:
         while self.is_running:
             try:
                 if self.smart_api:
-                    exchange_tokens = {"NSE": ["99926009", "99926000", "99926017"]}
+                    exchange_tokens = {"NSE": ["99926009", "99926000", "99926017", "1333", "4963", "2885"]}
                     if self.executor.has_open_position():
                         trade = self.executor.active_trade
                         exchange_tokens["NFO"] = [str(trade.token)]
@@ -767,6 +791,8 @@ class ApexIndianEngine:
                             self.ws_streamer.update_external_tick("NIFTY", ltp)
                         elif tok == "99926017":
                             self.vix_manager.update_vix(ltp)
+                        elif tok in ("1333", "4963", "2885"):
+                            self.heavyweight_prices[tok] = ltp
                         elif self.executor.has_open_position() and tok == str(self.executor.active_trade.token):
                             self.process_tick(current_option_price=ltp)
 

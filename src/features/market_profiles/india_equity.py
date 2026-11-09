@@ -34,7 +34,7 @@ def filter_session_hours(
     Returns:
         Filtered DataFrame.
     """
-    ts = pd.to_datetime(df[timestamp_col], utc=True)
+    ts = pd.to_datetime(df[timestamp_col], utc=True, format="mixed")
     ist = ts.dt.tz_convert(IST)
     minutes = ist.dt.hour * 60 + ist.dt.minute
     weekday = ist.dt.dayofweek  # Mon=0, Fri=4
@@ -64,7 +64,7 @@ def drop_opening_bars(
     Returns:
         Filtered DataFrame.
     """
-    ts = pd.to_datetime(df[timestamp_col], utc=True)
+    ts = pd.to_datetime(df[timestamp_col], utc=True, format="mixed")
     ist = ts.dt.tz_convert(IST)
     minutes = ist.dt.hour * 60 + ist.dt.minute
     open_end = SESSION_OPEN_MINUTES + n_bars
@@ -93,7 +93,7 @@ def compute_session_elapsed_pct(
     Returns:
         Series of elapsed percentage values (0.0 to 1.0).
     """
-    ts = pd.to_datetime(df[timestamp_col], utc=True)
+    ts = pd.to_datetime(df[timestamp_col], utc=True, format="mixed")
     ist = ts.dt.tz_convert(IST)
     minutes = ist.dt.hour * 60 + ist.dt.minute
 
@@ -117,7 +117,7 @@ def compute_gap_from_open_pct(
     Returns:
         Series of gap percentages from session open price.
     """
-    ts = pd.to_datetime(df[timestamp_col], utc=True)
+    ts = pd.to_datetime(df[timestamp_col], utc=True, format="mixed")
     ist = ts.dt.tz_convert(IST)
     df_tmp = df.copy()
     df_tmp["_local_date"] = ist.dt.date

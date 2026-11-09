@@ -87,8 +87,20 @@ class IndianMLPredictor:
             return 0.50, "UNKNOWN", 0.0
 
         try:
+            df = candles_df.copy()
+            if "timestamp" in df.columns:
+                def _safe_ts(v):
+                    try:
+                        fv = float(v)
+                        return pd.to_datetime(fv, unit="s", utc=True)
+                    except (ValueError, TypeError):
+                        pass
+                    return pd.to_datetime(v, utc=True, format="mixed")
+                
+                df["timestamp"] = df["timestamp"].apply(_safe_ts)
+
             # 1. Extract 23 institutional features
-            X = self.feature_store.build_features(candles_df)
+            X = self.feature_store.build_features(df)
             if X.empty:
                 return 0.50, "UNKNOWN", 0.0
 
