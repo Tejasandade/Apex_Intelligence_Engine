@@ -26,12 +26,12 @@
   "today_date": "2026-11-09",
   "daily_realized_pnl": -11.298878229121549,
   "day_peak_realized_pnl": 5.771121770878452,
-  "daily_trades": 3,
+  "daily_trades": 0,
   "total_realized_pnl": 246.95923377087968,
   "wins": 17,
   "losses": 7,
   "total_trades": 24,
   "status": "IN_PROGRESS",
   "halt_reason": "",
-  "last_updated": 1794237580.2694147
+  "last_updated": 1794244359.074253
 }

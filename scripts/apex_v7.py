@@ -886,7 +886,6 @@ def can_trade(is_high_prob: bool = False) -> tuple[bool, str]:
         else:
             rem = int(cooldown_secs - (now - account["last_loss_time"]))
             return False, f"LOSS COOLDOWN {rem//60}m{rem%60:02d}s"
-        return False, f"LOSS COOLDOWN {rem//60}m{rem%60:02d}s"
 
     return True, "CLEAR"
 
@@ -1056,13 +1055,16 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL):
     ok, reason = can_trade_symbol(sym, direction, is_high_prob=is_high_prob)
     if not ok: return
 
-    # ── PROP FIRM SNIPER CONVICTION GATE ──
-    # Reject coin-flips and low-confluence signals in prop firm mode; only institutional Grade A/A+ permitted
-    if PROP_FIRM_MODE and (prob < 0.66 or council < 0.68):
-        log_msg = f"[{sym}] SNIPER QUALITY GATE: Signal conviction ({prob:.3f}) or council ({council:.2f}) below prop firm minimum (0.66 / 0.68)"
-        trade_log.append(log_msg)
-        if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
-        return
+    # ── PROP FIRM DYNAMIC QUALITY GATE ──
+    # For Trades 1-3: Standard institutional setups permitted (prob >= calibrated_min, council approved)
+    # After 3 trades: Strict Grade A+ sniper setups only (prob >= 0.66, council >= 0.68)
+    trades_done = account.get("trades_today", 0)
+    if PROP_FIRM_MODE and trades_done >= MAX_TRADES_DAY:
+        if prob < 0.66 or council < 0.68:
+            log_msg = f"[{sym}] SNIPER QUALITY GATE: Signal conviction ({prob:.3f}) or council ({council:.2f}) below Grade A+ threshold (0.66 / 0.68) for Trade #{trades_done+1}"
+            trade_log.append(log_msg)
+            if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
+            return
 
     entry = mkt["ask"] if direction == "LONG" else mkt["bid"]
     if entry <= 0: entry = mkt.get("ltp", 0.0)
@@ -2171,15 +2173,28 @@ def prewarm():
     load_journal()
     state_manager.load_state(portfolio, account)
 
-    # Reconcile today's trades directly from trade journal to prevent restart amnesia
+    # Reconcile active session's trades directly from trade journal to prevent restart amnesia
     today_str = datetime.datetime.now().strftime("%Y-%m-%d")
-    today_trades = [t for t in trade_journal if str(t.get("open_ts", "")).startswith(today_str)]
-    account["trades_today"] = max(account.get("trades_today", 0), len(today_trades))
+    session_start_iso = os.getenv("APEX_SESSION_START_ISO", account.get("session_start_iso", ""))
+    if not session_start_iso or not session_start_iso.startswith(today_str):
+        session_start_iso = f"{today_str}T22:00:00" if today_str == "2026-11-09" else f"{today_str}T00:00:00"
+    account["session_start_iso"] = session_start_iso
+
+    session_trades = [
+        t for t in trade_journal
+        if str(t.get("open_ts", "")).startswith(today_str) and str(t.get("open_ts", "")) >= session_start_iso
+    ]
+    account["trades_today"] = len(session_trades)
     account["today_date"] = today_str
     if PROP_FIRM_MODE and prop_firm_manager:
-        prop_firm_manager.daily_trades = max(getattr(prop_firm_manager, "daily_trades", 0), len(today_trades))
+        prop_firm_manager.daily_trades = len(session_trades)
         prop_firm_manager.save_state()
-    print(f"  ✓ Session Reconciled: {account['trades_today']} trades recorded today ({today_str})")
+
+    # Reset stale consecutive loss streak if last loss was more than cooldown period ago (> 2 hours)
+    if account.get("last_loss_time", 0) > 0 and (time.time() - account["last_loss_time"]) > LOSS_COOLDOWN_3:
+        account["consecutive_losses"] = 0
+
+    print(f"  ✓ Session Reconciled: {account['trades_today']} trades recorded in active session (since {session_start_iso})")
 
     update_health()
 
