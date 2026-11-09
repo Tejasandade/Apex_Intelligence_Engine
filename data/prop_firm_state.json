@@ -13,7 +13,8 @@
     "min_risk_pct": 0.35,
     "max_concurrent_trades": 1,
     "max_trades_per_day": 3,
-    "daily_profit_lock_usd": 50.0,
+    "trailing_profit_floor_trigger_usd": 45.0,
+    "trailing_profit_floor_ratio": 0.65,
     "news_blackout_mins": 10,
     "firm": "SharkFunded",
     "phase": "1-Step Evaluation"
@@ -24,6 +25,7 @@
   "day_start_balance": 5258.258112,
   "today_date": "2026-11-09",
   "daily_realized_pnl": 5.771121770878452,
+  "day_peak_realized_pnl": 5.771121770878452,
   "total_realized_pnl": 264.02923377087967,
   "wins": 17,
   "losses": 6,

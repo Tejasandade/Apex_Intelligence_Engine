@@ -706,7 +706,7 @@ def is_rollover_or_maintenance() -> tuple[bool, str]:
         return True, f"ABNORMAL SPREAD ({current_spread:.1f} bps > 12.0 bps)"
     return False, "CLEAR"
 
-def can_trade_symbol(symbol: str = SYMBOL, direction: str = "LONG") -> tuple[bool, str]:
+def can_trade_symbol(symbol: str = SYMBOL, direction: str = "LONG", is_high_prob: bool = False) -> tuple[bool, str]:
     now = time.time()
     sym = symbol.upper()
     dir_upper = direction.upper()
@@ -724,6 +724,7 @@ def can_trade_symbol(symbol: str = SYMBOL, direction: str = "LONG") -> tuple[boo
             active_positions=portfolios,
             estimated_risk_usd=25.0,
             max_concurrent=2,
+            is_grade_a_plus=is_high_prob,
         )
         if not pf_ok:
             return False, f"PROP_FIRM: {pf_reason}"
@@ -765,13 +766,19 @@ def can_trade_symbol(symbol: str = SYMBOL, direction: str = "LONG") -> tuple[boo
             rem = int(account["halt_until"] - now) if account["halt_until"] < float("inf") else 999999
             return False, f"HALTED: {account['halt_reason']} ({rem//60}m left)"
     if account["trades_today"] >= MAX_TRADES_DAY:
-        return False, f"DAY LIMIT ({MAX_TRADES_DAY} done)"
+        if not is_high_prob:
+            return False, f"DYNAMIC TRADE CAP: Trade #{account['trades_today']+1} requires High-Probability Grade A+ setup"
+        if account["trades_today"] >= 6:
+            return False, f"HARD DAILY TRADES LIMIT (6/6 trades reached)"
     # Dynamic, non-rigid loss cooldown based on consecutive losses
     consec = account.get("consecutive_losses", 0)
     cooldown_secs = LOSS_COOLDOWN_1 if consec <= 1 else (LOSS_COOLDOWN_2 if consec == 2 else LOSS_COOLDOWN_3)
     if account["last_loss_time"] > 0 and (now - account["last_loss_time"]) < cooldown_secs:
-        rem = int(cooldown_secs - (now - account["last_loss_time"]))
-        return False, f"LOSS COOLDOWN {rem//60}m{rem%60:02d}s"
+        if is_high_prob:
+            logger.info("loss_cooldown_bypassed_by_grade_a_plus", symbol=sym, direction=dir_upper)
+        else:
+            rem = int(cooldown_secs - (now - account["last_loss_time"]))
+            return False, f"LOSS COOLDOWN {rem//60}m{rem%60:02d}s"
 
     mkt = symbol_markets.get(sym, market)
     if mkt.get("spread_bps", 0.0) > 12.0:
@@ -805,7 +812,7 @@ def can_trade_symbol(symbol: str = SYMBOL, direction: str = "LONG") -> tuple[boo
 
     return True, "CLEAR"
 
-def can_trade() -> tuple[bool, str]:
+def can_trade(is_high_prob: bool = False) -> tuple[bool, str]:
     """Check portfolio-wide account gates (is trading globally permitted?)."""
     now = time.time()
     shielded, shield_reason = is_rollover_or_maintenance()
@@ -813,7 +820,7 @@ def can_trade() -> tuple[bool, str]:
         return False, f"SPREAD SHIELD: {shield_reason}"
 
     if PROP_FIRM_MODE and prop_firm_manager:
-        pf_ok, pf_reason = prop_firm_manager.can_trade()
+        pf_ok, pf_reason = prop_firm_manager.can_trade(is_grade_a_plus=is_high_prob)
         if not pf_ok:
             return False, f"PROP_FIRM: {pf_reason}"
 
@@ -825,12 +832,19 @@ def can_trade() -> tuple[bool, str]:
             return False, f"HALTED: {account['halt_reason']} ({rem//60}m left)"
 
     if account["trades_today"] >= MAX_TRADES_DAY:
-        return False, f"DAY LIMIT ({MAX_TRADES_DAY} done)"
+        if not is_high_prob:
+            return False, f"DYNAMIC TRADE CAP: Trade #{account['trades_today']+1} requires High-Probability Grade A+ setup"
+        if account["trades_today"] >= 6:
+            return False, f"HARD DAILY TRADES LIMIT (6/6 trades reached)"
 
     consec = account.get("consecutive_losses", 0)
     cooldown_secs = LOSS_COOLDOWN_1 if consec <= 1 else (LOSS_COOLDOWN_2 if consec == 2 else LOSS_COOLDOWN_3)
     if account["last_loss_time"] > 0 and (now - account["last_loss_time"]) < cooldown_secs:
-        rem = int(cooldown_secs - (now - account["last_loss_time"]))
+        if is_high_prob:
+            logger.info("loss_cooldown_bypassed_by_grade_a_plus", mode="account_global")
+        else:
+            rem = int(cooldown_secs - (now - account["last_loss_time"]))
+            return False, f"LOSS COOLDOWN {rem//60}m{rem%60:02d}s"
         return False, f"LOSS COOLDOWN {rem//60}m{rem%60:02d}s"
 
     return True, "CLEAR"
@@ -993,11 +1007,12 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL):
             pass
 
     direction = "LONG" if signal.direction == "BUY" else "SHORT"
-    ok, reason = can_trade_symbol(sym, direction)
-    if not ok: return
-
     prob      = signal.conviction
     council   = signal.council_score
+    is_high_prob = ((prob >= 0.66 and council >= 0.70) or prob >= 0.70)
+
+    ok, reason = can_trade_symbol(sym, direction, is_high_prob=is_high_prob)
+    if not ok: return
 
     # ── PROP FIRM SNIPER CONVICTION GATE ──
     # Reject coin-flips (e.g. p=0.51, council=0.54) in prop firm mode; only institutional Grade A/A+ permitted
@@ -1756,7 +1771,8 @@ async def _candle_worker():
                         last_gate_rejection["ts"] = time.time()
                         continue
 
-                    ok, reason = can_trade_symbol(sym, direction)
+                    is_high_prob = ((sig.conviction >= 0.66 and sig.council_score >= 0.70) or sig.conviction >= 0.70)
+                    ok, reason = can_trade_symbol(sym, direction, is_high_prob=is_high_prob)
                     sym_port = portfolios.get(sym, portfolio)
                     if sym_port["position"] == "FLAT" and ok:
                         if sig.council_approved and sig.direction in ("BUY", "SELL"):

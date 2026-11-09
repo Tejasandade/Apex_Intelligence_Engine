@@ -309,9 +309,9 @@ class ApexIndianEngine:
             return None
         sig_engine.add_candle(candle)
 
-        # 2. Check risk gate before evaluating signals
+        # 2. Check risk gate before evaluating signals (permit evaluation for high-potential candidate setups)
         skip_time = (self.config.mode == "PAPER")
-        can_trade, gate_reason = self.risk_manager.can_trade(skip_time_check=skip_time)
+        can_trade, gate_reason = self.risk_manager.can_trade(skip_time_check=skip_time, is_high_prob=True)
         if not can_trade:
             logger.debug(f"Trading gate locked: {gate_reason}")
             return None
@@ -345,7 +345,14 @@ class ApexIndianEngine:
         for note in notes:
             logger.info(f"   ↳ {note}")
 
-        # 6. Dynamic Strike & Delta Selection (ATM vs. 1-Strike ITM)
+        # 6. Dynamic Risk Gate Verification based on Signal Potential
+        is_high_prob = (conviction >= 0.70 or abs(score) >= 0.65)
+        can_trade_final, gate_reason_final = self.risk_manager.can_trade(skip_time_check=skip_time, is_high_prob=is_high_prob)
+        if not can_trade_final:
+            logger.info(f"Dynamic Risk Gate Locked ({idx} {direction}): {gate_reason_final}")
+            return None
+
+        # 7. Dynamic Strike & Delta Selection (ATM vs. 1-Strike ITM)
         selected: Optional[SelectedContract] = self.strike_selector.select_best_strike(
             index_name=idx,
             spot_price=cur_spot,

@@ -657,6 +657,7 @@ class PropFirmManager:
         self.daily_unrealized_pnl: float = 0.0
         self.total_realized_pnl: float = 0.0
         self.daily_trades: int = 0
+        self.day_peak_realized_pnl: float = 0.0
 
         self.wins: int = 0
         self.losses: int = 0
@@ -695,6 +696,7 @@ class PropFirmManager:
             self.daily_realized_pnl = 0.0
             self.daily_unrealized_pnl = 0.0
             self.daily_trades = 0
+            self.day_peak_realized_pnl = 0.0
             if self.status == "DAILY_HALT":
                 self.status = "IN_PROGRESS"
                 self.halt_reason = ""
@@ -705,7 +707,7 @@ class PropFirmManager:
         self.check_day_rollover()
         self.daily_unrealized_pnl = float(unrealized_usd)
 
-    def can_trade(self) -> tuple[bool, str]:
+    def can_trade(self, is_grade_a_plus: bool = False) -> tuple[bool, str]:
         """
         Evaluate if a new trade is permitted under Prop Firm Challenge rules.
         """
@@ -746,15 +748,34 @@ class PropFirmManager:
             )
             return False, self.halt_reason
 
-        # 4. Daily Profit Target Lock: Bank wins and walk away (prevent afternoon giveback)
-        daily_target_lock_usd = float(self.config.get("daily_profit_lock_usd", 50.0))
-        if self.daily_realized_pnl >= daily_target_lock_usd:
-            return False, f"DAILY PROFIT LOCKED (+${self.daily_realized_pnl:.2f} banked today). Challenge profit secured for session."
+        # 4. Trailing Daily Profit Floor: Let winners run, but lock in banked gains!
+        # Never artificially cap the day at $50. If profits expand (+100, +150), trail a 65% floor of the peak.
+        # Only lock trading if profits drop below the trailing floor after banking substantial gains (>= $45).
+        day_peak = max(getattr(self, "day_peak_realized_pnl", 0.0), self.daily_realized_pnl)
+        self.day_peak_realized_pnl = day_peak
+        min_floor_trigger = float(self.config.get("trailing_profit_floor_trigger_usd", 45.0))
+        if day_peak >= min_floor_trigger:
+            floor_ratio = float(self.config.get("trailing_profit_floor_ratio", 0.65))
+            trailing_floor_usd = day_peak * floor_ratio
+            if self.daily_realized_pnl < trailing_floor_usd:
+                return False, (
+                    f"TRAILING PROFIT FLOOR LOCKED (+${self.daily_realized_pnl:.2f} protected from day peak +${day_peak:.2f}). "
+                    f"Session profit secured."
+                )
 
-        # 5. Daily Maximum Trades Cap (Sniper Discipline: max 3 trades per day)
-        max_t_day = int(self.config.get("max_trades_per_day", 3))
-        if getattr(self, "daily_trades", 0) >= max_t_day:
-            return False, f"DAILY TRADES CAP REACHED ({self.daily_trades}/{max_t_day} executed today). Standing down to protect challenge capital."
+        # 5. Dynamic Daily Trades Cap (Sniper Discipline)
+        # Trades 1 to base_max_trades (default 3) allow standard setups.
+        # Above 3 trades, only permit High-Probability / High-Potential (Grade A+) setups.
+        # Hard safety ceiling at 6 trades to prevent endless overtrading/chop.
+        base_max_trades = int(self.config.get("max_trades_per_day", 3))
+        daily_done = getattr(self, "daily_trades", 0)
+        if daily_done >= base_max_trades and not is_grade_a_plus:
+            return False, (
+                f"DYNAMIC TRADE CAP: Trade #{daily_done + 1} requires High-Probability Grade A+ setup "
+                f"(conviction >= 0.66, council >= 0.70). Standing down to protect gains."
+            )
+        if daily_done >= 6:
+            return False, f"HARD DAILY TRADES LIMIT (6/6 trades reached today). Standing down to protect challenge capital."
 
         return True, "CLEAR"
 
@@ -764,14 +785,15 @@ class PropFirmManager:
         direction: str,
         active_positions: dict[str, dict],
         estimated_risk_usd: float = 25.0,
-        max_concurrent: int = 2
+        max_concurrent: int = 2,
+        is_grade_a_plus: bool = False,
     ) -> tuple[bool, str]:
         """
         Evaluate if a new trade can be opened in a multi-asset environment
         while strictly complying with SharkFunded prop firm risk caps.
         """
         # 1. Base challenge gate
-        ok, reason = self.can_trade()
+        ok, reason = self.can_trade(is_grade_a_plus=is_grade_a_plus)
         if not ok:
             return False, reason
 
@@ -861,11 +883,12 @@ class PropFirmManager:
             trade_mode.upper() == "SWING"
             or potential_rr >= 3.0
             or (conviction >= 0.65 and council_score >= 0.72)
+            or conviction >= 0.70
         )
         is_grade_a = (conviction >= 0.62 and council_score >= 0.68) or potential_rr >= 2.5
 
-        if consecutive_losses >= 1:
-            # Defensive scale-down after loss to protect challenge equity
+        if consecutive_losses >= 1 and not is_high_potential:
+            # Defensive scale-down after loss to protect challenge equity, UNLESS setup is Grade A+
             risk_pct = float(self.config.get("min_risk_pct", 0.35))
         elif is_high_potential:
             # Institutional Sniper: Grade A+ setup / 3.0R+ target -> Full dynamic sizing for +$70 to +$100 wins
@@ -875,7 +898,7 @@ class PropFirmManager:
             risk_pct = 0.75                                           # 0.75% ($38 to $40)
         else:
             # Baseline Scalp / Ranging
-            risk_pct = float(self.config.get("base_risk_pct", 0.55))   # 0.55% ($28 to $30)
+            risk_pct = float(self.config.get("base_risk_pct", 0.50))   # 0.50% ($25 to $26)
 
         risk_usd = self.virtual_balance * (risk_pct / 100.0)
 
@@ -994,6 +1017,7 @@ class PropFirmManager:
         self.daily_unrealized_pnl = 0.0
         self.total_trades += 1
         self.daily_trades = getattr(self, "daily_trades", 0) + 1
+        self.day_peak_realized_pnl = max(getattr(self, "day_peak_realized_pnl", 0.0), self.daily_realized_pnl)
 
         if pnl > 0:
             self.wins += 1
@@ -1029,6 +1053,9 @@ class PropFirmManager:
         remaining_target_usd = max(0.0, target_usd - current_profit)
         soft_landing_active = (0 < remaining_target_usd <= 100.0) and (current_profit > 0)
 
+        day_peak = max(getattr(self, "day_peak_realized_pnl", 0.0), self.daily_realized_pnl)
+        trailing_floor = round(day_peak * 0.65, 2) if day_peak >= 45.0 else 0.0
+
         return {
             "challenge_name": self.config["name"],
             "name": self.config["name"],
@@ -1048,6 +1075,8 @@ class PropFirmManager:
             "progress_pct": round(progress_pct, 1),
             "soft_landing_active": soft_landing_active,
             "daily_pnl_usd": round(current_daily_pnl, 2),
+            "day_peak_realized_pnl": round(day_peak, 2),
+            "trailing_profit_floor_usd": trailing_floor,
             "daily_limit_usd": round(daily_limit_usd, 2),
             "max_daily_loss_usd": round(daily_limit_usd, 2),
             "max_daily_loss_pct": float(self.config.get("max_daily_loss_pct", 5.0)),
@@ -1081,6 +1110,7 @@ class PropFirmManager:
             "day_start_balance": self.day_start_balance,
             "today_date": self.today_date,
             "daily_realized_pnl": self.daily_realized_pnl,
+            "day_peak_realized_pnl": getattr(self, "day_peak_realized_pnl", 0.0),
             "daily_trades": getattr(self, "daily_trades", 0),
             "total_realized_pnl": self.total_realized_pnl,
             "wins": self.wins,
@@ -1167,6 +1197,7 @@ class PropFirmManager:
         self.wins = 0
         self.losses = 0
         self.total_trades = 0
+        self.day_peak_realized_pnl = 0.0
         self.status = "IN_PROGRESS"
         self.halt_reason = ""
         self.save_state()
@@ -1191,6 +1222,7 @@ class PropFirmManager:
             self.day_start_balance = float(data.get("day_start_balance", self.initial_balance))
             self.today_date = data.get("today_date", self.today_date)
             self.daily_realized_pnl = float(data.get("daily_realized_pnl", 0.0))
+            self.day_peak_realized_pnl = float(data.get("day_peak_realized_pnl", self.daily_realized_pnl))
             self.daily_trades = int(data.get("daily_trades", 0))
             self.total_realized_pnl = float(data.get("total_realized_pnl", 0.0))
             self.wins = int(data.get("wins", 0))

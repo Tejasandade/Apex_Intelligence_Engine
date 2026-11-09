@@ -46,6 +46,7 @@ class IndianRiskManager:
         self.daily_friction_cost = 0.0
         self.trades_today = 0
         self.consecutive_losses = 0
+        self.day_peak_realized_pnl = 0.0
         self.status = "READY"              # READY | IN_PROGRESS | DAILY_HALT | CLOSED
         self.halt_reason = ""
         self.halt_until_ts = 0.0
@@ -64,6 +65,7 @@ class IndianRiskManager:
             self.daily_friction_cost = 0.0
             self.trades_today = 0
             self.consecutive_losses = 0
+            self.day_peak_realized_pnl = 0.0
             self.status = "READY"
             self.halt_reason = ""
             self.halt_until_ts = 0.0
@@ -79,16 +81,22 @@ class IndianRiskManager:
         self.daily_friction_cost = 0.0
         self.trades_today = 0
         self.consecutive_losses = 0
+        self.day_peak_realized_pnl = 0.0
         self.status = "READY"
         self.halt_reason = ""
         self.halt_until_ts = 0.0
         self.save_state()
         logger.info(f"Indian Engine Force Reset: Capital=₹{self.capital_inr:,.2f}, Trades=0/4, Status=READY")
 
-    def can_enter_trade(self, now_time: Optional[dtime] = None, skip_time_check: bool = False) -> tuple[bool, str]:
+    def can_enter_trade(
+        self,
+        now_time: Optional[dtime] = None,
+        skip_time_check: bool = False,
+        is_high_prob: bool = False,
+    ) -> tuple[bool, str]:
         """
         Validates whether opening a new option trade is permitted right now.
-        Checks IST market hours, killzones, daily loss limits, and trade caps.
+        Checks IST market hours, killzones, daily loss limits, and dynamic trade caps.
         """
         self.check_day_reset()
 
@@ -105,14 +113,20 @@ class IndianRiskManager:
             if self.schedule.lunch_chop_start <= cur_t < self.schedule.lunch_chop_end:
                 return False, "European open lunch chop (11:30-13:00 IST) — Trading paused to avoid sideways Theta burn"
 
-        # 2. Cooling pause from consecutive losses
+        # 2. Cooling pause from consecutive losses (bypassed if Grade A+ setup)
         if time.time() < self.halt_until_ts:
-            rem_m = (self.halt_until_ts - time.time()) / 60.0
-            return False, f"Consecutive loss cooling pause active ({rem_m:.0f}m remaining)"
+            if is_high_prob:
+                logger.info("Consecutive loss cooldown bypassed by High-Probability Grade A+ setup")
+            else:
+                rem_m = (self.halt_until_ts - time.time()) / 60.0
+                return False, f"Consecutive loss cooling pause active ({rem_m:.0f}m remaining)"
 
-        # 3. Maximum trades per day
+        # 3. Dynamic Daily Trades Cap (Sniper Discipline: Grade A+ required after base limit)
         if self.trades_today >= self.rules.max_trades_per_day:
-            return False, f"Maximum daily trades limit reached ({self.trades_today}/{self.rules.max_trades_per_day})"
+            if not is_high_prob:
+                return False, f"Dynamic Trade Cap: Trade #{self.trades_today+1} requires Grade A+ setup (conviction >= 0.70 or council >= 0.65)"
+            if self.trades_today >= 5:
+                return False, f"Hard daily trades limit reached (5/5 executed today)"
 
         # 4. Daily Loss Circuit Breaker
         current_net_pnl = self.daily_realized_pnl + self.daily_unrealized_pnl
@@ -124,10 +138,17 @@ class IndianRiskManager:
             self.halt_reason = f"Daily safety buffer hit (-₹{abs(current_net_pnl):,.2f} / -₹{hard_limit:,.2f})"
             return False, self.halt_reason
 
-        # 5. Daily Profit Target Lock (Bank profits and lock session)
-        profit_lock_inr = self.day_start_capital * (self.rules.daily_profit_lock_pct / 100.0)
-        if self.daily_realized_pnl >= profit_lock_inr:
-            return False, f"Daily profit target secured (+₹{self.daily_realized_pnl:,.2f} banked today) — Trading concluded for the session"
+        # 5. Trailing Daily Profit Floor (Uncapped upside with locked-in profits)
+        day_peak = max(getattr(self, "day_peak_realized_pnl", 0.0), self.daily_realized_pnl)
+        self.day_peak_realized_pnl = day_peak
+        min_floor_trigger = 2000.0  # ₹2,000 threshold on ₹1 Lakh capital (2.0%)
+        if day_peak >= min_floor_trigger:
+            trailing_floor = day_peak * 0.65
+            if self.daily_realized_pnl < trailing_floor:
+                return False, (
+                    f"Trailing Profit Floor Locked (+₹{self.daily_realized_pnl:,.2f} protected from day peak +₹{day_peak:,.2f}) — "
+                    f"Session profits secured"
+                )
 
         return True, "CLEAR"
 
@@ -235,6 +256,7 @@ class IndianRiskManager:
 
         self.capital_inr += net_pnl
         self.daily_realized_pnl += net_pnl
+        self.day_peak_realized_pnl = max(getattr(self, "day_peak_realized_pnl", 0.0), self.daily_realized_pnl)
         self.daily_friction_cost += friction_cost
         self.daily_unrealized_pnl = 0.0
         self.trades_today += 1
@@ -271,6 +293,7 @@ class IndianRiskManager:
             "capital_inr": self.capital_inr,
             "day_start_capital": self.day_start_capital,
             "daily_realized_pnl": self.daily_realized_pnl,
+            "day_peak_realized_pnl": getattr(self, "day_peak_realized_pnl", 0.0),
             "daily_unrealized_pnl": self.daily_unrealized_pnl,
             "daily_friction_cost": self.daily_friction_cost,
             "trades_today": self.trades_today,
@@ -292,6 +315,7 @@ class IndianRiskManager:
                     self.capital_inr = float(data.get("capital_inr", self.capital_inr))
                     self.day_start_capital = float(data.get("day_start_capital", self.capital_inr))
                     self.daily_realized_pnl = float(data.get("daily_realized_pnl", 0.0))
+                    self.day_peak_realized_pnl = float(data.get("day_peak_realized_pnl", self.daily_realized_pnl))
                     self.daily_friction_cost = float(data.get("daily_friction_cost", 0.0))
                     self.trades_today = int(data.get("trades_today", 0))
                     self.consecutive_losses = int(data.get("consecutive_losses", 0))
