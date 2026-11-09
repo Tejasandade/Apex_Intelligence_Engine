@@ -55,7 +55,7 @@ class IndianTerminalHUD:
         lines.append(f"║  Time: {t_str} | Mode: {mode:<6} | Status: {status:<10}                        ║")
         lines.append("╠" + "═" * 78 + "╣")
         lines.append(
-            f"║  CAPITAL: ₹{cap:>10,2f} | Net Daily PnL: {sign}₹{net_pnl:>8,2f} | Trades: {trades}/{max_trades} | Fees: ₹{friction:>6.2f} ║"
+            f"║  CAPITAL: ₹{cap:>10,.2f} | Net Daily PnL: {sign}₹{net_pnl:>8,.2f} | Trades: {trades}/{max_trades} | Fees: ₹{friction:>6.2f} ║"
         )
         lines.append("╠" + "═" * 78 + "╣")
         lines.append("║  MARKET POSTURE & VOLATILITY:                                                ║")
@@ -87,7 +87,7 @@ class IndianTerminalHUD:
             u_sign = "+" if u_pnl >= 0 else ""
 
             lines.append("║  ACTIVE OPTION POSITION:                                                     ║")
-            lines.append(f"║   Symbol: <b>{sym:<30}</b> | Lots: {lots} ({qty} Qty)                     ║")
+            lines.append(f"║   Symbol: {sym:<34} | Lots: {lots} ({qty} Qty)                     ║")
             lines.append(f"║   Entry: ₹{entry:>7.2f} | SL: ₹{sl:>7.2f} | TP1: ₹{tp1:>7.2f} | TP2: ₹{tp2:>7.2f}           ║")
             lines.append(f"║   Unrealized PnL: {u_sign}₹{u_pnl:>8.2f}                                                    ║")
         else:
@@ -95,3 +95,4 @@ class IndianTerminalHUD:
 
         lines.append("╚" + "═" * 78 + "╝")
         return "\n".join(lines)
+
