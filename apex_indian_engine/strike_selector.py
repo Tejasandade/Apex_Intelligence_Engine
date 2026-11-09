@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime, time as dtime
 from typing import Any, Optional
 
 from apex_indian_engine.scrip_master import ScripMaster
@@ -65,6 +66,14 @@ class DynamicStrikeSelector:
         if not expiry:
             logger.error(f"No active weekly expiry found for {idx}")
             return None
+
+        # 0DTE Afternoon Theta Shield: After 13:30 IST on expiry day, roll to Next Weekly Expiry
+        now_time = datetime.now().time()
+        if now_time >= dtime(13, 30):
+            next_exp = self.scrip_master.get_next_expiry(idx)
+            if next_exp and next_exp != expiry:
+                logger.info(f"🛡️ 0DTE AFTERNOON SHIELD: Rolling {idx} from {expiry} to Next Week ({next_exp}) to bypass rapid theta burn.")
+                expiry = next_exp
 
         # 1. Decide ATM vs ITM offset
         # In low VIX or extreme VIX or lower conviction -> 1-Strike ITM

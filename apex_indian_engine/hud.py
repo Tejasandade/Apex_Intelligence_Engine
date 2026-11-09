@@ -73,6 +73,10 @@ class IndianTerminalHUD:
         lines.append(
             f"║   PCR: {pcr:>4.2f} | Flow: {oi_flow:<20} | Walls: {put_wall:.0f} (Floor) / {call_wall:.0f} (Ceil) ║"
         )
+        bn_lvl = metrics.get("bn_levels", {})
+        cpr_reg = str(bn_lvl.get("cpr_regime", "BALANCED"))[:18]
+        sw = str(bn_lvl.get("active_sweep", "None"))[:32]
+        lines.append(f"║   BN CPR: {cpr_reg:<18} │ Trap/Sweep: {sw:<32}║")
         lines.append("╠" + "═" * 78 + "╣")
 
         if open_pos:
@@ -84,12 +88,16 @@ class IndianTerminalHUD:
             tp1 = open_pos.get("tp1_price", 0.0)
             tp2 = open_pos.get("tp2_price", 0.0)
             u_pnl = open_pos.get("unrealized_pnl", 0.0)
+            partial_c = open_pos.get("partial_cash", 0.0)
             u_sign = "+" if u_pnl >= 0 else ""
 
             lines.append("║  ACTIVE OPTION POSITION:                                                     ║")
             lines.append(f"║   Symbol: {sym:<34} | Lots: {lots} ({qty} Qty)                     ║")
             lines.append(f"║   Entry: ₹{entry:>7.2f} | SL: ₹{sl:>7.2f} | TP1: ₹{tp1:>7.2f} | TP2: ₹{tp2:>7.2f}           ║")
-            lines.append(f"║   Unrealized PnL: {u_sign}₹{u_pnl:>8.2f}                                                    ║")
+            if partial_c > 0:
+                lines.append(f"║   Unrealized PnL: {u_sign}₹{u_pnl:>8.2f} | Banked Cash: +₹{partial_c:>8.2f} (Runner Active)   ║")
+            else:
+                lines.append(f"║   Unrealized PnL: {u_sign}₹{u_pnl:>8.2f}                                                    ║")
         else:
             lines.append("║  ACTIVE OPTION POSITION: FLAT (Monitoring 5m council setups...)              ║")
 

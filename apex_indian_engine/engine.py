@@ -35,6 +35,7 @@ from apex_indian_engine.ws_streamer import IndianWebSocketStreamer
 from apex_indian_engine.telegram_bot import IndianTelegramNotifier
 from apex_indian_engine.hud import IndianTerminalHUD
 from apex_indian_engine.web_dashboard import IndianWebServer
+from apex_indian_engine.key_levels import InstitutionalLevelsTracker
 
 logging.basicConfig(
     level=logging.INFO,
@@ -74,6 +75,10 @@ class ApexIndianEngine:
         self.oi_trackers: dict[str, OptionChainOITracker] = {
             "NIFTY": OptionChainOITracker("NIFTY"),
             "BANKNIFTY": OptionChainOITracker("BANKNIFTY"),
+        }
+        self.levels_trackers: dict[str, InstitutionalLevelsTracker] = {
+            "NIFTY": InstitutionalLevelsTracker("NIFTY"),
+            "BANKNIFTY": InstitutionalLevelsTracker("BANKNIFTY"),
         }
 
         # Telegram, HUD & WebSocket Streamer
@@ -318,8 +323,9 @@ class ApexIndianEngine:
         vix_params = self.vix_manager.get_parameters()
         sig_engine.min_consensus_threshold = vix_params.consensus_threshold
 
-        # 5. Evaluate 4-Advisor Council + ML + OI Shield
-        res = sig_engine.evaluate_signal(cur_spot, cur_vwap, oi_chain=oi_chain)
+        # 5. Evaluate 5-Advisor Council + ML + CPR/ORB Levels + OI Shield
+        cur_lvl = self.levels_trackers[idx].calculate_from_candles(sig_engine.candles_5m, cur_spot)
+        res = sig_engine.evaluate_signal(cur_spot, cur_vwap, oi_chain=oi_chain, key_levels=cur_lvl)
         if not res:
             return None
 
@@ -479,6 +485,51 @@ class ApexIndianEngine:
 
         return None
 
+    def _compute_mtf_trends(
+        self,
+        candles: list[dict[str, Any]],
+        spot: float,
+        pdc: float,
+        open_px: float,
+    ) -> dict[str, str]:
+        """
+        Computes 4-timeframe trend alignment (1D, 1H, 15m, 5m).
+        Returns dict with "1d", "1h", "15m", "5m" as 'BULL' | 'BEAR' | 'NEUT'.
+        """
+        mtf = {"1d": "NEUT", "1h": "NEUT", "15m": "NEUT", "5m": "NEUT"}
+        if not candles:
+            return mtf
+
+        # 1D Trend (Daily): Spot vs Previous Day Close or Day's Open
+        if pdc > 0:
+            mtf["1d"] = "BULL" if spot >= pdc else "BEAR"
+        elif open_px > 0:
+            mtf["1d"] = "BULL" if spot >= open_px else "BEAR"
+
+        # 1H Trend (Hourly: 12 x 5m candles)
+        closes = [float(c["close"]) for c in candles]
+        if len(closes) >= 12:
+            sma12 = sum(closes[-12:]) / 12.0
+            mtf["1h"] = "BULL" if spot >= sma12 else "BEAR"
+        elif len(closes) >= 2:
+            mtf["1h"] = "BULL" if closes[-1] >= closes[0] else "BEAR"
+
+        # 15m Trend (15-Minute: 3 x 5m candles)
+        if len(closes) >= 3:
+            sma3 = sum(closes[-3:]) / 3.0
+            mtf["15m"] = "BULL" if spot >= sma3 else "BEAR"
+
+        # 5m Trend (5-Minute: current close vs latest open)
+        latest_open = float(candles[-1].get("open", spot))
+        if spot > latest_open + 2.0:
+            mtf["5m"] = "BULL"
+        elif spot < latest_open - 2.0:
+            mtf["5m"] = "BEAR"
+        else:
+            mtf["5m"] = "NEUT"
+
+        return mtf
+
     def get_hud_metrics(self) -> dict[str, Any]:
         """Provides status metrics for Web/Terminal HUD."""
         open_pos = None
@@ -489,12 +540,15 @@ class ApexIndianEngine:
                 "option_type": t.option_type,
                 "direction": t.direction,
                 "lots": t.lots,
+                "initial_lots": t.initial_lots,
                 "quantity": t.quantity,
                 "entry_price": t.entry_price,
                 "sl_price": t.sl_price,
                 "tp1_price": t.tp1_price,
                 "tp2_price": t.tp2_price,
                 "unrealized_pnl": t.unrealized_pnl,
+                "partial_cash": t.partial_booked_cash,
+                "trailing_tier": t.trailing_tier,
             }
 
         vix_params = self.vix_manager.get_parameters()
@@ -541,13 +595,17 @@ class ApexIndianEngine:
         bn_spark = [float(c["close"]) for c in bn_candles[-20:]] if bn_candles else [bn_spot]
         nf_spark = [float(c["close"]) for c in nifty_candles[-20:]] if nifty_candles else [nifty_spot]
 
+        # Institutional Key Levels & CPR
+        bn_lvl = self.levels_trackers["BANKNIFTY"].calculate_from_candles(bn_candles, bn_spot)
+        nf_lvl = self.levels_trackers["NIFTY"].calculate_from_candles(nifty_candles, nifty_spot)
+
         # Advisor Council Consensus & Bias
         bn_score = 0.0
         bn_conviction = 0.50
         bn_bias = "NEUTRAL"
         if len(bn_candles) >= 20:
             try:
-                res = self.signal_engines["BANKNIFTY"].evaluate_signal(bn_spot, bn_vwap)
+                res = self.signal_engines["BANKNIFTY"].evaluate_signal(bn_spot, bn_vwap, key_levels=bn_lvl)
                 if res:
                     bn_bias = f"{res[0]} ({res[1]})"
                     bn_conviction = res[2]
@@ -560,13 +618,17 @@ class ApexIndianEngine:
         nf_bias = "NEUTRAL"
         if len(nifty_candles) >= 20:
             try:
-                res = self.signal_engines["NIFTY"].evaluate_signal(nifty_spot, nifty_vwap)
+                res = self.signal_engines["NIFTY"].evaluate_signal(nifty_spot, nifty_vwap, key_levels=nf_lvl)
                 if res:
                     nf_bias = f"{res[0]} ({res[1]})"
                     nf_conviction = res[2]
                     nf_score = res[3]
             except Exception:
                 pass
+
+        # Multi-Timeframe (MTF) Trend Alignment
+        bn_mtf = self._compute_mtf_trends(bn_candles, bn_spot, bn_lvl.pdc, bn_lvl.pdh)
+        nf_mtf = self._compute_mtf_trends(nifty_candles, nifty_spot, nf_lvl.pdc, nf_lvl.pdh)
 
         return {
             "mode": self.config.mode,
@@ -587,12 +649,14 @@ class ApexIndianEngine:
             "banknifty_score": bn_score,
             "banknifty_conviction": bn_conviction,
             "banknifty_bias": bn_bias,
+            "banknifty_mtf": bn_mtf,
             "nifty_spot": nifty_spot,
             "nifty_vwap": nifty_vwap,
             "nifty_sparkline": nf_spark,
             "nifty_score": nf_score,
             "nifty_conviction": nf_conviction,
             "nifty_bias": nf_bias,
+            "nifty_mtf": nf_mtf,
             "pcr": bn_pcr,
             "oi_flow": bn_flow,
             "call_wall": bn_call_wall,
@@ -601,6 +665,34 @@ class ApexIndianEngine:
             "nifty_oi_flow": nf_flow,
             "nifty_call_wall": nf_call_wall,
             "nifty_put_wall": nf_put_wall,
+            "bn_levels": {
+                "pdh": bn_lvl.pdh,
+                "pdl": bn_lvl.pdl,
+                "pivot": bn_lvl.pivot,
+                "tc": bn_lvl.tc,
+                "bc": bn_lvl.bc,
+                "cpr_width": bn_lvl.cpr_width,
+                "cpr_regime": bn_lvl.cpr_regime,
+                "r1": bn_lvl.r1,
+                "s1": bn_lvl.s1,
+                "orh": bn_lvl.orh,
+                "orl": bn_lvl.orl,
+                "active_sweep": bn_lvl.active_sweep,
+            },
+            "nifty_levels": {
+                "pdh": nf_lvl.pdh,
+                "pdl": nf_lvl.pdl,
+                "pivot": nf_lvl.pivot,
+                "tc": nf_lvl.tc,
+                "bc": nf_lvl.bc,
+                "cpr_width": nf_lvl.cpr_width,
+                "cpr_regime": nf_lvl.cpr_regime,
+                "r1": nf_lvl.r1,
+                "s1": nf_lvl.s1,
+                "orh": nf_lvl.orh,
+                "orl": nf_lvl.orl,
+                "active_sweep": nf_lvl.active_sweep,
+            },
             "open_position": open_pos,
         }
 

@@ -287,6 +287,150 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     }
     .pos-win { color: var(--green); }
     .pos-loss { color: var(--red); }
+
+    /* MTF 4-Timeframe Matrix Strip */
+    .mtf-matrix {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      background: var(--surface-subtle);
+      border: 1px solid var(--border-hairline);
+      border-radius: 6px;
+      padding: 4px 10px;
+      margin: 2px 0 6px 0;
+    }
+    .mtf-cell {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      font-size: 10px;
+      font-family: var(--font-mono);
+      font-weight: 700;
+      padding: 2px 6px;
+      border-radius: 4px;
+      color: var(--text-secondary);
+    }
+    .mtf-cell.bull { background: var(--green-soft); color: var(--green); border: 1px solid rgba(8,153,129,0.25); }
+    .mtf-cell.bear { background: var(--red-soft); color: var(--red); border: 1px solid rgba(242,54,69,0.25); }
+    .mtf-cell.neut { background: rgba(255, 255, 255, 0.04); color: var(--text-muted); }
+
+    /* 2-Column Split: Key Levels + Macro Intel */
+    .intel-grid {
+      display: grid;
+      grid-template-columns: 1.35fr 1fr;
+      gap: 16px;
+    }
+    @media (max-width: 980px) {
+      .intel-grid { grid-template-columns: 1fr; }
+    }
+
+    .surface-panel {
+      background: var(--surface);
+      border: 1px solid var(--border-hairline);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    .panel-header {
+      padding: 12px 18px;
+      border-bottom: 1px solid var(--border-hairline);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: var(--surface-subtle);
+    }
+    .section-label {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-secondary);
+    }
+    .badge-dim {
+      font-size: 11px;
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+    }
+
+    /* Key Levels Table */
+    table.key-levels-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+    table.key-levels-table th {
+      text-align: left;
+      padding: 10px 14px;
+      color: var(--text-secondary);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+      border-bottom: 1px solid var(--border-hairline);
+      background: rgba(0,0,0,0.15);
+    }
+    table.key-levels-table td {
+      padding: 11px 14px;
+      border-bottom: 1px solid var(--border-hairline);
+      font-family: var(--font-mono);
+      font-size: 12px;
+    }
+    table.key-levels-table tr:last-child td {
+      border-bottom: none;
+    }
+    table.key-levels-table tr:hover td {
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    .pill-tag {
+      padding: 2px 7px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      display: inline-block;
+      text-transform: uppercase;
+    }
+    .pill-tag.bull { background: var(--green-soft); color: var(--green); border: 1px solid rgba(8,153,129,0.3); }
+    .pill-tag.bear { background: var(--red-soft); color: var(--red); border: 1px solid rgba(242,54,69,0.3); }
+    .pill-tag.neut { background: rgba(255,255,255,0.05); color: var(--text-secondary); }
+
+    /* Alpha Cards Grid */
+    .alpha-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      padding: 16px;
+    }
+    .alpha-card {
+      background: var(--surface-subtle);
+      border: 1px solid var(--border-hairline);
+      border-radius: 8px;
+      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .alpha-title {
+      font-size: 10px;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      font-weight: 600;
+      letter-spacing: 0.4px;
+    }
+    .alpha-data {
+      font-size: 13px;
+      font-weight: 700;
+      font-family: var(--font-mono);
+      color: var(--text-primary);
+    }
+    .alpha-footer {
+      padding: 10px 16px;
+      border-top: 1px solid var(--border-hairline);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 11px;
+      color: var(--text-secondary);
+      background: rgba(0,0,0,0.15);
+    }
   </style>
 </head>
 <body>
@@ -353,6 +497,15 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           </svg>
         </div>
 
+        <!-- MTF 4-Timeframe Matrix Strip -->
+        <div class="mtf-matrix">
+          <span style="font-size:10px; color:var(--text-muted); font-weight:600;">MTF:</span>
+          <span class="mtf-cell neut" id="bn-mtf-1d">1D ▬</span>
+          <span class="mtf-cell neut" id="bn-mtf-1h">1H ▬</span>
+          <span class="mtf-cell neut" id="bn-mtf-15m">15m ▬</span>
+          <span class="mtf-cell neut" id="bn-mtf-5m">5m ▬</span>
+        </div>
+
         <!-- Council & Model Bias Bar -->
         <div class="consensus-container">
           <div class="consensus-head">
@@ -389,6 +542,15 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <svg class="sparkline" id="nifty-sparkline" viewBox="0 0 100 36" preserveAspectRatio="none">
             <path id="nifty-sparkline-path" d="" fill="none" stroke="var(--green)" stroke-width="2" />
           </svg>
+        </div>
+
+        <!-- MTF 4-Timeframe Matrix Strip -->
+        <div class="mtf-matrix">
+          <span style="font-size:10px; color:var(--text-muted); font-weight:600;">MTF:</span>
+          <span class="mtf-cell neut" id="nifty-mtf-1d">1D ▬</span>
+          <span class="mtf-cell neut" id="nifty-mtf-1h">1H ▬</span>
+          <span class="mtf-cell neut" id="nifty-mtf-15m">15m ▬</span>
+          <span class="mtf-cell neut" id="nifty-mtf-5m">5m ▬</span>
         </div>
 
         <!-- Council & Model Bias Bar -->
@@ -431,6 +593,69 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
     </section>
 
+    <!-- 2-Column Institutional Split: Key Levels Matrix + Derivative Alpha -->
+    <div class="intel-grid">
+
+      <!-- Institutional Liquidity & Key Levels Table -->
+      <section class="surface-panel">
+        <div class="panel-header">
+          <div class="section-label">Institutional Key Levels & CPR Matrix</div>
+          <div class="badge-dim">PDH / PDL / CPR / ORB 9:15-9:30</div>
+        </div>
+        <div class="table-container">
+          <table class="key-levels-table">
+            <thead>
+              <tr>
+                <th>Symbol</th>
+                <th>Prev Day High</th>
+                <th>Prev Day Low</th>
+                <th>Central Pivot (TC / P / BC)</th>
+                <th>CPR Regime</th>
+                <th>Opening Range (ORB)</th>
+                <th>Sweep / Benchmark</th>
+              </tr>
+            </thead>
+            <tbody id="levels-tbody">
+              <!-- Rendered reactively via updateDashboard() -->
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Derivative Alpha & Market Posture -->
+      <section class="surface-panel" style="display:flex; flex-direction:column; justify-content:space-between;">
+        <div>
+          <div class="panel-header">
+            <div class="section-label">Derivative Alpha & Intelligence</div>
+            <div class="tag tag-live" id="alpha-status-badge">MARKET: ACTIVE</div>
+          </div>
+          <div class="alpha-grid">
+            <div class="alpha-card">
+              <div class="alpha-title">India VIX Regime</div>
+              <div class="alpha-data" id="alpha-vix">17.61 (Elevated)</div>
+            </div>
+            <div class="alpha-card">
+              <div class="alpha-title">BankNifty PCR Flow</div>
+              <div class="alpha-data" id="alpha-bn-flow">0.60 (Put Writing)</div>
+            </div>
+            <div class="alpha-card">
+              <div class="alpha-title">Nifty 50 PCR Flow</div>
+              <div class="alpha-data" id="alpha-nf-flow">0.99 (Balanced)</div>
+            </div>
+            <div class="alpha-card">
+              <div class="alpha-title">0DTE Expiry Theta Shield</div>
+              <div class="alpha-data" id="alpha-shield" style="color:var(--green);">SHIELD ENGAGED</div>
+            </div>
+          </div>
+        </div>
+        <div class="alpha-footer">
+          <span id="session-info">Session: Morning Momentum (09:15 - 11:30 IST)</span>
+          <span id="feed-latency" style="font-family:var(--font-mono); color:var(--text-muted);">SmartAPI: Mode 1 Sub-Second</span>
+        </div>
+      </section>
+
+    </div>
+
     <!-- Active Option Position -->
     <section class="position-banner" id="pos-banner">
       <div style="display:flex; justify-content:space-between; align-items:center;">
@@ -461,6 +686,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <div class="stat-card">
           <span class="stat-label">Unrealized PnL</span>
           <span class="stat-val" style="font-size:16px;" id="pos-pnl">+₹0.00</span>
+        </div>
+        <div class="stat-card" id="pos-partial-card" style="display:none;">
+          <span class="stat-label">Harvested Cash (Runner)</span>
+          <span class="stat-val" style="font-size:14px; color:var(--green);" id="pos-partial">+₹0.00</span>
         </div>
       </div>
     </section>
@@ -616,6 +845,90 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         document.getElementById('vix-regime-name').innerText = data.vix_regime || 'ELEVATED';
         document.getElementById('vix-desc').innerText = data.vix_regime || 'ELEVATED_VOL';
 
+        // MTF 4-Timeframe Matrix Alignment
+        function updateMtfCells(prefix, mtf) {
+          if (!mtf) return;
+          const tfs = ['1d', '1h', '15m', '5m'];
+          const labels = {'1d': '1D', '1h': '1H', '15m': '15m', '5m': '5m'};
+          tfs.forEach(tf => {
+            const el = document.getElementById(`${prefix}-mtf-${tf}`);
+            if (el) {
+              const val = mtf[tf] || 'NEUT';
+              el.className = `mtf-cell ${val.toLowerCase()}`;
+              const symbol = val === 'BULL' ? '▲' : (val === 'BEAR' ? '▼' : '▬');
+              el.innerText = `${labels[tf]} ${symbol}`;
+            }
+          });
+        }
+        updateMtfCells('bn', data.banknifty_mtf);
+        updateMtfCells('nifty', data.nifty_mtf);
+
+        // Institutional Key Levels & CPR Matrix
+        const lvlBody = document.getElementById('levels-tbody');
+        if (lvlBody && data.bn_levels && data.nifty_levels) {
+          lvlBody.innerHTML = '';
+          const rows = [
+            { name: 'BANKNIFTY', lvl: data.bn_levels },
+            { name: 'NIFTY 50', lvl: data.nifty_levels },
+          ];
+          rows.forEach(r => {
+            const l = r.lvl;
+            const pdhStr = l.pdh > 0 ? '₹' + Number(l.pdh).toLocaleString('en-IN', {minimumFractionDigits: 2}) : '—';
+            const pdlStr = l.pdl > 0 ? '₹' + Number(l.pdl).toLocaleString('en-IN', {minimumFractionDigits: 2}) : '—';
+            const cprStr = (l.tc > 0 && l.pivot > 0 && l.bc > 0)
+              ? `${Number(l.tc).toFixed(0)} / ${Number(l.pivot).toFixed(0)} / ${Number(l.bc).toFixed(0)}`
+              : '—';
+            const cprRegimeClass = (l.cpr_regime && l.cpr_regime.includes('NARROW')) ? 'bull' : ((l.cpr_regime && l.cpr_regime.includes('WIDE')) ? 'bear' : 'neut');
+            const orbStr = (l.orh > 0 && l.orl > 0)
+              ? `₹${Number(l.orl).toFixed(0)} – ₹${Number(l.orh).toFixed(0)}`
+              : '09:15-09:30 forming...';
+
+            let sweepHtml = '<span style="color:var(--text-muted);">None</span>';
+            if (l.active_sweep && l.active_sweep !== 'None') {
+              const isBull = l.active_sweep.includes('Bullish') || l.active_sweep.includes('Reclaim');
+              sweepHtml = `<span class="pill-tag ${isBull ? 'bull' : 'bear'}">${l.active_sweep}</span>`;
+            }
+
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+              <td><b>${r.name}</b></td>
+              <td style="color:var(--green);">${pdhStr}</td>
+              <td style="color:var(--red);">${pdlStr}</td>
+              <td>${cprStr}</td>
+              <td><span class="pill-tag ${cprRegimeClass}">${l.cpr_regime || 'BALANCED'}</span></td>
+              <td>${orbStr}</td>
+              <td>${sweepHtml}</td>
+            `;
+            lvlBody.appendChild(tr);
+          });
+        }
+
+        // Derivative Alpha Cards
+        const alphaVix = document.getElementById('alpha-vix');
+        if (alphaVix) {
+          alphaVix.innerText = `${Number(data.vix || 18.0).toFixed(2)} (${data.vix_regime || 'ELEVATED'})`;
+        }
+        const alphaBnFlow = document.getElementById('alpha-bn-flow');
+        if (alphaBnFlow) {
+          alphaBnFlow.innerText = `${Number(data.pcr || 1.0).toFixed(2)} (${data.oi_flow || 'BALANCED'})`;
+        }
+        const alphaNfFlow = document.getElementById('alpha-nf-flow');
+        if (alphaNfFlow) {
+          alphaNfFlow.innerText = `${Number(data.nifty_pcr || 1.0).toFixed(2)} (${data.nifty_oi_flow || 'BALANCED'})`;
+        }
+        const alphaShield = document.getElementById('alpha-shield');
+        if (alphaShield) {
+          const nowHour = new Date().getHours();
+          const nowMinute = new Date().getMinutes();
+          if (nowHour > 13 || (nowHour === 13 && nowMinute >= 30)) {
+            alphaShield.innerText = 'NEXT WEEK ROLL (Active)';
+            alphaShield.style.color = 'var(--amber)';
+          } else {
+            alphaShield.innerText = 'SHIELD ENGAGED (0DTE < 13:30)';
+            alphaShield.style.color = 'var(--green)';
+          }
+        }
+
         // Clock
         const now = new Date();
         document.getElementById('clock').innerText = now.toLocaleTimeString('en-US', {hour12: false}) + ' IST';
@@ -648,6 +961,16 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           const uEl = document.getElementById('pos-pnl');
           uEl.innerText = uSign + '₹' + Number(uPnl).toFixed(2);
           uEl.style.color = uPnl >= 0 ? 'var(--green)' : 'var(--red)';
+
+          const partCard = document.getElementById('pos-partial-card');
+          if (partCard) {
+            if (p.partial_cash && p.partial_cash > 0) {
+              partCard.style.display = 'flex';
+              document.getElementById('pos-partial').innerText = '+₹' + Number(p.partial_cash).toFixed(2);
+            } else {
+              partCard.style.display = 'none';
+            }
+          }
         } else {
           if (prevPositionSymbol) {
             playTone(1046, 'triangle', 0.35); // Trade Closed Chime

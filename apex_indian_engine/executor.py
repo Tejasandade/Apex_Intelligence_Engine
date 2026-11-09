@@ -42,6 +42,9 @@ class ActiveOptionTrade:
     exit_time: float = 0.0
     exit_reason: str = ""
     unrealized_pnl: float = 0.0
+    partial_booked_cash: float = 0.0 # Realized cash banked on partial harvest
+    initial_lots: int = 1
+    initial_quantity: int = 30
 
 
 class IndianOrderExecutor:
@@ -188,6 +191,8 @@ class IndianOrderExecutor:
             direction="LONG",
             lots=lots,
             quantity=quantity,
+            initial_lots=lots,
+            initial_quantity=quantity,
             entry_price=fill_price,
             entry_time=time.time(),
             sl_price=sl_price,
@@ -219,8 +224,8 @@ class IndianOrderExecutor:
         qty = trade.quantity
         sl_dist = entry - trade.sl_price
 
-        # Track unrealized PnL
-        trade.unrealized_pnl = round((cur - entry) * qty, 2)
+        # Track unrealized PnL (including banked partial cash)
+        trade.unrealized_pnl = round((cur - entry) * qty + trade.partial_booked_cash, 2)
         trade.highest_fav_price = max(trade.highest_fav_price, cur)
         r_mult = (cur - entry) / max(sl_dist, 0.01)
 
@@ -246,7 +251,7 @@ class IndianOrderExecutor:
             trade.trailing_tier = 1
             logger.info(f"{trade.symbol} TIER 1 (+0.8R): SL tightened to ₹{new_sl:.2f}")
 
-        # 3. Dynamic Tier 2: Break-Even Lock (+1.2R) -> Lock SL to Entry + Fees
+        # 4. Dynamic Tier 2: Break-Even Lock (+1.2R) -> Lock SL to Entry + Fees
         if trade.trailing_tier < 2 and r_mult >= 1.2:
             fee_points = 2.0  # ₹2 premium points to cover STT/brokerage
             new_sl = round(entry + fee_points, 2)
@@ -254,14 +259,41 @@ class IndianOrderExecutor:
             trade.trailing_tier = 2
             logger.info(f"{trade.symbol} TIER 2 (+1.2R): SL locked to Break-Even @ ₹{new_sl:.2f}")
 
-        # 4. Take Profit 1 (+1.5R) -> Lock in partial gains
+        # 5. Take Profit 1 (+1.5R) -> Partial Cash Profit Harvest & Runner Preservation
         if trade.trailing_tier < 3 and cur >= trade.tp1_price:
             trade.trailing_tier = 3
-            # Tighten trailing SL to +0.8R
-            trade.sl_price = round(entry + (sl_dist * 0.8), 2)
-            logger.info(f"{trade.symbol} TP1 HIT: +1.5R @ ₹{cur:.2f}")
+            if trade.lots > 1:
+                close_lots = trade.lots // 2
+                close_qty = (trade.quantity // trade.lots) * close_lots
+                cash_banked = round((cur - entry) * close_qty, 2)
+                trade.partial_booked_cash += cash_banked
+                trade.lots -= close_lots
+                trade.quantity -= close_qty
+                logger.info(
+                    f"🏆 [PARTIAL CASH HARVEST] {trade.symbol}: Banked {close_lots} lots cash (+₹{cash_banked:,.2f}) at +1.5R! "
+                    f"Keeping {trade.lots} lots runner open to trail!"
+                )
+                if self.mode == "LIVE" and self.api:
+                    try:
+                        self.api.placeOrder({
+                            "variety": "NORMAL",
+                            "tradingsymbol": trade.symbol,
+                            "symboltoken": str(trade.token),
+                            "transactiontype": "SELL",
+                            "exchange": "NFO",
+                            "ordertype": "MARKET",
+                            "producttype": "INTRADAY",
+                            "duration": "DAY",
+                            "quantity": str(close_qty),
+                        })
+                    except Exception as e:
+                        logger.error(f"Live partial sell failed: {e}")
 
-        # 5. Full Take Profit 2 (+2.5R to +3.5R)
+            # Lock Stop Loss on the remaining runner to Break-Even (+₹2 fee buffer)
+            trade.sl_price = round(entry + 2.0, 2)
+            logger.info(f"{trade.symbol} TP1 Hit: Remaining runner SL locked to Break-Even @ ₹{trade.sl_price:.2f}")
+
+        # 6. Full Take Profit 2 (+2.5R to +3.5R) -> Full Exit of Remaining Runner
         if cur >= trade.tp2_price:
             return self.close_trade(cur, reason=f"FULL TARGET TP2 (+{r_mult:.1f}R)")
 
@@ -278,10 +310,11 @@ class IndianOrderExecutor:
         trade.exit_time = time.time()
         trade.exit_reason = reason
 
-        gross_pnl = round((trade.exit_price - trade.entry_price) * trade.quantity, 2)
+        # Total PnL = remaining quantity PnL + already banked cash profit!
+        gross_pnl = round((trade.exit_price - trade.entry_price) * trade.quantity + trade.partial_booked_cash, 2)
 
         # Execute Live Sell on Broker if in LIVE mode
-        if self.mode == "LIVE" and self.api:
+        if self.mode == "LIVE" and self.api and trade.quantity > 0:
             try:
                 order_params = {
                     "variety": "NORMAL",
@@ -304,13 +337,14 @@ class IndianOrderExecutor:
             "index_name": trade.index_name,
             "symbol": trade.symbol,
             "option_type": trade.option_type,
-            "lots": trade.lots,
-            "quantity": trade.quantity,
+            "lots": trade.initial_lots,
+            "quantity": trade.initial_quantity,
             "entry_price": trade.entry_price,
             "exit_price": trade.exit_price,
             "entry_time": trade.entry_time,
             "exit_time": trade.exit_time,
             "gross_pnl": gross_pnl,
+            "partial_cash": trade.partial_booked_cash,
             "exit_reason": reason,
             "dur_min": round((trade.exit_time - trade.entry_time) / 60.0, 1),
         }
@@ -318,5 +352,5 @@ class IndianOrderExecutor:
         self.trade_history.append(closed_record)
         self.active_trade = None
         s = "+" if gross_pnl >= 0 else ""
-        logger.info(f"CLOSED {trade.symbol} @ ₹{exit_price:.2f} | PnL: {s}₹{gross_pnl:.2f} | Reason: {reason}")
+        logger.info(f"CLOSED {trade.symbol} @ ₹{exit_price:.2f} | Total PnL: {s}₹{gross_pnl:,.2f} | Reason: {reason}")
         return closed_record

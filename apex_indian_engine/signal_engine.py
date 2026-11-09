@@ -20,6 +20,7 @@ import pandas as pd
 
 from apex_indian_engine.ml_predictor import IndianMLPredictor
 from apex_indian_engine.oi_shield import OIShield, OIMetrics
+from apex_indian_engine.key_levels import IndexKeyLevels
 
 logger = logging.getLogger("apex.indian.signals")
 
@@ -78,9 +79,10 @@ class IndianSignalEngine:
         current_spot: float,
         current_vwap: float = 0.0,
         oi_chain: Optional[list[dict[str, Any]]] = None,
+        key_levels: Optional[IndexKeyLevels] = None,
     ) -> Optional[tuple[str, str, float, float, list[str], Optional[OIMetrics]]]:
         """
-        Evaluates current technical posture across 4 Council Advisors + OI Wall Shield.
+        Evaluates current technical posture across 5 Council Advisors + OI Wall Shield + Liquidity Traps.
         Returns: (direction, option_type, conviction, council_score, advisor_notes, oi_metrics) or None
         """
         if len(self.candles_5m) < 20:
@@ -102,7 +104,7 @@ class IndianSignalEngine:
         c_open = float(self.candles_5m[-1]["open"])
         body = abs(cur_close - c_open)
 
-        # ── 2. Advisor 1: Institutional ML Model (Weight: 0.35) ──
+        # ── 2. Advisor 1: Institutional ML Model (Weight: 0.30) ──
         adv1_score = 0.0
         ml_log = "ML: Inactive / Insufficient Data"
         try:
@@ -119,54 +121,78 @@ class IndianSignalEngine:
             p_bull, regime, ml_conv = self.ml_predictor.predict(df)
             if p_bull >= 0.52:
                 # Bullish Call Bias
-                adv1_score = 0.35 * min(1.0, (p_bull - 0.50) / 0.30)
-                ml_log = f"ML (Weight: 35%): Bull P(CE)={p_bull*100:.1f}% | Regime={regime} (Score: {adv1_score:+.2f})"
+                adv1_score = 0.30 * min(1.0, (p_bull - 0.50) / 0.30)
+                ml_log = f"ML (Weight: 30%): Bull P(CE)={p_bull*100:.1f}% | Regime={regime} (Score: {adv1_score:+.2f})"
             elif p_bull <= 0.48:
                 # Bearish Put Bias
-                adv1_score = -0.35 * min(1.0, (0.50 - p_bull) / 0.30)
-                ml_log = f"ML (Weight: 35%): Bear P(PE)={(1-p_bull)*100:.1f}% | Regime={regime} (Score: {adv1_score:+.2f})"
+                adv1_score = -0.30 * min(1.0, (0.50 - p_bull) / 0.30)
+                ml_log = f"ML (Weight: 30%): Bear P(PE)={(1-p_bull)*100:.1f}% | Regime={regime} (Score: {adv1_score:+.2f})"
             else:
-                ml_log = f"ML (Weight: 35%): Neutral P(CE)={p_bull*100:.1f}% (Score: +0.00)"
+                ml_log = f"ML (Weight: 30%): Neutral P(CE)={p_bull*100:.1f}% (Score: +0.00)"
         except Exception as e:
             logger.debug(f"ML advisor error: {e}")
 
-        # ── 3. Advisor 2: Multi-Timeframe Trend & EMA Alignment (Weight: 0.25) ──
+        # ── 3. Advisor 2: Multi-Timeframe Trend & EMA Alignment (Weight: 0.20) ──
         adv2_score = 0.0
         if ema9 > ema21 > ema50:
             # Full Bullish Alignment
-            adv2_score = 0.25
+            adv2_score = 0.20
         elif ema9 < ema21 < ema50:
             # Full Bearish Alignment
-            adv2_score = -0.25
+            adv2_score = -0.20
         elif ema9 > ema21:
-            adv2_score = 0.12
+            adv2_score = 0.10
         elif ema9 < ema21:
-            adv2_score = -0.12
-        adv2_log = f"Trend EMA (Weight: 25%): 9={ema9:.0f}, 21={ema21:.0f}, 50={ema50:.0f} (Score: {adv2_score:+.2f})"
+            adv2_score = -0.10
+        adv2_log = f"Trend EMA (Weight: 20%): 9={ema9:.0f}, 21={ema21:.0f}, 50={ema50:.0f} (Score: {adv2_score:+.2f})"
 
-        # ── 4. Advisor 3: VWAP Positioning & Breakout (Weight: 0.20) ──
+        # ── 4. Advisor 3: VWAP Positioning & Breakout (Weight: 0.15) ──
         adv3_score = 0.0
         vwap_diff = cur_close - vwap
         if vwap_diff >= atr * 0.1:
-            adv3_score = 0.20
+            adv3_score = 0.15
         elif vwap_diff <= -atr * 0.1:
-            adv3_score = -0.20
-        adv3_log = f"VWAP (Weight: 20%): Spot={cur_close:.0f} vs VWAP={vwap:.0f} [Diff: {vwap_diff:+.1f}] (Score: {adv3_score:+.2f})"
+            adv3_score = -0.15
+        adv3_log = f"VWAP (Weight: 15%): Spot={cur_close:.0f} vs VWAP={vwap:.0f} [Diff: {vwap_diff:+.1f}] (Score: {adv3_score:+.2f})"
 
-        # ── 5. Advisor 4: Volume Expansion & Candle Convexity (Weight: 0.20) ──
+        # ── 5. Advisor 4: Volume Expansion & Candle Convexity (Weight: 0.15) ──
         adv4_score = 0.0
         is_bull_candle = cur_close > c_open
         if vol_ratio >= 1.25 and body >= atr * 0.5:
-            adv4_score = 0.20 if is_bull_candle else -0.20
+            adv4_score = 0.15 if is_bull_candle else -0.15
         elif vol_ratio >= 1.10:
-            adv4_score = 0.10 if is_bull_candle else -0.10
-        adv4_log = f"Vol Surge (Weight: 20%): {vol_ratio:.1f}x vol, Body={body:.1f} pts (Score: {adv4_score:+.2f})"
+            adv4_score = 0.08 if is_bull_candle else -0.08
+        adv4_log = f"Vol Surge (Weight: 15%): {vol_ratio:.1f}x vol, Body={body:.1f} pts (Score: {adv4_score:+.2f})"
 
-        # ── 6. Council Aggregation ──
-        net_score = round(adv1_score + adv2_score + adv3_score + adv4_score, 2)
-        notes = [ml_log, adv2_log, adv3_log, adv4_log]
+        # ── 6. Advisor 5: Institutional CPR & ORB Confluence (Weight: 0.20) ──
+        adv5_score = 0.0
+        adv5_log = "Levels: Inactive"
+        if key_levels:
+            cpr_top = max(key_levels.tc, key_levels.bc)
+            cpr_bot = min(key_levels.tc, key_levels.bc)
+            cpr_bias = 0.0
+            if cur_close > cpr_top:
+                cpr_bias = 0.10
+            elif cur_close < cpr_bot:
+                cpr_bias = -0.10
+            else:
+                cpr_bias = 0.0  # Inside CPR: Neutral/Chop zone
 
-        # ── 7. Open Interest & PCR Wall Shield Evaluation ──
+            orb_bias = 0.0
+            if key_levels.orb_formed and key_levels.orh > 0 and key_levels.orl > 0:
+                if cur_close > key_levels.orh:
+                    orb_bias = 0.10
+                elif cur_close < key_levels.orl:
+                    orb_bias = -0.10
+
+            adv5_score = round(cpr_bias + orb_bias, 2)
+            adv5_log = f"CPR/ORB (Weight: 20%): Spot={cur_close:.0f} vs CPR=[{cpr_bot:.0f}-{cpr_top:.0f}] | ORB=[{key_levels.orl:.0f}-{key_levels.orh:.0f}] (Score: {adv5_score:+.2f})"
+
+        # ── 7. Council Aggregation ──
+        net_score = round(adv1_score + adv2_score + adv3_score + adv4_score + adv5_score, 2)
+        notes = [ml_log, adv2_log, adv3_log, adv4_log, adv5_log]
+
+        # ── 8. Open Interest & PCR Wall Shield Evaluation ──
         oi_metrics: Optional[OIMetrics] = None
         if oi_chain:
             try:
@@ -184,11 +210,17 @@ class IndianSignalEngine:
             direction, opt_type = "LONG", "CE"
             conviction = min(0.95, round(0.50 + (net_score * 0.45), 2))
 
+            # Validate against Institutional Trap (PDH Sweep Rejection)
+            if key_levels and "PDH Sweep Rejection" in key_levels.active_sweep:
+                logger.warning(f"CE Entry VETOED on {self.index_name}: Institutional PDH Sweep Trap detected!")
+                notes.append("VETO: PDH Sweep Rejection Trap (Liquidity swept, sellers active)")
+                return None
+
             # Validate against OI Wall Shield
             if oi_metrics:
                 safe, reason = self.oi_shield.validate_entry(direction, cur_close, cur_close, oi_metrics)
                 if not safe:
-                    logger.warn(f"Signal Vetoed: {reason}")
+                    logger.warning(f"Signal Vetoed by OI Shield: {reason}")
                     notes.append(f"VETO: {reason}")
                     return None
 
@@ -199,11 +231,17 @@ class IndianSignalEngine:
             direction, opt_type = "SHORT", "PE"
             conviction = min(0.95, round(0.50 + (abs(net_score) * 0.45), 2))
 
+            # Validate against Institutional Trap (PDL Sweep Reclaim)
+            if key_levels and "PDL Sweep Reclaim" in key_levels.active_sweep:
+                logger.warning(f"PE Entry VETOED on {self.index_name}: Institutional PDL Sweep Trap detected!")
+                notes.append("VETO: PDL Sweep Reclaim Trap (Liquidity swept, buyers active)")
+                return None
+
             # Validate against OI Wall Shield
             if oi_metrics:
                 safe, reason = self.oi_shield.validate_entry(direction, cur_close, cur_close, oi_metrics)
                 if not safe:
-                    logger.warn(f"Signal Vetoed: {reason}")
+                    logger.warning(f"Signal Vetoed by OI Shield: {reason}")
                     notes.append(f"VETO: {reason}")
                     return None
 

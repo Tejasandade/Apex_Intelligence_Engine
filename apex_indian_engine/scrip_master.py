@@ -169,6 +169,11 @@ class ScripMaster:
         exp_list = self._expiries_by_index.get(index_name.upper(), [])
         return exp_list[0] if exp_list else None
 
+    def get_next_expiry(self, index_name: str) -> Optional[str]:
+        """Returns the following week's active expiry date string (0DTE shield)."""
+        exp_list = self._expiries_by_index.get(index_name.upper(), [])
+        return exp_list[1] if len(exp_list) > 1 else (exp_list[0] if exp_list else None)
+
     def get_all_expiries(self, index_name: str) -> list[str]:
         """Returns all upcoming expiry dates for the index."""
         return self._expiries_by_index.get(index_name.upper(), [])
