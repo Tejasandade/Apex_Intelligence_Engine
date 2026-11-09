@@ -91,9 +91,12 @@ class IndianTerminalHUD:
             partial_c = open_pos.get("partial_cash", 0.0)
             u_sign = "+" if u_pnl >= 0 else ""
 
+            spot_sl = open_pos.get("spot_sl_price", 0.0)
             lines.append("║  ACTIVE OPTION POSITION:                                                     ║")
             lines.append(f"║   Symbol: {sym:<34} | Lots: {lots} ({qty} Qty)                     ║")
             lines.append(f"║   Entry: ₹{entry:>7.2f} | SL: ₹{sl:>7.2f} | TP1: ₹{tp1:>7.2f} | TP2: ₹{tp2:>7.2f}           ║")
+            if spot_sl > 0:
+                lines.append(f"║   Underlying Spot Invalidation Boundary: ₹{spot_sl:>9,.1f}                                ║")
             if partial_c > 0:
                 lines.append(f"║   Unrealized PnL: {u_sign}₹{u_pnl:>8.2f} | Banked Cash: +₹{partial_c:>8.2f} (Runner Active)   ║")
             else:

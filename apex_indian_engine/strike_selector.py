@@ -67,17 +67,23 @@ class DynamicStrikeSelector:
             logger.error(f"No active weekly expiry found for {idx}")
             return None
 
-        # 0DTE Afternoon Theta Shield: After 13:30 IST on expiry day, roll to Next Weekly Expiry
+        # 0DTE Afternoon Theta Shield: After 13:30 IST on actual expiry day, roll to Next Weekly Expiry
         now_time = datetime.now().time()
-        if now_time >= dtime(13, 30):
+        from datetime import date
+        is_expiry_day = (self.scrip_master.parse_expiry_date(expiry) == date.today())
+        if is_expiry_day and now_time >= dtime(13, 30):
             next_exp = self.scrip_master.get_next_expiry(idx)
             if next_exp and next_exp != expiry:
-                logger.info(f"🛡️ 0DTE AFTERNOON SHIELD: Rolling {idx} from {expiry} to Next Week ({next_exp}) to bypass rapid theta burn.")
+                logger.info(f"🛡️ 0DTE AFTERNOON SHIELD: Today is expiry day ({expiry}). Rolling {idx} to Next Week ({next_exp}) to bypass rapid theta burn.")
                 expiry = next_exp
 
         # 1. Decide ATM vs ITM offset
-        # In low VIX or extreme VIX or lower conviction -> 1-Strike ITM
-        if vix_params.prefer_itm or conviction < 0.70:
+        if "BANK" in idx:
+            # BankNifty monthly contracts have higher absolute premium; use ATM to keep premium balanced
+            offset = 0
+            strike_label = "ATM"
+            reason = f"Selected pure ATM for BankNifty to maintain balanced premium structure under {vix_params.regime_name}"
+        elif vix_params.prefer_itm or conviction < 0.70:
             offset = 1
             strike_label = "ITM_1"
             reason = f"Selected 1-Strike ITM (Delta ~0.60) to protect extrinsic value under {vix_params.regime_name}"

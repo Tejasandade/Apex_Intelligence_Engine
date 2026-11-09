@@ -976,7 +976,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           document.getElementById('pos-symbol').innerText = p.symbol;
           document.getElementById('pos-lots').innerText = p.lots + ' Lots (' + p.quantity + ' Qty)';
           document.getElementById('pos-entry').innerText = '₹' + Number(p.entry_price).toFixed(2);
-          document.getElementById('pos-sl').innerText = '₹' + Number(p.sl_price).toFixed(2);
+          document.getElementById('pos-sl').innerText = '₹' + Number(p.sl_price).toFixed(2) + (p.spot_sl_price ? ' (Spot SL: ₹' + Number(p.spot_sl_price).toFixed(0) + ')' : '');
           document.getElementById('pos-tp').innerText = '₹' + Number(p.tp1_price).toFixed(2) + ' / ₹' + Number(p.tp2_price).toFixed(2);
           
           const uPnl = p.unrealized_pnl || 0;

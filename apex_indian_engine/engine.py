@@ -310,7 +310,7 @@ class ApexIndianEngine:
         sig_engine.add_candle(candle)
 
         # 2. Check risk gate before evaluating signals (permit evaluation for high-potential candidate setups)
-        skip_time = (self.config.mode == "PAPER")
+        skip_time = getattr(self, "ignore_time_checks", False)
         can_trade, gate_reason = self.risk_manager.can_trade(skip_time_check=skip_time, is_high_prob=True)
         if not can_trade:
             logger.debug(f"Trading gate locked: {gate_reason}")
@@ -374,15 +374,37 @@ class ApexIndianEngine:
             sl_pts = max(14.0, min(prem * 0.18, 30.0))
         sl_pts = round(sl_pts, 1)
 
+        # 7a. Institutional No-Chase Gate (0.35 x ATR)
+        atr = sig_engine._calc_atr(14)
+        live_spot = self.ws_streamer.latest_prices.get(idx, cur_spot) if self.ws_streamer else cur_spot
+        drift = (live_spot - cur_spot) if opt_type == "CE" else (cur_spot - live_spot)
+        if drift > (0.35 * atr):
+            logger.warning(
+                f"⚠️ NO-CHASE GATE ({idx} {opt_type}): Spot moved {drift:+.1f} pts past signal close "
+                f"(> 0.35 ATR {0.35 * atr:.1f} pts). Rejecting late market entry into overextension."
+            )
+            return None
+
+        # 7b. Capital Allocation & Expensive Contract Guard (e.g. BankNifty monthly)
+        cost_per_lot = prem * selected.lot_size
+        if cost_per_lot > (self.risk_manager.capital_inr * 0.20):
+            if conviction < 0.70 or abs(score) < 0.65:
+                logger.warning(
+                    f"🛡️ CAPITAL PROTECTION GUARD ({idx}): 1 lot costs ₹{cost_per_lot:,.0f} "
+                    f"(> 20% of capital ₹{self.risk_manager.capital_inr:,.0f}). "
+                    f"Requires Grade A+ setup (conviction >= 0.70, score >= 0.65). Skipping."
+                )
+                return None
+
         # Determine trade potential dynamically based on setup characteristics
         trade_potential = "NORMAL"
-        is_breakout = key_levels and ("Breakout" in key_levels.active_sweep or "Breakdown" in key_levels.active_sweep)
+        is_breakout = cur_lvl and ("Breakout" in cur_lvl.active_sweep or "Breakdown" in cur_lvl.active_sweep)
         if (conviction >= 0.70 or abs(score) >= 0.65) and is_breakout:
             trade_potential = "BREAKOUT_EXPANSION"
         elif conviction >= 0.65 or abs(score) >= 0.60:
             trade_potential = "GRADE_A"
 
-        # 7. Sizing via Risk Manager with dynamic potential scaling
+        # 8. Sizing via Risk Manager with dynamic potential scaling
         sizing = self.risk_manager.calculate_position_size(
             index_name=idx,
             option_premium=selected.est_premium,
@@ -398,7 +420,7 @@ class ApexIndianEngine:
         adj_lots = max(1, int(round(sizing["lots"] * vix_params.size_multiplier)))
         adj_qty = adj_lots * selected.lot_size
 
-        # 8. Execute Marketable Limit Order
+        # 9. Execute Marketable Limit Order
         trade = self.executor.open_option_trade(
             index_name=idx,
             symbol=selected.symbol,
@@ -409,6 +431,7 @@ class ApexIndianEngine:
             quantity=adj_qty,
             sl_points=sl_pts,
             tp_multiplier=vix_params.tp_multiplier,
+            spot_price=cur_spot,
         )
 
         if trade:
@@ -457,6 +480,7 @@ class ApexIndianEngine:
         self,
         current_option_price: float,
         underlying_reversed: bool = False,
+        current_spot_price: float = 0.0,
     ) -> Optional[dict[str, Any]]:
         """
         Updates active position on new tick, handles trailing stops & theta harvesting.
@@ -467,9 +491,30 @@ class ApexIndianEngine:
         trade = self.executor.active_trade
         prev_tier = trade.trailing_tier
 
+        # Resolve live spot if not provided
+        if current_spot_price <= 0.0 and self.ws_streamer:
+            current_spot_price = self.ws_streamer.latest_prices.get(trade.index_name, 0.0)
+
+        # Check underlying momentum reversal dynamically if not passed explicitly
+        if not underlying_reversed and current_spot_price > 0.0:
+            sig_eng = self.signal_engines.get(trade.index_name)
+            if sig_eng and len(sig_eng.candles_5m) >= 5:
+                closes = [float(c["close"]) for c in sig_eng.candles_5m]
+                ema9 = sig_eng._calc_ema(closes, 9)
+                cur_vwap = float(sig_eng.candles_5m[-1].get("vwap", current_spot_price))
+                if trade.option_type.upper() == "CE":
+                    # For CALLS: Spot falling below EMA9 and VWAP indicates bullish exhaustion
+                    if current_spot_price < (ema9 - 5.0) and current_spot_price < cur_vwap:
+                        underlying_reversed = True
+                elif trade.option_type.upper() == "PE":
+                    # For PUTS: Spot rising above EMA9 and VWAP indicates bearish exhaustion
+                    if current_spot_price > (ema9 + 5.0) and current_spot_price > cur_vwap:
+                        underlying_reversed = True
+
         closed = self.executor.update_ticks(
             current_option_price=current_option_price,
             underlying_momentum_reversed=underlying_reversed,
+            current_spot_price=current_spot_price,
         )
 
         # Notify trailing stop ratchet if upgraded
@@ -582,6 +627,8 @@ class ApexIndianEngine:
                 "unrealized_pnl": t.unrealized_pnl,
                 "partial_cash": t.partial_booked_cash,
                 "trailing_tier": t.trailing_tier,
+                "spot_entry_price": t.spot_entry_price,
+                "spot_sl_price": t.spot_sl_price,
             }
 
         vix_params = self.vix_manager.get_parameters()
@@ -826,7 +873,8 @@ class ApexIndianEngine:
                         elif tok in ("1333", "4963", "2885"):
                             self.heavyweight_prices[tok] = ltp
                         elif self.executor.has_open_position() and tok == str(self.executor.active_trade.token):
-                            self.process_tick(current_option_price=ltp)
+                            spot_px = self.ws_streamer.latest_prices.get(self.executor.active_trade.index_name, 0.0) if self.ws_streamer else 0.0
+                            self.process_tick(current_option_price=ltp, current_spot_price=spot_px)
 
             except Exception as e:
                 logger.debug(f"Live tick poller exception: {e}")
@@ -946,7 +994,8 @@ class ApexIndianEngine:
                     if self.executor.has_open_position():
                         t = self.executor.active_trade
                         if t.symbol == sym:
-                            self.process_tick(current_option_price=px)
+                            spot_px = self.ws_streamer.latest_prices.get(t.index_name, 0.0) if self.ws_streamer else 0.0
+                            self.process_tick(current_option_price=px, current_spot_price=spot_px)
 
                 self.ws_streamer.on_vix_updated = _on_vix
                 self.ws_streamer.on_candle_closed = _on_candle

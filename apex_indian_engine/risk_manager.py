@@ -111,7 +111,7 @@ class IndianRiskManager:
 
             # Check Lunch Chop
             if self.schedule.lunch_chop_start <= cur_t < self.schedule.lunch_chop_end:
-                return False, "European open lunch chop (11:30-13:00 IST) — Trading paused to avoid sideways Theta burn"
+                return False, f"European open lunch chop ({self.schedule.lunch_chop_start.strftime('%H:%M')}-{self.schedule.lunch_chop_end.strftime('%H:%M')} IST) — Trading paused to avoid sideways Theta burn"
 
         # 2. Cooling pause from consecutive losses (bypassed if Grade A+ setup)
         if time.time() < self.halt_until_ts:

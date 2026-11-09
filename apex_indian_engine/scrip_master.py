@@ -152,31 +152,39 @@ class ScripMaster:
             logger.error(f"Scrip Master indexing error: {e}")
             return False
 
+    def parse_expiry_date(self, exp_str: str) -> date:
+        """Parse expiry string into date object."""
+        for fmt in ("%d%b%Y", "%d-%b-%Y", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(exp_str.upper(), fmt).date()
+            except ValueError:
+                pass
+        return date.max
+
     def _sort_expiries(self, expiries: list[str]) -> list[str]:
         """Sort date strings into chronological order."""
-        def _parse_d(exp_str: str) -> datetime:
-            for fmt in ("%d%b%Y", "%d-%b-%Y", "%Y-%m-%d"):
-                try:
-                    return datetime.strptime(exp_str.upper(), fmt)
-                except ValueError:
-                    pass
-            return datetime.max
-
-        return sorted(expiries, key=_parse_d)
+        return sorted(expiries, key=self.parse_expiry_date)
 
     def get_nearest_expiry(self, index_name: str) -> Optional[str]:
-        """Returns the current week's active expiry date string."""
+        """Returns the upcoming active weekly expiry date string (>= today)."""
         exp_list = self._expiries_by_index.get(index_name.upper(), [])
-        return exp_list[0] if exp_list else None
+        today = date.today()
+        upcoming = [e for e in exp_list if self.parse_expiry_date(e) >= today]
+        return upcoming[0] if upcoming else (exp_list[0] if exp_list else None)
 
     def get_next_expiry(self, index_name: str) -> Optional[str]:
-        """Returns the following week's active expiry date string (0DTE shield)."""
+        """Returns the following week's active expiry date string (>= today)."""
         exp_list = self._expiries_by_index.get(index_name.upper(), [])
-        return exp_list[1] if len(exp_list) > 1 else (exp_list[0] if exp_list else None)
+        today = date.today()
+        upcoming = [e for e in exp_list if self.parse_expiry_date(e) >= today]
+        return upcoming[1] if len(upcoming) > 1 else (upcoming[0] if upcoming else None)
 
     def get_all_expiries(self, index_name: str) -> list[str]:
-        """Returns all upcoming expiry dates for the index."""
-        return self._expiries_by_index.get(index_name.upper(), [])
+        """Returns all upcoming expiry dates for the index (>= today)."""
+        exp_list = self._expiries_by_index.get(index_name.upper(), [])
+        today = date.today()
+        upcoming = [e for e in exp_list if self.parse_expiry_date(e) >= today]
+        return upcoming if upcoming else exp_list
 
     def resolve_strike_contract(
         self,

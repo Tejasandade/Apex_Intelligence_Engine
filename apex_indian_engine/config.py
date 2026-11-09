@@ -66,7 +66,7 @@ class SessionSchedule:
     trade_start: time = time(9, 25)          # Skip initial 10m price discovery
     morning_killzone_end: time = time(10, 45) # Peak morning momentum
     lunch_chop_start: time = time(11, 30)     # European open consolidation
-    lunch_chop_end: time = time(13, 0)
+    lunch_chop_end: time = time(13, 15)       # European open consolidation ends at 13:15
     afternoon_killzone_start: time = time(13, 15) # Afternoon trend & expiry expansion
     afternoon_killzone_end: time = time(15, 0)
     hard_flatten_time: time = time(15, 15)    # Compulsory intraday square-off

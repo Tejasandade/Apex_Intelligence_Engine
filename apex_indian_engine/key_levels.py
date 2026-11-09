@@ -43,6 +43,10 @@ class IndexKeyLevels:
     orl: float = 0.0                # 09:15 - 09:30 Opening Range Low
     orb_formed: bool = False
     active_sweep: str = "None"      # None | PDH_SWEEP_REJECT | PDL_SWEEP_RECLAIM | ORH_BREAKOUT | ORL_BREAKDOWN
+    fvg_supply: bool = False        # In Bearish FVG Supply Zone (Resist Calls)
+    fvg_demand: bool = False        # In Bullish FVG Demand Zone (Resist Puts)
+    fvg_zone_top: float = 0.0
+    fvg_zone_bottom: float = 0.0
 
 
 class InstitutionalLevelsTracker:
@@ -159,6 +163,36 @@ class InstitutionalLevelsTracker:
                 if not (orb_formed and spot < orl):
                     active_sweep = "PDL Sweep Reclaim (Bullish Trap)"
 
+        # 5. Fair Value Gap (FVG) Imbalance Detection across recent candles
+        fvg_supply = False
+        fvg_demand = False
+        fvg_top = 0.0
+        fvg_bot = 0.0
+        if len(candles_5m) >= 3:
+            for i in range(len(candles_5m) - 1, max(len(candles_5m) - 15, 2), -1):
+                c1 = candles_5m[i - 2]
+                c3 = candles_5m[i]
+                c1_h = float(c1.get("high", 0.0))
+                c1_l = float(c1.get("low", 0.0))
+                c3_h = float(c3.get("high", 0.0))
+                c3_l = float(c3.get("low", 0.0))
+
+                # Bullish FVG Demand: c3_l > c1_h
+                if c3_l > c1_h and c1_h > 0:
+                    if c1_h <= spot <= c3_l:
+                        fvg_demand = True
+                        fvg_top = c3_l
+                        fvg_bot = c1_h
+                        break
+
+                # Bearish FVG Supply: c3_h < c1_l
+                elif c3_h < c1_l and c3_h > 0:
+                    if c3_h <= spot <= c1_l:
+                        fvg_supply = True
+                        fvg_top = c1_l
+                        fvg_bot = c3_h
+                        break
+
         self.levels = IndexKeyLevels(
             index_name=self.index_name,
             pdh=pdh,
@@ -177,6 +211,10 @@ class InstitutionalLevelsTracker:
             orl=orl,
             orb_formed=orb_formed,
             active_sweep=active_sweep,
+            fvg_supply=fvg_supply,
+            fvg_demand=fvg_demand,
+            fvg_zone_top=fvg_top,
+            fvg_zone_bottom=fvg_bot,
         )
         return self.levels
 

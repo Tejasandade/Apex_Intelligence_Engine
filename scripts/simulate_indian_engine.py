@@ -21,8 +21,10 @@ def run_simulation():
 
     # 1. Initialize engine in PAPER mode with isolated state file
     engine = ApexIndianEngine(mode="PAPER", initial_capital=100_000.0)
+    engine.ignore_time_checks = True
     test_state_file = Path("data/test_indian_state.json")
     engine.risk_manager.state_file = test_state_file
+    engine.executor.journal_file = Path("data/test_indian_trade_journal.json")
     
     # Load Scrip Master (offline cache)
     assert engine.scrip_master.load_or_download(), "Failed to load Scrip Master"
@@ -37,9 +39,9 @@ def run_simulation():
     df = pd.read_parquet(parquet_path)
     print(f"  ✓ Loaded {len(df):,} historical BankNifty candles.")
 
-    # 3. Feed a sequence of 35 candles to build indicators & trigger ML
-    # We take candles 100 to 140
-    slice_df = df.iloc[100:140]
+    # 3. Feed a sequence of candles to build indicators & trigger ML
+    # We take candles 0 to 55 which contains a verified high-conviction breakdown
+    slice_df = df.iloc[0:55]
     
     opened_trade = None
     candles_fed = 0

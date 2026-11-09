@@ -47,6 +47,8 @@ class ActiveOptionTrade:
     partial_booked_cash: float = 0.0 # Realized cash banked on partial harvest
     initial_lots: int = 1
     initial_quantity: int = 30
+    spot_entry_price: float = 0.0
+    spot_sl_price: float = 0.0
 
 
 class IndianOrderExecutor:
@@ -145,6 +147,7 @@ class IndianOrderExecutor:
         quantity: int,
         sl_points: float = 25.0,
         tp_multiplier: float = 2.0,
+        spot_price: float = 0.0,
     ) -> Optional[ActiveOptionTrade]:
         """
         Executes a Marketable Limit Buy order for the specified Option contract.
@@ -166,6 +169,13 @@ class IndianOrderExecutor:
         sl_price = max(1.0, round(fill_price - sl_points, 2))
         tp1_price = round(fill_price + (sl_points * 1.5), 2)
         tp2_price = round(fill_price + (sl_points * tp_multiplier), 2)
+
+        # Structural Underlying Spot Invalidation (Nifty: 30 pts, BankNifty: 90 pts)
+        spot_dist = 30.0 if "NIFTY" in index_name.upper() else 90.0
+        if option_type.upper() == "CE":
+            spot_sl_px = round(spot_price - spot_dist, 2) if spot_price > 0 else 0.0
+        else:
+            spot_sl_px = round(spot_price + spot_dist, 2) if spot_price > 0 else 0.0
 
         trade_id = f"OPT_{datetime.now().strftime('%H%M%S')}_{token}"
 
@@ -221,19 +231,27 @@ class IndianOrderExecutor:
             tp2_price=tp2_price,
             highest_fav_price=fill_price,
             broker_order_id=broker_id,
+            spot_entry_price=spot_price,
+            spot_sl_price=spot_sl_px,
         )
 
         self.active_trade = trade
         logger.info(
             f"OPENED {self.mode} {symbol}: {lots} lots ({quantity} qty) @ ₹{fill_price:.2f} | "
-            f"SL: ₹{sl_price:.2f} | TP1: ₹{tp1_price:.2f} | TP2: ₹{tp2_price:.2f}"
+            f"SL: ₹{sl_price:.2f} | TP1: ₹{tp1_price:.2f} | TP2: ₹{tp2_price:.2f} | "
+            f"Spot: ₹{spot_price:.1f} (Spot SL: ₹{spot_sl_px:.1f})"
         )
         return trade
 
-    def update_ticks(self, current_option_price: float, underlying_momentum_reversed: bool = False) -> Optional[dict[str, Any]]:
+    def update_ticks(
+        self,
+        current_option_price: float,
+        underlying_momentum_reversed: bool = False,
+        current_spot_price: float = 0.0,
+    ) -> Optional[dict[str, Any]]:
         """
         Process tick updates for the active position.
-        Evaluates Stop Loss, Break-Even Lock (+1.0R), TP1, TP2, and Theta Decay / Reversal Harvesting.
+        Evaluates Underlying Spot Invalidation, Stop Loss, Break-Even Lock (+1.0R), TP1, TP2, and Theta Decay / Reversal Harvesting.
         Returns closed trade dict if exited, else None.
         """
         if not self.has_open_position():
@@ -249,6 +267,22 @@ class IndianOrderExecutor:
         trade.unrealized_pnl = round((cur - entry) * qty + trade.partial_booked_cash, 2)
         trade.highest_fav_price = max(trade.highest_fav_price, cur)
         r_mult = (cur - entry) / max(sl_dist, 0.01)
+
+        # 0. Structural Underlying Spot Invalidation Check
+        # If the underlying index itself breaches the market structure invalidation boundary, exit immediately!
+        if current_spot_price > 0.0 and trade.spot_sl_price > 0.0:
+            if trade.option_type.upper() == "CE" and current_spot_price <= trade.spot_sl_price:
+                logger.warning(
+                    f"🛑 [UNDERLYING INVALIDATION] {trade.symbol} CE: Spot index (₹{current_spot_price:,.1f}) "
+                    f"breached support invalidation (₹{trade.spot_sl_price:,.1f}). Exiting option!"
+                )
+                return self.close_trade(cur, reason=f"SPOT INVALIDATION ({current_spot_price:.0f} <= {trade.spot_sl_price:.0f})")
+            elif trade.option_type.upper() == "PE" and current_spot_price >= trade.spot_sl_price:
+                logger.warning(
+                    f"🛑 [UNDERLYING INVALIDATION] {trade.symbol} PE: Spot index (₹{current_spot_price:,.1f}) "
+                    f"breached resistance invalidation (₹{trade.spot_sl_price:,.1f}). Exiting option!"
+                )
+                return self.close_trade(cur, reason=f"SPOT INVALIDATION ({current_spot_price:.0f} >= {trade.spot_sl_price:.0f})")
 
         # 1. Hard Stop Loss Check
         if cur <= trade.sl_price:

@@ -197,12 +197,11 @@ class IndianWebSocketStreamer:
             logger.debug(f"Tick processing error: {e}")
 
     def _aggregate_candle(self, symbol: str, price: float, volume: float) -> None:
-        """Aggregates ticks into 5-minute candles with VWAP."""
+        """Aggregates ticks into 5-minute wall-clock aligned candles (:00, :05, :10, :15, etc.) with VWAP."""
         now = time.time()
-        start_ts = self._candle_start_ts.get(symbol, 0.0)
+        slot_start = int(now // 300) * 300
 
-        # 5-minute boundary = 300 seconds
-        if start_ts == 0.0 or (now - start_ts) >= 300.0:
+        if symbol not in self._candle_start_ts or self._candle_start_ts[symbol] != slot_start:
             if symbol in self._candles_5m:
                 # Close previous candle
                 closed_c = self._candles_5m[symbol].copy()
@@ -210,9 +209,9 @@ class IndianWebSocketStreamer:
                 if self.on_candle_closed and self._loop and not self._loop.is_closed():
                     asyncio.run_coroutine_threadsafe(self.on_candle_closed(symbol, closed_c), self._loop)
 
-            # Start new candle
-            now_iso = datetime.fromtimestamp(now).strftime("%Y-%m-%dT%H:%M:%S+05:30")
-            self._candle_start_ts[symbol] = now
+            # Start new candle aligned to NSE 5-minute interval
+            now_iso = datetime.fromtimestamp(slot_start).strftime("%Y-%m-%dT%H:%M:%S+05:30")
+            self._candle_start_ts[symbol] = slot_start
             self._candles_5m[symbol] = {
                 "timestamp": now_iso,
                 "symbol": symbol,

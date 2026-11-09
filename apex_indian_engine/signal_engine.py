@@ -182,11 +182,18 @@ class IndianSignalEngine:
         # ── 4. Advisor 3: VWAP Positioning & Breakout (Weight: 0.15) ──
         adv3_score = 0.0
         vwap_diff = cur_close - vwap
-        if vwap_diff >= atr * 0.1:
+        # Check for overextended rubber-band stretch (> 2.5 ATR)
+        if abs(vwap_diff) > atr * 2.5:
+            adv3_score = -0.05 if vwap_diff > 0 else 0.05  # Mean-reverting warning
+            adv3_log = f"VWAP (Weight: 15%): Spot={cur_close:.0f} vs VWAP={vwap:.0f} [OVEREXTENDED: {vwap_diff:+.1f} pts > 2.5 ATR] (Score: {adv3_score:+.2f})"
+        elif vwap_diff >= atr * 0.1:
             adv3_score = 0.15
+            adv3_log = f"VWAP (Weight: 15%): Spot={cur_close:.0f} vs VWAP={vwap:.0f} [Diff: {vwap_diff:+.1f}] (Score: {adv3_score:+.2f})"
         elif vwap_diff <= -atr * 0.1:
             adv3_score = -0.15
-        adv3_log = f"VWAP (Weight: 15%): Spot={cur_close:.0f} vs VWAP={vwap:.0f} [Diff: {vwap_diff:+.1f}] (Score: {adv3_score:+.2f})"
+            adv3_log = f"VWAP (Weight: 15%): Spot={cur_close:.0f} vs VWAP={vwap:.0f} [Diff: {vwap_diff:+.1f}] (Score: {adv3_score:+.2f})"
+        else:
+            adv3_log = f"VWAP (Weight: 15%): Spot={cur_close:.0f} vs VWAP={vwap:.0f} [At Equilibrium] (Score: +0.00)"
 
         # ── 5. Advisor 4: Volume Expansion & Candle Convexity (Weight: 0.15) ──
         adv4_score = 0.0
@@ -313,6 +320,16 @@ class IndianSignalEngine:
                     notes.append(f"VETO: {reason}")
                     return None
 
+            # VETO 7: Fair Value Gap (FVG) Bearish Supply Veto
+            if key_levels and key_levels.fvg_supply:
+                if not is_preview:
+                    now_t = time.time()
+                    if (now_t - self._last_veto_log.get("FVG_SUPPLY_VETO", 0.0)) >= 60.0:
+                        logger.warning(f"CE Entry VETOED on {self.index_name}: Inside Bearish FVG Supply Zone ({key_levels.fvg_zone_bottom:.0f}-{key_levels.fvg_zone_top:.0f})")
+                        self._last_veto_log["FVG_SUPPLY_VETO"] = now_t
+                notes.append(f"VETO: Inside Bearish FVG Supply Zone ({key_levels.fvg_zone_bottom:.0f}-{key_levels.fvg_zone_top:.0f})")
+                return None
+
             return direction, opt_type, conviction, net_score, notes, oi_metrics
 
         elif net_score <= -self.min_consensus_threshold:
@@ -386,6 +403,16 @@ class IndianSignalEngine:
                             self._last_veto_log[f"OI_{reason}"] = now_t
                     notes.append(f"VETO: {reason}")
                     return None
+
+            # VETO 7: Fair Value Gap (FVG) Bullish Demand Veto
+            if key_levels and key_levels.fvg_demand:
+                if not is_preview:
+                    now_t = time.time()
+                    if (now_t - self._last_veto_log.get("FVG_DEMAND_VETO", 0.0)) >= 60.0:
+                        logger.warning(f"PE Entry VETOED on {self.index_name}: Inside Bullish FVG Demand Zone ({key_levels.fvg_zone_bottom:.0f}-{key_levels.fvg_zone_top:.0f})")
+                        self._last_veto_log["FVG_DEMAND_VETO"] = now_t
+                notes.append(f"VETO: Inside Bullish FVG Demand Zone ({key_levels.fvg_zone_bottom:.0f}-{key_levels.fvg_zone_top:.0f})")
+                return None
 
             return direction, opt_type, conviction, net_score, notes, oi_metrics
 

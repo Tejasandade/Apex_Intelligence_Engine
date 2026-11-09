@@ -28,9 +28,13 @@ def main():
     parser.add_argument("--mode", choices=["paper", "live"], default="paper", help="Execution mode (default: paper)")
     parser.add_argument("--capital", type=float, default=100000.0, help="Initial capital in INR (default: ₹1,00,000)")
     parser.add_argument("--reset", action="store_true", help="Reset intraday trades, daily PnL, and start fresh with initial capital")
+    parser.add_argument("--ignore-time", action="store_true", help="Bypass market hours and lunch chop (for testing / replay)")
     args = parser.parse_args()
 
     engine = ApexIndianEngine(mode=args.mode.upper(), initial_capital=args.capital)
+    if args.ignore_time:
+        engine.ignore_time_checks = True
+        print("  ⚠️ Market hour restrictions bypassed (--ignore-time active)")
     if not engine.initialize():
         print("❌ Engine initialization failed. Check credentials and scrip master.")
         sys.exit(1)
