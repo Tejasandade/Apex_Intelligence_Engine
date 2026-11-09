@@ -59,6 +59,9 @@ class InstitutionalLevelsTracker:
         self,
         candles_5m: list[dict[str, Any]],
         current_spot: float = 0.0,
+        official_pdc: float = 0.0,
+        official_pdh: float = 0.0,
+        official_pdl: float = 0.0,
     ) -> IndexKeyLevels:
         """
         Parses historical and intraday 5m candles to calculate PDH, PDL, PDC, CPR, and ORB.
@@ -78,19 +81,23 @@ class InstitutionalLevelsTracker:
                 prev_day_candles.append(c)
 
         # 1. Calculate Previous Day High, Low, Close
-        if prev_day_candles:
+        if official_pdh > 0 and official_pdl > 0:
+            pdh = official_pdh
+            pdl = official_pdl
+            pdc = official_pdc if official_pdc > 0 else round((pdh + pdl) / 2.0, 2)
+        elif prev_day_candles:
             # Use last session's candles (up to 75 5m candles per NSE trading day)
             last_session = prev_day_candles[-75:]
             pdh = max(float(c["high"]) for c in last_session)
             pdl = min(float(c["low"]) for c in last_session)
             pdc = float(last_session[-1]["close"])
         else:
-            # Fallback to earliest available candles or reasonable bounds
+            # Fallback to baseline price with realistic intraday variance
             base = float(candles_5m[0]["close"])
             step = 300.0 if "BANK" in self.index_name else 120.0
-            pdh = base + step
-            pdl = base - step
-            pdc = base
+            pdh = round(base + step, 2)
+            pdl = round(base - step, 2)
+            pdc = round(base - (step * 0.15), 2)
 
         # 2. Central Pivot Range (CPR) & Standard Floor Pivots
         p = round((pdh + pdl + pdc) / 3.0, 2)
@@ -163,3 +170,4 @@ class InstitutionalLevelsTracker:
             active_sweep=active_sweep,
         )
         return self.levels
+

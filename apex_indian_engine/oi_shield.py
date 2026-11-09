@@ -57,9 +57,16 @@ class OIShield:
         tot_put = sum(put_oi_by_strike.values())
         pcr = round(tot_put / max(tot_call, 1), 2)
 
-        # Find Max OI Walls
-        max_call_wall = max(call_oi_by_strike, key=call_oi_by_strike.get) if call_oi_by_strike else spot_price + 500
-        max_put_wall = max(put_oi_by_strike, key=put_oi_by_strike.get) if put_oi_by_strike else spot_price - 500
+        # Find Overhead Call Resistance Wall (>= Spot) and Downside Put Support Wall (<= Spot)
+        otm_calls = {s: oi for s, oi in call_oi_by_strike.items() if s >= spot_price}
+        max_call_wall = max(otm_calls, key=otm_calls.get) if otm_calls else (
+            max(call_oi_by_strike, key=call_oi_by_strike.get) if call_oi_by_strike else spot_price + 500
+        )
+
+        otm_puts = {s: oi for s, oi in put_oi_by_strike.items() if s <= spot_price}
+        max_put_wall = max(otm_puts, key=otm_puts.get) if otm_puts else (
+            max(put_oi_by_strike, key=put_oi_by_strike.get) if put_oi_by_strike else spot_price - 500
+        )
 
         # Sentiment classification
         if pcr >= 1.45:

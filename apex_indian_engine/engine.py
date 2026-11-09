@@ -797,7 +797,7 @@ class ApexIndianEngine:
 
                         step = 100 if "BANK" in idx else 50
                         base_strike = round(cur_spot / step) * step
-                        strikes = [base_strike + (i * step) for i in range(-5, 6)]
+                        strikes = [base_strike + (i * step) for i in range(-8, 9)]
 
                         tokens_map = {}
                         tokens_list = []
