@@ -831,25 +831,25 @@ def find_sl(direction: str, entry: float, symbol: str = SYMBOL, trade_mode: str 
     # Asset & Horizon Adaptive ATR bounds
     if "ETH" in sym:
         if is_swing:
-            min_sl = max(22.0, entry * 0.010)
-            max_sl = min(55.0, entry * 0.025)
+            min_sl = max(25.0, entry * 0.012)
+            max_sl = min(60.0, entry * 0.025)
         else:
-            min_sl = max(8.0, entry * 0.0035)
-            max_sl = min(25.0, entry * 0.010)
+            min_sl = max(14.0, entry * 0.006)
+            max_sl = min(30.0, entry * 0.012)
     elif "GOLD" in sym or "XAU" in sym or "PAXG" in sym:
         if is_swing:
-            min_sl = max(8.0, entry * 0.0025)
-            max_sl = min(22.0, entry * 0.006)
+            min_sl = max(10.0, entry * 0.003)
+            max_sl = min(25.0, entry * 0.007)
         else:
-            min_sl = max(4.0, entry * 0.0015)
-            max_sl = min(12.0, entry * 0.004)
+            min_sl = max(7.0, entry * 0.002)
+            max_sl = min(15.0, entry * 0.005)
     else:  # BTC
         if is_swing:
-            min_sl = max(380.0, atr * 4.0)
-            max_sl = min(850.0, atr * 8.0)
+            min_sl = max(450.0, atr * 4.5)
+            max_sl = min(950.0, atr * 8.0)
         else:
-            min_sl = max(160.0, atr * 1.5)
-            max_sl = min(400.0, atr * 3.5)
+            min_sl = max(320.0, atr * 2.5)
+            max_sl = min(550.0, atr * 4.5)
 
     candidates = []
 
@@ -965,6 +965,18 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL):
     entry = mkt["ask"] if direction == "LONG" else mkt["bid"]
     if entry <= 0: entry = mkt.get("ltp", 0.0)
     if entry <= 0: return
+
+    # ── ANTI-TRAP GUARD: Dual Advisor Veto ──
+    # If both Momentum AND Volume advisors explicitly vote REJECT, abort entry
+    v_dict = getattr(signal, "metadata", {}).get("council_votes", {})
+    if v_dict:
+        mom_vote = v_dict.get("Momentum", {}).get("vote")
+        vol_vote = v_dict.get("Volume", {}).get("vote")
+        if mom_vote == "REJECT" and vol_vote == "REJECT":
+            log_msg = f"[{sym}] ANTI-TRAP VETO: Momentum & Volume both voted REJECT opposing {direction}"
+            trade_log.append(log_msg)
+            if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
+            return
 
     # ── DUAL-HORIZON TRADE CLASSIFICATION: SWING vs PRECISION SCALP ──
     macro = compute_macro_structure(sym)
@@ -1379,18 +1391,60 @@ def _check_exit_for_symbol(sym: str):
             except Exception:
                 pass
 
-    # ── DYNAMIC EARLY PROFIT HARVEST: Violent OFI Reversal Protection ──
+    # ── DYNAMIC EARLY PROFIT HARVEST: Runner-Preserving OFI Reversal Protection ──
     if r_mult >= 1.0 and is_past_min_hold:
         try:
             m_eng = momentum_engines.get(sym, momentum_eng)
             mom_d = m_eng.get_diagnostics()
             ofi_v = float(mom_d.get("ofi", 0.0))
-            if direction == "LONG" and ofi_v <= -0.75:
-                close(cur, f"OFI REVERSAL HARVEST (OFI {ofi_v:+.2f} at +{r_mult:.1f}R)")
-                return
-            elif direction == "SHORT" and ofi_v >= 0.75:
-                close(cur, f"OFI REVERSAL HARVEST (OFI {ofi_v:+.2f} at +{r_mult:.1f}R)")
-                return
+            is_opposing = (direction == "LONG" and ofi_v <= -0.75) or (direction == "SHORT" and ofi_v >= 0.75)
+            if is_opposing:
+                if port.get("phase", 1) == 1:
+                    # Bank 40% partial profit, ratchet SL to Break-Even, and KEEP 60% RUNNER OPEN!
+                    part_frac = 0.40
+                    partial = port["unrealized_pnl"] * part_frac
+                    port["banked_pnl"] += partial
+                    account["balance"] += partial
+                    update_health()
+                    port["notional"] *= (1.0 - part_frac)
+                    fee_buf = entry * (ROUNDTRIP_BPS * 1.5 / 10000.0)
+                    port["sl_price"] = entry + fee_buf if direction == "LONG" else entry - fee_buf
+                    port["phase"] = 2
+                    port["risk_tier"] = 3
+                    if PROP_FIRM_MODE and prop_firm_manager:
+                        prop_firm_manager.on_trade_closed(partial, f"OFI HARVEST PARTIAL (+{r_mult:.1f}R)")
+
+                    log_msg = f"[{now_str}] {sym} OFI REVERSAL (+{r_mult:.1f}R): Banked 40% (+${partial:.2f}), SL→BE, RUNNER KEPT OPEN FOR TREND"
+                    trade_log.append(log_msg)
+                    if HEADLESS: print(f"  ⚡ {log_msg}", flush=True)
+                    send_challenge_alert("OFI HARVEST (RUNNER OPEN)", {
+                        "symbol": sym, "action": direction, "price": cur, "pnl_usd": partial,
+                        "reason": f"Banked 40% at +{r_mult:.1f}R, 60% runner trailing to TP2",
+                    })
+
+                    # Execute physical partial close on MT5 broker
+                    if DEMO_MODE and _active_broker is not None and t_id:
+                        cur_vol = port.get("entry_lots", 0.0)
+                        part_vol = round(cur_vol * part_frac, 2)
+                        min_step = 0.02 if "ETH" in sym else 0.01
+                        part_vol = max(min_step, part_vol)
+                        async def _exec_harvest_partial(ticket_id, vol, sl_v):
+                            try:
+                                if hasattr(_active_broker, "partial_close_position") and vol >= 0.01:
+                                    await _active_broker.partial_close_position(int(ticket_id), volume=vol)
+                                if hasattr(_active_broker, "modify_position_stops"):
+                                    await _active_broker.modify_position_stops(int(ticket_id), new_sl=sl_v)
+                            except Exception:
+                                pass
+                        try:
+                            import asyncio as _aio
+                            _aio.get_event_loop().create_task(_exec_harvest_partial(t_id, part_vol, port["sl_price"]))
+                        except Exception:
+                            pass
+                elif port.get("phase", 1) == 2 and r_mult >= 2.5:
+                    # In Phase 2, only close runner if it is already past +2.5R
+                    close(cur, f"OFI RUNNER HARVEST (OFI {ofi_v:+.2f} at +{r_mult:.1f}R)")
+                    return
         except Exception:
             pass
 
