@@ -2,11 +2,13 @@
 Apex Indian Engine — Live Web Command Center
 ============================================
 High-performance asynchronous web dashboard running on port 8081.
-Provides real-time visualization of:
-- NIFTY & BANKNIFTY Spot, Day Change, and VWAP
+Provides real-time sub-second visualization of:
+- NIFTY & BANKNIFTY Spot, Running VWAP, and Real-Time SVG Sparklines
+- 4-Advisor Council Consensus & XGBoost Model Convexity Gauge
 - India VIX Volatility Gauge & Regime Status
-- 3-Minute Institutional Option Chain PCR & Delta-OI Walls
+- 3-Minute Institutional Option Chain PCR & Delta-OI Walls for both Indices
 - Active Option Contract, PnL in ₹, and Analytical Greeks
+- Web Audio Synthesizer chimes for order events
 - One-Click Square Off / Pause / Resume controls
 - Trade Execution Journal with exact STT/brokerage friction accounting
 """
@@ -20,6 +22,10 @@ from typing import Any, Callable, Optional
 from aiohttp import web
 
 logger = logging.getLogger("apex.indian.web")
+
+# Suppress request spam in console
+logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
+logging.getLogger("aiohttp.server").setLevel(logging.WARNING)
 
 DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -170,6 +176,53 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     .asset-subtitle { font-size: 11px; color: var(--text-secondary); }
     .asset-price { font-size: 24px; font-weight: 800; font-family: var(--font-mono); }
     
+    /* Sparkline SVG */
+    .sparkline-box {
+      width: 100%;
+      height: 36px;
+      background: rgba(0,0,0,0.2);
+      border-radius: 4px;
+      overflow: hidden;
+      margin: 4px 0;
+    }
+    svg.sparkline {
+      width: 100%;
+      height: 100%;
+    }
+
+    /* Council Consensus Bar */
+    .consensus-container {
+      background: var(--surface-subtle);
+      border: 1px solid var(--border-hairline);
+      border-radius: 6px;
+      padding: 8px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .consensus-head {
+      display: flex;
+      justify-content: space-between;
+      font-size: 10px;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      font-weight: 600;
+    }
+    .consensus-bar-track {
+      width: 100%;
+      height: 6px;
+      background: rgba(255, 255, 255, 0.08);
+      border-radius: 3px;
+      position: relative;
+      overflow: hidden;
+    }
+    .consensus-bar-fill {
+      height: 100%;
+      width: 50%;
+      border-radius: 3px;
+      transition: width 0.3s ease, background 0.3s ease;
+    }
+
     .metrics-table {
       width: 100%;
       border-collapse: collapse;
@@ -247,6 +300,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
     <div class="header-actions">
       <span id="clock" style="font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary);">--:--:-- IST</span>
+      <button class="btn" id="audio-btn" onclick="toggleAudio()">Audio: ON</button>
       <button class="btn" onclick="triggerAction('pause')">Pause Engine</button>
       <button class="btn" onclick="triggerAction('resume')">Resume</button>
       <button class="btn btn-danger" onclick="triggerAction('square_off')">Square Off All</button>
@@ -291,6 +345,25 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <span class="tag tag-live" id="bn-tag">LIVE</span>
         </div>
         <div class="asset-price" id="bn-price">₹0.00</div>
+        
+        <!-- Live Sparkline -->
+        <div class="sparkline-box">
+          <svg class="sparkline" id="bn-sparkline" viewBox="0 0 100 36" preserveAspectRatio="none">
+            <path id="bn-sparkline-path" d="" fill="none" stroke="var(--green)" stroke-width="2" />
+          </svg>
+        </div>
+
+        <!-- Council & Model Bias Bar -->
+        <div class="consensus-container">
+          <div class="consensus-head">
+            <span>Council Bias</span>
+            <span id="bn-bias-label" style="color:var(--text-primary); font-weight:700;">NEUTRAL</span>
+          </div>
+          <div class="consensus-bar-track">
+            <div class="consensus-bar-fill" id="bn-bias-bar" style="width: 50%; background: var(--blue);"></div>
+          </div>
+        </div>
+
         <table class="metrics-table">
           <tr><td style="color:var(--text-secondary)">True VWAP</td><td id="bn-vwap">₹0.00</td></tr>
           <tr><td style="color:var(--text-secondary)">Put-Call Ratio (PCR)</td><td id="bn-pcr">1.00</td></tr>
@@ -310,6 +383,25 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <span class="tag tag-live" id="nifty-tag">LIVE</span>
         </div>
         <div class="asset-price" id="nifty-price">₹0.00</div>
+
+        <!-- Live Sparkline -->
+        <div class="sparkline-box">
+          <svg class="sparkline" id="nifty-sparkline" viewBox="0 0 100 36" preserveAspectRatio="none">
+            <path id="nifty-sparkline-path" d="" fill="none" stroke="var(--green)" stroke-width="2" />
+          </svg>
+        </div>
+
+        <!-- Council & Model Bias Bar -->
+        <div class="consensus-container">
+          <div class="consensus-head">
+            <span>Council Bias</span>
+            <span id="nifty-bias-label" style="color:var(--text-primary); font-weight:700;">NEUTRAL</span>
+          </div>
+          <div class="consensus-bar-track">
+            <div class="consensus-bar-fill" id="nifty-bias-bar" style="width: 50%; background: var(--blue);"></div>
+          </div>
+        </div>
+
         <table class="metrics-table">
           <tr><td style="color:var(--text-secondary)">True VWAP</td><td id="nifty-vwap">₹0.00</td></tr>
           <tr><td style="color:var(--text-secondary)">Put-Call Ratio (PCR)</td><td id="nifty-pcr">1.00</td></tr>
@@ -351,7 +443,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <span class="stat-val" style="font-size:14px;" id="pos-symbol">--</span>
         </div>
         <div class="stat-card">
-          <span class="stat-label">Direction & Lots</span>
+          <span class="stat-label">Size / Qty</span>
           <span class="stat-val" style="font-size:14px;" id="pos-lots">--</span>
         </div>
         <div class="stat-card">
@@ -359,25 +451,25 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <span class="stat-val" style="font-size:14px;" id="pos-entry">₹0.00</span>
         </div>
         <div class="stat-card">
-          <span class="stat-label">Trailing Stop Loss</span>
+          <span class="stat-label">Stop Loss</span>
           <span class="stat-val" style="font-size:14px; color:var(--red);" id="pos-sl">₹0.00</span>
         </div>
         <div class="stat-card">
-          <span class="stat-label">Take Profit 1 / TP2</span>
-          <span class="stat-val" style="font-size:14px; color:var(--green);" id="pos-tp">₹0.00 / ₹0.00</span>
+          <span class="stat-label">Take Profit (TP1 / TP2)</span>
+          <span class="stat-val" style="font-size:14px; color:var(--green);" id="pos-tp">₹0.00</span>
         </div>
         <div class="stat-card">
           <span class="stat-label">Unrealized PnL</span>
-          <span class="stat-val" style="font-size:16px;" id="pos-pnl">₹0.00</span>
+          <span class="stat-val" style="font-size:16px;" id="pos-pnl">+₹0.00</span>
         </div>
       </div>
     </section>
 
-    <!-- Execution Journal -->
+    <!-- Trade Journal -->
     <section class="journal-card">
       <div style="display:flex; justify-content:space-between; align-items:center;">
         <span style="font-size:14px; font-weight:700;">TRADE EXECUTION AUDIT JOURNAL</span>
-        <button class="btn" onclick="exportCsv()">Export CSV</button>
+        <button class="btn" onclick="exportJournalCSV()">Export CSV</button>
       </div>
       <div class="table-container">
         <table class="journal-table">
@@ -386,7 +478,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
               <th>ID</th>
               <th>Contract</th>
               <th>Type</th>
-              <th>Lots</th>
+              <th>Lots (Qty)</th>
               <th>Entry Px</th>
               <th>Exit Px</th>
               <th>Dur</th>
@@ -406,6 +498,59 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </main>
 
   <script>
+    let audioEnabled = true;
+    let audioCtx = null;
+    let prevPositionSymbol = null;
+
+    function initAudio() {
+      if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      }
+    }
+
+    function toggleAudio() {
+      audioEnabled = !audioEnabled;
+      document.getElementById('audio-btn').innerText = audioEnabled ? 'Audio: ON' : 'Audio: OFF';
+    }
+
+    function playTone(freq, type, duration) {
+      if (!audioEnabled) return;
+      try {
+        initAudio();
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = type || 'sine';
+        osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+        gain.gain.setValueAtTime(0.12, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + duration);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start();
+        osc.stop(audioCtx.currentTime + duration);
+      } catch (e) {}
+    }
+
+    function renderSparkline(svgPathId, prices, isUp) {
+      if (!prices || prices.length < 2) return;
+      const min = Math.min(...prices);
+      const max = Math.max(...prices);
+      const range = (max - min) || 1.0;
+      const width = 100;
+      const height = 36;
+      
+      const pts = prices.map((p, idx) => {
+        const x = (idx / (prices.length - 1)) * width;
+        const y = height - ((p - min) / range) * (height - 8) - 4;
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      });
+
+      const pathEl = document.getElementById(svgPathId);
+      if (pathEl) {
+        pathEl.setAttribute('d', 'M ' + pts.join(' L '));
+        pathEl.setAttribute('stroke', isUp ? 'var(--green)' : 'var(--red)');
+      }
+    }
+
     async function updateDashboard() {
       try {
         const res = await fetch('/api/state');
@@ -424,15 +569,47 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         document.getElementById('val-fees').innerText = '₹' + Number(data.daily_friction_cost || 0).toFixed(2);
         
         // Spot Prices
-        document.getElementById('bn-price').innerText = '₹' + Number(data.banknifty_spot || 0).toLocaleString('en-IN', {minimumFractionDigits: 2});
+        const bnPrice = Number(data.banknifty_spot || 0);
+        const niftyPrice = Number(data.nifty_spot || 0);
+        document.getElementById('bn-price').innerText = '₹' + bnPrice.toLocaleString('en-IN', {minimumFractionDigits: 2});
         document.getElementById('bn-vwap').innerText = '₹' + Number(data.banknifty_vwap || 0).toLocaleString('en-IN', {minimumFractionDigits: 2});
         document.getElementById('bn-pcr').innerText = Number(data.pcr || 1.0).toFixed(2);
         document.getElementById('bn-flow').innerText = data.oi_flow || 'BALANCED';
         document.getElementById('bn-put-wall').innerText = Number(data.put_wall || 0).toFixed(0);
         document.getElementById('bn-call-wall').innerText = Number(data.call_wall || 0).toFixed(0);
 
-        document.getElementById('nifty-price').innerText = '₹' + Number(data.nifty_spot || 0).toLocaleString('en-IN', {minimumFractionDigits: 2});
+        // Nifty 50 Complete Derivatives
+        document.getElementById('nifty-price').innerText = '₹' + niftyPrice.toLocaleString('en-IN', {minimumFractionDigits: 2});
         document.getElementById('nifty-vwap').innerText = '₹' + Number(data.nifty_vwap || 0).toLocaleString('en-IN', {minimumFractionDigits: 2});
+        document.getElementById('nifty-pcr').innerText = Number(data.nifty_pcr || 1.0).toFixed(2);
+        document.getElementById('nifty-flow').innerText = data.nifty_oi_flow || 'BALANCED';
+        document.getElementById('nifty-put-wall').innerText = Number(data.nifty_put_wall || 0).toFixed(0);
+        document.getElementById('nifty-call-wall').innerText = Number(data.nifty_call_wall || 0).toFixed(0);
+
+        // Sparklines
+        if (data.banknifty_sparkline) {
+          const isBnUp = bnPrice >= (data.banknifty_sparkline[0] || bnPrice);
+          renderSparkline('bn-sparkline-path', data.banknifty_sparkline, isBnUp);
+        }
+        if (data.nifty_sparkline) {
+          const isNfUp = niftyPrice >= (data.nifty_sparkline[0] || niftyPrice);
+          renderSparkline('nifty-sparkline-path', data.nifty_sparkline, isNfUp);
+        }
+
+        // Council Bias & Convexity Bars
+        const bnScore = Number(data.banknifty_score || 0);
+        const bnPct = Math.min(Math.max(((bnScore + 1.0) / 2.0) * 100, 5), 95);
+        document.getElementById('bn-bias-bar').style.width = bnPct + '%';
+        document.getElementById('bn-bias-bar').style.background = bnScore > 0.15 ? 'var(--green)' : (bnScore < -0.15 ? 'var(--red)' : 'var(--blue)');
+        document.getElementById('bn-bias-label').innerText = data.banknifty_bias || 'NEUTRAL';
+        document.getElementById('bn-bias-label').style.color = bnScore > 0.15 ? 'var(--green)' : (bnScore < -0.15 ? 'var(--red)' : 'var(--text-primary)');
+
+        const nfScore = Number(data.nifty_score || 0);
+        const nfPct = Math.min(Math.max(((nfScore + 1.0) / 2.0) * 100, 5), 95);
+        document.getElementById('nifty-bias-bar').style.width = nfPct + '%';
+        document.getElementById('nifty-bias-bar').style.background = nfScore > 0.15 ? 'var(--green)' : (nfScore < -0.15 ? 'var(--red)' : 'var(--blue)');
+        document.getElementById('nifty-bias-label').innerText = data.nifty_bias || 'NEUTRAL';
+        document.getElementById('nifty-bias-label').style.color = nfScore > 0.15 ? 'var(--green)' : (nfScore < -0.15 ? 'var(--red)' : 'var(--text-primary)');
 
         // VIX
         document.getElementById('vix-val').innerText = Number(data.vix || 18.0).toFixed(2);
@@ -450,6 +627,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         const posStatus = document.getElementById('pos-status');
 
         if (p) {
+          if (!prevPositionSymbol) {
+            playTone(880, 'sine', 0.25); // Trade Opened Chime
+          }
+          prevPositionSymbol = p.symbol;
+
           banner.classList.add('active');
           posStatus.innerText = 'OPEN ' + p.direction + ' (' + p.option_type + ')';
           posStatus.className = 'tag tag-live';
@@ -467,6 +649,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           uEl.innerText = uSign + '₹' + Number(uPnl).toFixed(2);
           uEl.style.color = uPnl >= 0 ? 'var(--green)' : 'var(--red)';
         } else {
+          if (prevPositionSymbol) {
+            playTone(1046, 'triangle', 0.35); // Trade Closed Chime
+          }
+          prevPositionSymbol = null;
+
           banner.classList.remove('active');
           posStatus.innerText = 'FLAT (MONITORING 5M SETUPS)';
           posStatus.className = 'tag tag-paper';
@@ -519,7 +706,27 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       }
     }
 
-    setInterval(updateDashboard, 1000);
+    function exportJournalCSV() {
+      fetch('/api/state').then(r => r.json()).then(data => {
+        if (!data.journal || !data.journal.length) {
+          alert('No trades to export.');
+          return;
+        }
+        let csv = 'ID,Symbol,OptionType,Lots,Quantity,EntryPrice,ExitPrice,DurationMin,GrossPnL,FrictionCost,NetCashPnL,ExitReason\\n';
+        data.journal.forEach(t => {
+          csv += `"${t.trade_id}","${t.symbol}","${t.option_type}",${t.lots},${t.quantity},${t.entry_price},${t.exit_price},${t.dur_min},${t.gross_pnl},${t.friction_cost},${t.net_pnl},"${t.exit_reason}"\\n`;
+        });
+        const blob = new Blob([csv], { type: 'text/csv' });
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `Indian_Option_Journal_${new Date().toISOString().slice(0,10)}.csv`;
+        a.click();
+      });
+    }
+
+    // High-frequency sub-second UI polling (300ms)
+    setInterval(updateDashboard, 300);
     updateDashboard();
   </script>
 </body>
@@ -561,7 +768,6 @@ class IndianWebServer:
             journal = []
             for t in reversed(self.engine.executor.trade_history[-25:]):
                 g_pnl = t.get("gross_pnl", 0.0)
-                # Friction approximation
                 buy_val = t.get("entry_price", 0.0) * t.get("quantity", 30)
                 sell_val = t.get("exit_price", 0.0) * t.get("quantity", 30)
                 fric = self.engine.config.friction.calculate_total_friction(buy_val, sell_val)
@@ -619,7 +825,9 @@ class IndianWebServer:
 
     async def start(self):
         try:
-            self.runner = web.AppRunner(self.app)
+            logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
+            logging.getLogger("aiohttp.server").setLevel(logging.WARNING)
+            self.runner = web.AppRunner(self.app, access_log=None)
             await self.runner.setup()
             self.site = web.TCPSite(self.runner, self.host, self.port)
             await self.site.start()

@@ -498,13 +498,22 @@ class ApexIndianEngine:
             }
 
         vix_params = self.vix_manager.get_parameters()
+        
+        # BankNifty OI
         bn_tracker = self.oi_trackers["BANKNIFTY"]
-        snap = bn_tracker.get_latest_snapshot()
+        bn_snap = bn_tracker.get_latest_snapshot()
+        bn_pcr = bn_snap.pcr if bn_snap else 1.0
+        bn_flow = bn_snap.flow_sentiment if bn_snap else "BALANCED"
+        bn_call_wall = bn_snap.max_call_wall if bn_snap else 0.0
+        bn_put_wall = bn_snap.max_put_wall if bn_snap else 0.0
 
-        pcr = snap.pcr if snap else 1.0
-        flow = snap.flow_sentiment if snap else "BALANCED"
-        call_wall = snap.max_call_wall if snap else 0.0
-        put_wall = snap.max_put_wall if snap else 0.0
+        # Nifty OI
+        nf_tracker = self.oi_trackers["NIFTY"]
+        nf_snap = nf_tracker.get_latest_snapshot()
+        nf_pcr = nf_snap.pcr if nf_snap else 1.0
+        nf_flow = nf_snap.flow_sentiment if nf_snap else "BALANCED"
+        nf_call_wall = nf_snap.max_call_wall if nf_snap else 0.0
+        nf_put_wall = nf_snap.max_put_wall if nf_snap else 0.0
 
         # Live spot prices from streamer or Angel API
         bn_live = self.ws_streamer.latest_prices.get("BANKNIFTY", 0.0) if self.ws_streamer else 0.0
@@ -528,6 +537,37 @@ class ApexIndianEngine:
             else (nifty_candles[-1].get("vwap", nifty_spot) if nifty_candles else nifty_spot)
         )
 
+        # Trailing 20 closes for sparklines
+        bn_spark = [float(c["close"]) for c in bn_candles[-20:]] if bn_candles else [bn_spot]
+        nf_spark = [float(c["close"]) for c in nifty_candles[-20:]] if nifty_candles else [nifty_spot]
+
+        # Advisor Council Consensus & Bias
+        bn_score = 0.0
+        bn_conviction = 0.50
+        bn_bias = "NEUTRAL"
+        if len(bn_candles) >= 20:
+            try:
+                res = self.signal_engines["BANKNIFTY"].evaluate_signal(bn_spot, bn_vwap)
+                if res:
+                    bn_bias = f"{res[0]} ({res[1]})"
+                    bn_conviction = res[2]
+                    bn_score = res[3]
+            except Exception:
+                pass
+
+        nf_score = 0.0
+        nf_conviction = 0.50
+        nf_bias = "NEUTRAL"
+        if len(nifty_candles) >= 20:
+            try:
+                res = self.signal_engines["NIFTY"].evaluate_signal(nifty_spot, nifty_vwap)
+                if res:
+                    nf_bias = f"{res[0]} ({res[1]})"
+                    nf_conviction = res[2]
+                    nf_score = res[3]
+            except Exception:
+                pass
+
         return {
             "mode": self.config.mode,
             "status": self.risk_manager.status if not self.is_paused else "PAUSED",
@@ -543,12 +583,24 @@ class ApexIndianEngine:
             "vix_regime": vix_params.regime_name,
             "banknifty_spot": bn_spot,
             "banknifty_vwap": bn_vwap,
+            "banknifty_sparkline": bn_spark,
+            "banknifty_score": bn_score,
+            "banknifty_conviction": bn_conviction,
+            "banknifty_bias": bn_bias,
             "nifty_spot": nifty_spot,
             "nifty_vwap": nifty_vwap,
-            "pcr": pcr,
-            "oi_flow": flow,
-            "call_wall": call_wall,
-            "put_wall": put_wall,
+            "nifty_sparkline": nf_spark,
+            "nifty_score": nf_score,
+            "nifty_conviction": nf_conviction,
+            "nifty_bias": nf_bias,
+            "pcr": bn_pcr,
+            "oi_flow": bn_flow,
+            "call_wall": bn_call_wall,
+            "put_wall": bn_put_wall,
+            "nifty_pcr": nf_pcr,
+            "nifty_oi_flow": nf_flow,
+            "nifty_call_wall": nf_call_wall,
+            "nifty_put_wall": nf_put_wall,
             "open_position": open_pos,
         }
 
@@ -570,6 +622,7 @@ class ApexIndianEngine:
             f"<b>Trades Today:</b> {m['trades_today']}/{m['max_trades']}\n"
             f"<b>India VIX:</b> {m['vix']:.2f} ({m['vix_regime']})\n"
             f"<b>BankNifty PCR:</b> {m['pcr']:.2f} ({m['oi_flow']})\n"
+            f"<b>Nifty PCR:</b> {m['nifty_pcr']:.2f} ({m['nifty_oi_flow']})\n"
             f"<b>Active Position:</b> {pos_str}\n"
             f"<b>Time:</b> {time.strftime('%H:%M:%S IST')}"
         )
@@ -598,45 +651,37 @@ class ApexIndianEngine:
         return "▶️ Indian Engine trading RESUMED. Scanning for setups."
 
     async def _poll_live_ticks_loop(self):
-        """Continuous background poller for sub-second index LTP and active option prices."""
-        logger.info("Started background Angel One live LTP poller loop.")
+        """Continuous background batch poller for sub-second index LTP and active option prices."""
+        logger.info("Started background Angel One high-frequency live LTP poller loop.")
         while self.is_running:
             try:
                 if self.smart_api:
-                    # 1. BankNifty Spot
-                    bn_res = self.smart_api.ltpData("NSE", "BANKNIFTY", "99926009")
-                    if bn_res.get("status"):
-                        bn_ltp = float(bn_res.get("data", {}).get("ltp", 0.0))
-                        if bn_ltp > 0 and self.ws_streamer:
-                            self.ws_streamer.update_external_tick("BANKNIFTY", bn_ltp)
-
-                    # 2. Nifty Spot
-                    nf_res = self.smart_api.ltpData("NSE", "NIFTY", "99926000")
-                    if nf_res.get("status"):
-                        nf_ltp = float(nf_res.get("data", {}).get("ltp", 0.0))
-                        if nf_ltp > 0 and self.ws_streamer:
-                            self.ws_streamer.update_external_tick("NIFTY", nf_ltp)
-
-                    # 3. India VIX
-                    vix_res = self.smart_api.ltpData("NSE", "INDIAVIX", "99926017")
-                    if vix_res.get("status"):
-                        vix_val = float(vix_res.get("data", {}).get("ltp", 0.0))
-                        if vix_val > 0:
-                            self.vix_manager.update_vix(vix_val)
-
-                    # 4. Active Option Position Live Tick
+                    exchange_tokens = {"NSE": ["99926009", "99926000", "99926017"]}
                     if self.executor.has_open_position():
                         trade = self.executor.active_trade
-                        opt_res = self.smart_api.ltpData("NFO", trade.symbol, trade.token)
-                        if opt_res.get("status"):
-                            opt_ltp = float(opt_res.get("data", {}).get("ltp", 0.0))
-                            if opt_ltp > 0:
-                                self.process_tick(current_option_price=opt_ltp)
+                        exchange_tokens["NFO"] = [str(trade.token)]
+
+                    mkt_res = self.smart_api.getMarketData("LTP", exchange_tokens)
+                    fetched = mkt_res.get("data", {}).get("fetched", [])
+                    for item in fetched:
+                        tok = str(item.get("symbolToken", ""))
+                        ltp = float(item.get("ltp", 0.0))
+                        if ltp <= 0:
+                            continue
+
+                        if tok == "99926009" and self.ws_streamer:
+                            self.ws_streamer.update_external_tick("BANKNIFTY", ltp)
+                        elif tok == "99926000" and self.ws_streamer:
+                            self.ws_streamer.update_external_tick("NIFTY", ltp)
+                        elif tok == "99926017":
+                            self.vix_manager.update_vix(ltp)
+                        elif self.executor.has_open_position() and tok == str(self.executor.active_trade.token):
+                            self.process_tick(current_option_price=ltp)
 
             except Exception as e:
                 logger.debug(f"Live tick poller exception: {e}")
 
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(0.5)
 
     async def _poll_oi_loop(self):
         """Periodic background poller (every 60s) for institutional Option Chain & Delta-OI."""
@@ -788,15 +833,15 @@ class ApexIndianEngine:
                     await asyncio.sleep(10)
                     continue
 
-                # 2. Render Live Terminal HUD every 2 seconds
-                if (time.time() - last_hud_render) >= 2.0:
+                # 2. Render Live Terminal HUD with high frequency (every 0.5s)
+                if (time.time() - last_hud_render) >= 0.5:
                     metrics = self.get_hud_metrics()
                     hud_output = self.hud.render(metrics)
                     # Clear screen and render HUD cleanly
                     print("\033[H\033[J" + hud_output, flush=True)
                     last_hud_render = time.time()
 
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(0.2)
             except Exception as e:
                 logger.error(f"Indian Engine loop error: {e}")
                 await asyncio.sleep(2.0)

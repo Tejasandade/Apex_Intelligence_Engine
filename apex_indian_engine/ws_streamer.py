@@ -149,16 +149,16 @@ class IndianWebSocketStreamer:
         self._connected = True
         logger.info("Angel One WebSocket connection OPEN.")
 
-        # Subscribe to Cash Indices (Exchange: 1 = NSE)
+        # Subscribe to Cash Indices (Exchange: 1 = NSE) in Mode 1 (LTP: instantaneous sub-second ticks)
         spot_tokens = list(self.SPOT_TOKENS.keys())
         token_list = [{"exchangeType": 1, "tokens": spot_tokens}]
-        self._sws.subscribe("apex_spot", 3, token_list)
-        logger.info(f"Subscribed to Spot Indices: NIFTY, BANKNIFTY, INDIA VIX ({spot_tokens})")
+        self._sws.subscribe("apex_spot", 1, token_list)
+        logger.info(f"Subscribed to Spot Indices: NIFTY, BANKNIFTY, INDIA VIX in Mode 1 (LTP) ({spot_tokens})")
 
-        # Subscribe to any registered options
+        # Subscribe to any registered options in Mode 1 (LTP)
         if self._option_tokens:
             opt_list = [{"exchangeType": 2, "tokens": list(self._option_tokens.keys())}]
-            self._sws.subscribe("apex_opt", 3, opt_list)
+            self._sws.subscribe("apex_opt", 1, opt_list)
 
     def _on_data(self, wsapp, msg: dict[str, Any]):
         if not self._running:
