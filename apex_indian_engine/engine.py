@@ -606,7 +606,7 @@ class ApexIndianEngine:
         bn_bias = "NEUTRAL"
         if len(bn_candles) >= 20:
             try:
-                res = self.signal_engines["BANKNIFTY"].evaluate_signal(bn_spot, bn_vwap, key_levels=bn_lvl)
+                res = self.signal_engines["BANKNIFTY"].evaluate_signal(bn_spot, bn_vwap, key_levels=bn_lvl, is_preview=True)
                 if res:
                     bn_bias = f"{res[0]} ({res[1]})"
                     bn_conviction = res[2]
@@ -619,7 +619,7 @@ class ApexIndianEngine:
         nf_bias = "NEUTRAL"
         if len(nifty_candles) >= 20:
             try:
-                res = self.signal_engines["NIFTY"].evaluate_signal(nifty_spot, nifty_vwap, key_levels=nf_lvl)
+                res = self.signal_engines["NIFTY"].evaluate_signal(nifty_spot, nifty_vwap, key_levels=nf_lvl, is_preview=True)
                 if res:
                     nf_bias = f"{res[0]} ({res[1]})"
                     nf_conviction = res[2]

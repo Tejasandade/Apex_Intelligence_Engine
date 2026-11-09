@@ -27,12 +27,17 @@ def main():
     parser = argparse.ArgumentParser(description="Apex Indian Options Trading Engine")
     parser.add_argument("--mode", choices=["paper", "live"], default="paper", help="Execution mode (default: paper)")
     parser.add_argument("--capital", type=float, default=100000.0, help="Initial capital in INR (default: ₹1,00,000)")
+    parser.add_argument("--reset", action="store_true", help="Reset intraday trades, daily PnL, and start fresh with initial capital")
     args = parser.parse_args()
 
     engine = ApexIndianEngine(mode=args.mode.upper(), initial_capital=args.capital)
     if not engine.initialize():
         print("❌ Engine initialization failed. Check credentials and scrip master.")
         sys.exit(1)
+
+    if args.reset:
+        engine.risk_manager.force_reset(capital=args.capital)
+        print(f"  🔄 Engine state reset cleanly: Capital=₹{args.capital:,.2f}, Trades=0/4")
 
     print("\n  🚀 Apex Indian Engine is active and monitoring NSE sessions...")
     print(f"  Mode: {engine.config.mode} | Capital: ₹{engine.risk_manager.capital_inr:,.2f}")

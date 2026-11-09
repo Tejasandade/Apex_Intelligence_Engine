@@ -64,6 +64,7 @@ class IndianSignalEngine:
         # Initialize OI Wall Shield (buffer: 60 pts for BankNifty, 30 pts for Nifty)
         wall_buf = 60.0 if "BANK" in self.index_name else 30.0
         self.oi_shield = OIShield(wall_buffer_points=wall_buf)
+        self._last_veto_log: dict[str, float] = {}
 
     def add_candle(self, c: dict[str, Any]) -> None:
         """
@@ -80,6 +81,7 @@ class IndianSignalEngine:
         current_vwap: float = 0.0,
         oi_chain: Optional[list[dict[str, Any]]] = None,
         key_levels: Optional[IndexKeyLevels] = None,
+        is_preview: bool = False,
     ) -> Optional[tuple[str, str, float, float, list[str], Optional[OIMetrics]]]:
         """
         Evaluates current technical posture across 5 Council Advisors + OI Wall Shield + Liquidity Traps.
@@ -212,7 +214,11 @@ class IndianSignalEngine:
 
             # Validate against Institutional Trap (PDH Sweep Rejection)
             if key_levels and "PDH Sweep Rejection" in key_levels.active_sweep:
-                logger.warning(f"CE Entry VETOED on {self.index_name}: Institutional PDH Sweep Trap detected!")
+                if not is_preview:
+                    now_t = time.time()
+                    if (now_t - self._last_veto_log.get("PDH_TRAP", 0.0)) >= 60.0:
+                        logger.warning(f"CE Entry VETOED on {self.index_name}: Institutional PDH Sweep Trap detected!")
+                        self._last_veto_log["PDH_TRAP"] = now_t
                 notes.append("VETO: PDH Sweep Rejection Trap (Liquidity swept, sellers active)")
                 return None
 
@@ -220,7 +226,11 @@ class IndianSignalEngine:
             if oi_metrics:
                 safe, reason = self.oi_shield.validate_entry(direction, cur_close, cur_close, oi_metrics)
                 if not safe:
-                    logger.warning(f"Signal Vetoed by OI Shield: {reason}")
+                    if not is_preview:
+                        now_t = time.time()
+                        if (now_t - self._last_veto_log.get(f"OI_{reason}", 0.0)) >= 60.0:
+                            logger.warning(f"Signal Vetoed by OI Shield: {reason}")
+                            self._last_veto_log[f"OI_{reason}"] = now_t
                     notes.append(f"VETO: {reason}")
                     return None
 
@@ -233,7 +243,11 @@ class IndianSignalEngine:
 
             # Validate against Institutional Trap (PDL Sweep Reclaim)
             if key_levels and "PDL Sweep Reclaim" in key_levels.active_sweep:
-                logger.warning(f"PE Entry VETOED on {self.index_name}: Institutional PDL Sweep Trap detected!")
+                if not is_preview:
+                    now_t = time.time()
+                    if (now_t - self._last_veto_log.get("PDL_TRAP", 0.0)) >= 60.0:
+                        logger.warning(f"PE Entry VETOED on {self.index_name}: Institutional PDL Sweep Trap detected!")
+                        self._last_veto_log["PDL_TRAP"] = now_t
                 notes.append("VETO: PDL Sweep Reclaim Trap (Liquidity swept, buyers active)")
                 return None
 
@@ -241,7 +255,11 @@ class IndianSignalEngine:
             if oi_metrics:
                 safe, reason = self.oi_shield.validate_entry(direction, cur_close, cur_close, oi_metrics)
                 if not safe:
-                    logger.warning(f"Signal Vetoed by OI Shield: {reason}")
+                    if not is_preview:
+                        now_t = time.time()
+                        if (now_t - self._last_veto_log.get(f"OI_{reason}", 0.0)) >= 60.0:
+                            logger.warning(f"Signal Vetoed by OI Shield: {reason}")
+                            self._last_veto_log[f"OI_{reason}"] = now_t
                     notes.append(f"VETO: {reason}")
                     return None
 

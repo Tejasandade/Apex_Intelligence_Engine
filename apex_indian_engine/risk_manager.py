@@ -69,6 +69,22 @@ class IndianRiskManager:
             self.halt_until_ts = 0.0
             self.save_state()
 
+    def force_reset(self, capital: Optional[float] = None) -> None:
+        """Force manual reset of capital and intraday trading stats to start fresh."""
+        if capital is not None:
+            self.capital_inr = float(capital)
+            self.day_start_capital = float(capital)
+        self.daily_realized_pnl = 0.0
+        self.daily_unrealized_pnl = 0.0
+        self.daily_friction_cost = 0.0
+        self.trades_today = 0
+        self.consecutive_losses = 0
+        self.status = "READY"
+        self.halt_reason = ""
+        self.halt_until_ts = 0.0
+        self.save_state()
+        logger.info(f"Indian Engine Force Reset: Capital=₹{self.capital_inr:,.2f}, Trades=0/4, Status=READY")
+
     def can_enter_trade(self, now_time: Optional[dtime] = None, skip_time_check: bool = False) -> tuple[bool, str]:
         """
         Validates whether opening a new option trade is permitted right now.
