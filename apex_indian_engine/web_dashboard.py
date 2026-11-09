@@ -1114,21 +1114,28 @@ class IndianWebServer:
             journal = []
             for t in reversed(self.engine.executor.trade_history[-25:]):
                 g_pnl = t.get("gross_pnl", 0.0)
-                buy_val = t.get("entry_price", 0.0) * t.get("quantity", 30)
-                sell_val = t.get("exit_price", 0.0) * t.get("quantity", 30)
-                fric = self.engine.config.friction.calculate_total_friction(buy_val, sell_val)
+                entry_p = t.get("entry_price", 0.0)
+                exit_p = t.get("exit_price", 0.0)
+                qty = t.get("quantity", 30)
+                if hasattr(self.engine.config.friction, "calculate_roundtrip_cost"):
+                    fric_val = self.engine.config.friction.calculate_roundtrip_cost(entry_p, exit_p, qty)
+                else:
+                    buy_val = entry_p * qty
+                    sell_val = exit_p * qty
+                    fric_res = self.engine.config.friction.calculate_total_friction(buy_val, sell_val)
+                    fric_val = getattr(fric_res, "total_friction", fric_res)
                 journal.append({
                     "trade_id": t.get("trade_id", ""),
                     "symbol": t.get("symbol", ""),
                     "option_type": t.get("option_type", ""),
                     "lots": t.get("lots", 1),
-                    "quantity": t.get("quantity", 30),
-                    "entry_price": t.get("entry_price", 0.0),
-                    "exit_price": t.get("exit_price", 0.0),
+                    "quantity": qty,
+                    "entry_price": entry_p,
+                    "exit_price": exit_p,
                     "dur_min": t.get("dur_min", 0.0),
                     "gross_pnl": g_pnl,
-                    "friction_cost": fric.total_friction,
-                    "net_pnl": round(g_pnl - fric.total_friction, 2),
+                    "friction_cost": fric_val,
+                    "net_pnl": round(g_pnl - fric_val, 2),
                     "exit_reason": t.get("exit_reason", ""),
                 })
             metrics["journal"] = journal

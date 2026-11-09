@@ -125,6 +125,21 @@ class LiquidityEngine:
                     res["sweep_bearish"] = True
                     res["sweep_level"] = "ASH"
 
+            # Check Expansion Breakouts (Continuation moves above/below Session & Daily levels)
+            if res["ash"] > 0 and cur_close > res["ash"]:
+                res["breakout_bullish"] = True
+                res["breakout_level"] = "ASH"
+            elif res["pdh"] > 0 and cur_close > res["pdh"]:
+                res["breakout_bullish"] = True
+                res["breakout_level"] = "PDH"
+
+            if res["asl"] > 0 and cur_close < res["asl"]:
+                res["breakout_bearish"] = True
+                res["breakout_level"] = "ASL"
+            elif res["pdl"] > 0 and cur_close < res["pdl"]:
+                res["breakout_bearish"] = True
+                res["breakout_level"] = "PDL"
+
             # 5. Distance to nearest Key Levels
             cur_p = cur_close
             resists = [p for p in [res["pdh"], res["ash"]] if p > cur_p]
@@ -162,6 +177,12 @@ class LiquidityEngine:
             return +0.06, f"Bullish Liquidity Sweep of {lev.get('sweep_level')} confirmed"
         if dir_u in ("SELL", "SHORT") and lev.get("sweep_bearish"):
             return +0.06, f"Bearish Liquidity Sweep of {lev.get('sweep_level')} confirmed"
+
+        # 1b. Institutional Expansion Breakout (Strong Momentum Acceleration)
+        if dir_u in ("BUY", "LONG") and lev.get("breakout_bullish"):
+            return +0.05, f"Bullish Breakout above {lev.get('breakout_level')} Expansion"
+        if dir_u in ("SELL", "SHORT") and lev.get("breakout_bearish"):
+            return +0.05, f"Bearish Breakdown below {lev.get('breakout_level')} Expansion"
 
         # 2. Bullish/Bearish Fair Value Gap
         if dir_u in ("BUY", "LONG") and lev.get("fvg_bullish"):

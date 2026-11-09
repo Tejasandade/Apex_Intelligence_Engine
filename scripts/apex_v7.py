@@ -203,12 +203,12 @@ def get_calibrated_threshold(symbol: str, regime: str = "UNKNOWN") -> float:
     - Pacific low-liquidity: +0.02
     """
     sym = symbol.upper()
-    base = 0.60 if "ETH" in sym else (0.59 if ("GOLD" in sym or "PAXG" in sym) else 0.58)
+    base = 0.60 if "ETH" in sym else 0.58
     reg_l = str(regime).lower()
     if "trending_high_vol" in reg_l:
         base -= 0.02
     elif "ranging_low_vol" in reg_l:
-        base += 0.03
+        base += 0.02
     elif "ranging_high_vol" in reg_l:
         base += 0.01
 
@@ -216,13 +216,13 @@ def get_calibrated_threshold(symbol: str, regime: str = "UNKNOWN") -> float:
     if s_name in ("LONDON", "NEW_YORK"):
         base -= 0.01
     elif s_name == "PACIFIC":
-        base += 0.02
+        base += 0.01
 
     # ICT Kill Zone institutional liquidity alignment
     if session.get("is_kill_zone", False):
         base -= 0.01
 
-    return round(float(np.clip(base, 0.54, 0.66)), 3)
+    return round(float(np.clip(base, 0.53, 0.65)), 3)
 
 # Risk
 BASE_RISK_PCT   = _rc("sizing", "min_allocation_pct", 0.010)   # from risk.yaml
@@ -785,9 +785,16 @@ def can_trade_symbol(symbol: str = SYMBOL, direction: str = "LONG") -> tuple[boo
     macro = symbol_macro_structure.get(sym)
     if macro:
         if dir_upper == "LONG" and macro.get("macro_bias") == "STRONG_BEAR":
-            return False, f"MACRO SHIELD: {sym} Strong Bear Macro (1D/4H aligned down)"
+            # Allow high-conviction counter-trend scalp ONLY if backed by confirmed liquidity sweep or expansion breakout
+            lev = liquidity_engine.get_levels(sym) if 'liquidity_engine' in globals() else {}
+            has_edge = lev.get("sweep_bullish", False) or lev.get("breakout_bullish", False)
+            if not has_edge:
+                return False, f"MACRO SHIELD: {sym} Strong Bear Macro (requires confirmed sweep/breakout)"
         elif dir_upper == "SHORT" and macro.get("macro_bias") == "STRONG_BULL":
-            return False, f"MACRO SHIELD: {sym} Strong Bull Macro (1D/4H aligned up)"
+            lev = liquidity_engine.get_levels(sym) if 'liquidity_engine' in globals() else {}
+            has_edge = lev.get("sweep_bearish", False) or lev.get("breakout_bearish", False)
+            if not has_edge:
+                return False, f"MACRO SHIELD: {sym} Strong Bull Macro (requires confirmed sweep/breakout)"
 
     return True, "CLEAR"
 
@@ -1632,6 +1639,41 @@ async def _candle_worker():
                 except Exception:
                     pass
 
+                # Institutional Setup Discovery: Capture breakouts & liquidity sweeps across ALL symbols & sessions
+                if sig is None and feats is not None:
+                    lev = liquidity_engine.get_levels(sym) if 'liquidity_engine' in globals() else {}
+                    re = eng.regime_detector.current_regime
+                    atr_val = float(feats.iloc[0].get("ATR", 10.0)) if "ATR" in feats.columns else 10.0
+                    close_p = float(c5["close"])
+                    if lev.get("sweep_bullish") or lev.get("breakout_bullish"):
+                        sig = TradingSignal(
+                            symbol=sym,
+                            direction="BUY",
+                            conviction=max(symbol_live_probs.get(sym, {}).get("long", 0.50), 0.50),
+                            entry_price=close_p,
+                            stop_loss=close_p - max(atr_val, 1.0),
+                            take_profit=close_p + max(atr_val, 1.0) * MIN_RR,
+                            regime=re.value,
+                            atr=atr_val,
+                            council_approved=True,
+                            council_score=0.85,
+                            metadata={"trigger": "INSTITUTIONAL_LIQUIDITY_DISCOVERY"}
+                        )
+                    elif lev.get("sweep_bearish") or lev.get("breakout_bearish"):
+                        sig = TradingSignal(
+                            symbol=sym,
+                            direction="SELL",
+                            conviction=max(symbol_live_probs.get(sym, {}).get("short", 0.50), 0.50),
+                            entry_price=close_p,
+                            stop_loss=close_p + max(atr_val, 1.0),
+                            take_profit=close_p - max(atr_val, 1.0) * MIN_RR,
+                            regime=re.value,
+                            atr=atr_val,
+                            council_approved=True,
+                            council_score=0.85,
+                            metadata={"trigger": "INSTITUTIONAL_LIQUIDITY_DISCOVERY"}
+                        )
+
                 if sig is not None:
                     last_signal = sig
                     if sym == PRIMARY_SYMBOL:
@@ -1915,13 +1957,12 @@ def prewarm():
         print(f"  ✓ [{sym}] {len(models)} model files loaded")
         total_models_loaded += len(models)
 
-        sym_base_prob = 0.60 if "ETH" in sym else (0.59 if ("GOLD" in sym or "PAXG" in sym) else 0.58)
-        # Build LiveSignalEngine for this symbol (pre-filtered at base-0.03 to allow high-conviction intel synergy)
+        # Build LiveSignalEngine for this symbol (pre-filtered at 0.48 to let directional candidates flow into Market Intelligence)
         engine = LiveSignalEngine(
             symbol=sym,
             market_type="crypto",
             models=models,
-            conviction_threshold=round(sym_base_prob - 0.03, 3),
+            conviction_threshold=0.48,
             risk_per_trade=25.0 if PROP_FIRM_MODE else (account["balance"] * BASE_RISK_PCT),
             default_rr=MIN_RR,
             max_concurrent=1,
@@ -1931,7 +1972,7 @@ def prewarm():
             enable_council=True,
             enable_statistical_alpha=False,
             retrain_interval=2000,
-            consensus_threshold=0.60,
+            consensus_threshold=0.55,
         )
         signal_engines[sym] = engine
         if sym == PRIMARY_SYMBOL:

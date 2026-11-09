@@ -405,16 +405,8 @@ class LiveSignalEngine:
             probability = prob_short
             ensemble_conviction = conv_short
             
-        # ── Phase 6: Strict Macro Trend Filter ──
-        # Guarantee 0 flaws by never fighting the HTF Trend
-        if direction == "BUY" and macro_downtrend:
-            direction = "HOLD"
-            logger.info("signal_suppressed", reason="Strict Macro Downtrend Block", price=close)
-
-        elif direction == "SELL" and macro_uptrend:
-            direction = "HOLD"
-            logger.info("signal_suppressed", reason="Strict Macro Uptrend Block", price=close)
-
+        # Note: Higher timeframe macro structure and liquidity sweep validation
+        # are handled dynamically downstream in the multi-asset execution core (apex_v7.py)
         if direction == "HOLD":
             return None
             

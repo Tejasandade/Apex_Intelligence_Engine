@@ -124,6 +124,22 @@ class FrictionModel:
         total_cost = brokerage + stt + exchange_fee + sebi_fee + gst + stamp_duty
         return round(total_cost, 2)
 
+    def calculate_total_friction(self, buy_val: float, sell_val: float):
+        """Calculate friction using turnover values directly."""
+        total_turnover = buy_val + sell_val
+        brokerage = self.brokerage_per_order * 2
+        stt = sell_val * self.stt_rate_sell
+        exchange_fee = total_turnover * self.exchange_txn_charge
+        sebi_fee = total_turnover * self.sebi_turnover_charge
+        gst = (brokerage + exchange_fee) * self.gst_rate
+        stamp_duty = buy_val * self.stamp_duty_buy
+        total_cost = round(brokerage + stt + exchange_fee + sebi_fee + gst + stamp_duty, 2)
+
+        class _FrictionResult:
+            def __init__(self, cost):
+                self.total_friction = cost
+        return _FrictionResult(total_cost)
+
 
 @dataclass
 class EngineConfig:
