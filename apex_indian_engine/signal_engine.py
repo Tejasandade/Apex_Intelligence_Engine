@@ -75,6 +75,43 @@ class IndianSignalEngine:
         if len(self.candles_5m) > 120:
             self.candles_5m.pop(0)
 
+    def _compute_htf_bias(self, closes: list[float]) -> str:
+        """
+        Resamples 5m closes into 15m (every 3rd close) and 1H (every 12th close)
+        to evaluate institutional macro trend alignment.
+        Returns: 'BULLISH', 'BEARISH', or 'NEUTRAL'
+        """
+        if len(closes) < 30:
+            return "NEUTRAL"
+
+        # 15m closes (3 x 5m)
+        c15 = closes[::3]
+        ema9_15 = self._calc_ema(c15, 9)
+        ema21_15 = self._calc_ema(c15, 21)
+
+        # 1h closes (12 x 5m)
+        c60 = closes[::12]
+        ema9_60 = self._calc_ema(c60, 9) if len(c60) >= 9 else c60[-1]
+
+        cur = closes[-1]
+        bull_votes = 0
+        bear_votes = 0
+
+        if cur > ema9_15: bull_votes += 1
+        else: bear_votes += 1
+
+        if ema9_15 > ema21_15: bull_votes += 1
+        else: bear_votes += 1
+
+        if cur > ema9_60: bull_votes += 1
+        else: bear_votes += 1
+
+        if bull_votes >= 2 and cur >= ema21_15:
+            return "BULLISH"
+        elif bear_votes >= 2 and cur <= ema21_15:
+            return "BEARISH"
+        return "NEUTRAL"
+
     def evaluate_signal(
         self,
         current_spot: float,
@@ -82,6 +119,7 @@ class IndianSignalEngine:
         oi_chain: Optional[list[dict[str, Any]]] = None,
         key_levels: Optional[IndexKeyLevels] = None,
         is_preview: bool = False,
+        heavyweights: Optional[dict[str, Any]] = None,
     ) -> Optional[tuple[str, str, float, float, list[str], Optional[OIMetrics]]]:
         """
         Evaluates current technical posture across 5 Council Advisors + OI Wall Shield + Liquidity Traps.
@@ -206,13 +244,57 @@ class IndianSignalEngine:
             except Exception as e:
                 logger.debug(f"OI shield calculation error: {e}")
 
-        # Check Threshold
+        # ── 9. Higher-Timeframe Trend Structure ──
+        htf_bias = self._compute_htf_bias(closes)
+
+        # ── 10. Institutional Council Gate & Veto Protocol ──
         if net_score >= self.min_consensus_threshold:
-            # Bullish: Buy CALL (CE)
+            # Bullish Candidate: Buy CALL (CE)
             direction, opt_type = "LONG", "CE"
             conviction = min(0.95, round(0.50 + (net_score * 0.45), 2))
 
-            # Validate against Institutional Trap (PDH Sweep Rejection)
+            # VETO 1: VWAP Absolute Rule (Never buy CE below VWAP)
+            if cur_close < (vwap - 5.0):
+                if not is_preview:
+                    now_t = time.time()
+                    if (now_t - self._last_veto_log.get("VWAP_CE_VETO", 0.0)) >= 60.0:
+                        logger.warning(f"CE Entry VETOED on {self.index_name}: Spot (₹{cur_close:,.1f}) below VWAP (₹{vwap:,.1f})")
+                        self._last_veto_log["VWAP_CE_VETO"] = now_t
+                notes.append("VETO: Bearish VWAP alignment (Spot < VWAP)")
+                return None
+
+            # VETO 2: Central Pivot Range (CPR) Chop Zone
+            if key_levels:
+                cpr_top = max(key_levels.tc, key_levels.bc)
+                cpr_bot = min(key_levels.tc, key_levels.bc)
+                if cpr_bot <= cur_close <= cpr_top:
+                    if not is_preview:
+                        now_t = time.time()
+                        if (now_t - self._last_veto_log.get("CPR_CHOP_VETO", 0.0)) >= 60.0:
+                            logger.warning(f"CE Entry VETOED on {self.index_name}: Trapped inside CPR chop zone ({cpr_bot:.0f}-{cpr_top:.0f})")
+                            self._last_veto_log["CPR_CHOP_VETO"] = now_t
+                    notes.append("VETO: Trapped inside CPR (Theta chop zone)")
+                    return None
+
+            # VETO 3: Higher-Timeframe Trend (15m/1H) Bearish Opposing
+            if htf_bias == "BEARISH":
+                if not is_preview:
+                    now_t = time.time()
+                    if (now_t - self._last_veto_log.get("HTF_CE_VETO", 0.0)) >= 60.0:
+                        logger.warning(f"CE Entry VETOED on {self.index_name}: 15m/1H Macro Trend is BEARISH")
+                        self._last_veto_log["HTF_CE_VETO"] = now_t
+                notes.append("VETO: Macro 15m/1H Trend is Bearish")
+                return None
+
+            # VETO 4: Banking Heavyweight Opposing (BankNifty)
+            if heavyweights and "BANK" in self.index_name:
+                if heavyweights.get("BANKING_FLOW") == "BEARISH":
+                    if not is_preview:
+                        logger.warning(f"CE Entry VETOED on {self.index_name}: Heavyweights HDFC/ICICI are BEARISH")
+                    notes.append("VETO: Heavyweights HDFC/ICICI opposing")
+                    return None
+
+            # VETO 5: Institutional PDH Sweep Trap
             if key_levels and "PDH Sweep Rejection" in key_levels.active_sweep:
                 if not is_preview:
                     now_t = time.time()
@@ -222,7 +304,7 @@ class IndianSignalEngine:
                 notes.append("VETO: PDH Sweep Rejection Trap (Liquidity swept, sellers active)")
                 return None
 
-            # Validate against OI Wall Shield
+            # VETO 6: OI Wall Shield (Call Wall / PCR ceiling)
             if oi_metrics:
                 safe, reason = self.oi_shield.validate_entry(direction, cur_close, cur_close, oi_metrics)
                 if not safe:
@@ -237,11 +319,52 @@ class IndianSignalEngine:
             return direction, opt_type, conviction, net_score, notes, oi_metrics
 
         elif net_score <= -self.min_consensus_threshold:
-            # Bearish: Buy PUT (PE)
+            # Bearish Candidate: Buy PUT (PE)
             direction, opt_type = "SHORT", "PE"
             conviction = min(0.95, round(0.50 + (abs(net_score) * 0.45), 2))
 
-            # Validate against Institutional Trap (PDL Sweep Reclaim)
+            # VETO 1: VWAP Absolute Rule (Never buy PE above VWAP)
+            if cur_close > (vwap + 5.0):
+                if not is_preview:
+                    now_t = time.time()
+                    if (now_t - self._last_veto_log.get("VWAP_PE_VETO", 0.0)) >= 60.0:
+                        logger.warning(f"PE Entry VETOED on {self.index_name}: Spot (₹{cur_close:,.1f}) above VWAP (₹{vwap:,.1f})")
+                        self._last_veto_log["VWAP_PE_VETO"] = now_t
+                notes.append("VETO: Bullish VWAP alignment (Spot > VWAP)")
+                return None
+
+            # VETO 2: Central Pivot Range (CPR) Chop Zone
+            if key_levels:
+                cpr_top = max(key_levels.tc, key_levels.bc)
+                cpr_bot = min(key_levels.tc, key_levels.bc)
+                if cpr_bot <= cur_close <= cpr_top:
+                    if not is_preview:
+                        now_t = time.time()
+                        if (now_t - self._last_veto_log.get("CPR_CHOP_VETO", 0.0)) >= 60.0:
+                            logger.warning(f"PE Entry VETOED on {self.index_name}: Trapped inside CPR chop zone ({cpr_bot:.0f}-{cpr_top:.0f})")
+                            self._last_veto_log["CPR_CHOP_VETO"] = now_t
+                    notes.append("VETO: Trapped inside CPR (Theta chop zone)")
+                    return None
+
+            # VETO 3: Higher-Timeframe Trend (15m/1H) Bullish Opposing
+            if htf_bias == "BULLISH":
+                if not is_preview:
+                    now_t = time.time()
+                    if (now_t - self._last_veto_log.get("HTF_PE_VETO", 0.0)) >= 60.0:
+                        logger.warning(f"PE Entry VETOED on {self.index_name}: 15m/1H Macro Trend is BULLISH")
+                        self._last_veto_log["HTF_PE_VETO"] = now_t
+                notes.append("VETO: Macro 15m/1H Trend is Bullish")
+                return None
+
+            # VETO 4: Banking Heavyweight Opposing (BankNifty)
+            if heavyweights and "BANK" in self.index_name:
+                if heavyweights.get("BANKING_FLOW") == "BULLISH":
+                    if not is_preview:
+                        logger.warning(f"PE Entry VETOED on {self.index_name}: Heavyweights HDFC/ICICI are BULLISH")
+                    notes.append("VETO: Heavyweights HDFC/ICICI opposing")
+                    return None
+
+            # VETO 5: Institutional PDL Sweep Trap
             if key_levels and "PDL Sweep Reclaim" in key_levels.active_sweep:
                 if not is_preview:
                     now_t = time.time()
@@ -251,7 +374,7 @@ class IndianSignalEngine:
                 notes.append("VETO: PDL Sweep Reclaim Trap (Liquidity swept, buyers active)")
                 return None
 
-            # Validate against OI Wall Shield
+            # VETO 6: OI Wall Shield (Put Wall / PCR floor)
             if oi_metrics:
                 safe, reason = self.oi_shield.validate_entry(direction, cur_close, cur_close, oi_metrics)
                 if not safe:

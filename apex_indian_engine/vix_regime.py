@@ -47,7 +47,7 @@ class VixRegimeManager:
         if vix < 12.0:
             return VixParameters(
                 regime_name="LOW_VOL",
-                consensus_threshold=0.65,  # Stricter entry filter
+                consensus_threshold=0.70,  # Stricter entry filter
                 prefer_itm=True,           # Buy 1-Strike ITM to protect extrinsic time value
                 size_multiplier=0.80,
                 sl_points_banknifty=20.0,
@@ -60,7 +60,7 @@ class VixRegimeManager:
         elif 12.0 <= vix <= 18.0:
             return VixParameters(
                 regime_name="GOLDEN_ZONE",
-                consensus_threshold=0.55,  # Standard consensus
+                consensus_threshold=0.65,  # Institutional consensus threshold
                 prefer_itm=False,          # Standard ATM for optimal gamma
                 size_multiplier=1.00,
                 sl_points_banknifty=25.0,
@@ -73,7 +73,7 @@ class VixRegimeManager:
         elif 18.0 < vix <= 22.0:
             return VixParameters(
                 regime_name="ELEVATED_VOL",
-                consensus_threshold=0.58,
+                consensus_threshold=0.68,
                 prefer_itm=False,
                 size_multiplier=0.90,
                 sl_points_banknifty=32.0,  # Wider SL to withstand high ATR wicks

@@ -326,7 +326,14 @@ class ApexIndianEngine:
 
         # 5. Evaluate 5-Advisor Council + ML + CPR/ORB Levels + OI Shield
         cur_lvl = self.levels_trackers[idx].calculate_from_candles(sig_engine.candles_5m, cur_spot)
-        res = sig_engine.evaluate_signal(cur_spot, cur_vwap, oi_chain=oi_chain, key_levels=cur_lvl)
+        heavyweights_info = {
+            "HDFCBANK": self.heavyweight_prices.get("1333", 0.0),
+            "ICICIBANK": self.heavyweight_prices.get("4963", 0.0),
+            "RELIANCE": self.heavyweight_prices.get("2885", 0.0),
+        }
+        res = sig_engine.evaluate_signal(
+            cur_spot, cur_vwap, oi_chain=oi_chain, key_levels=cur_lvl, is_preview=False, heavyweights=heavyweights_info
+        )
         if not res:
             return None
 
@@ -350,8 +357,15 @@ class ApexIndianEngine:
             logger.error(f"Could not resolve optimal strike for {idx} {opt_type}")
             return None
 
-        # Stop loss points in premium
-        sl_pts = vix_params.sl_points_banknifty if "BANK" in idx else vix_params.sl_points_nifty
+        # Adaptive Risk-Proportional Stop Loss (No micro-pip whipsaws on expensive options)
+        prem = float(selected.est_premium)
+        if "BANK" in idx:
+            # BankNifty option SL: 16% of premium, bounded between 35.0 and 70.0 pts
+            sl_pts = max(35.0, min(prem * 0.16, 70.0))
+        else:
+            # Nifty 50 option SL: 18% of premium, bounded between 14.0 and 30.0 pts
+            sl_pts = max(14.0, min(prem * 0.18, 30.0))
+        sl_pts = round(sl_pts, 1)
 
         # 7. Sizing via Risk Manager with VIX scaling
         sizing = self.risk_manager.calculate_position_size(
