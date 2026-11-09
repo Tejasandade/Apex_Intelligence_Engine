@@ -21,7 +21,7 @@ class ThetaHarvester:
 
     def __init__(
         self,
-        max_stagnant_minutes: float = 35.0,
+        max_stagnant_minutes: float = 45.0,
         reversal_r_threshold: float = 1.0,
     ):
         self.max_stagnant_min = max_stagnant_minutes

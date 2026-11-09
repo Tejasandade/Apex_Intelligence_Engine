@@ -367,17 +367,28 @@ class ApexIndianEngine:
             sl_pts = max(14.0, min(prem * 0.18, 30.0))
         sl_pts = round(sl_pts, 1)
 
-        # 7. Sizing via Risk Manager with VIX scaling
+        # Determine trade potential dynamically based on setup characteristics
+        trade_potential = "NORMAL"
+        is_breakout = key_levels and ("Breakout" in key_levels.active_sweep or "Breakdown" in key_levels.active_sweep)
+        if (conviction >= 0.70 or abs(score) >= 0.65) and is_breakout:
+            trade_potential = "BREAKOUT_EXPANSION"
+        elif conviction >= 0.65 or abs(score) >= 0.60:
+            trade_potential = "GRADE_A"
+
+        # 7. Sizing via Risk Manager with dynamic potential scaling
         sizing = self.risk_manager.calculate_position_size(
             index_name=idx,
             option_premium=selected.est_premium,
             sl_points=sl_pts,
             lot_size=selected.lot_size,
             conviction=conviction,
+            council_score=abs(score),
+            trade_potential=trade_potential,
+            potential_rr=vix_params.tp_multiplier,
         )
 
         # Apply VIX size multiplier (e.g. 0.50 on Extreme VIX)
-        adj_lots = max(1, int(sizing["lots"] * vix_params.size_multiplier))
+        adj_lots = max(1, int(round(sizing["lots"] * vix_params.size_multiplier)))
         adj_qty = adj_lots * selected.lot_size
 
         # 8. Execute Marketable Limit Order

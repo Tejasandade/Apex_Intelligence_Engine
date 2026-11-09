@@ -739,15 +739,24 @@ def can_trade_symbol(symbol: str = SYMBOL, direction: str = "LONG") -> tuple[boo
         if active_count >= max_c:
             return False, f"Max concurrent trades reached ({active_count}/{max_c})"
 
-        # 3. Crypto Correlation Shield
-        if "ETH" in sym:
-            btc_pos = portfolios.get("BTCUSDT", {})
-            if btc_pos.get("position") == "OPEN" and btc_pos.get("direction") == dir_upper:
-                return False, f"Correlation Shield: BTC already {dir_upper}"
-        elif "BTC" in sym:
-            eth_pos = portfolios.get("ETHUSDT", {})
-            if eth_pos.get("position") == "OPEN" and eth_pos.get("direction") == dir_upper:
-                return False, f"Correlation Shield: ETH already {dir_upper}"
+        # 3. Portfolio Directional Coherence Guard (Cross-Asset Cannibalization Prevention)
+        for p_sym, pos in portfolios.items():
+            if pos.get("position") == "OPEN":
+                p_dir = pos.get("direction")
+                is_gold_p = ("GOLD" in p_sym.upper() or "PAXG" in p_sym.upper())
+                is_crypto_p = ("BTC" in p_sym.upper() or "ETH" in p_sym.upper())
+                is_curr_gold = ("GOLD" in sym or "PAXG" in sym)
+                is_curr_crypto = ("BTC" in sym or "ETH" in sym)
+
+                # Cross-asset conflict: Gold vs Crypto opposing directions cancel each other out
+                if (is_gold_p and is_curr_crypto) or (is_crypto_p and is_curr_gold):
+                    if p_dir != dir_upper:
+                        return False, f"Coherence Guard: Cannot {dir_upper} {sym} while {p_sym} is {p_dir} (Macro Conflict)"
+
+                # Crypto-internal conflict: BTC & ETH should never hold opposing directions
+                if is_crypto_p and is_curr_crypto:
+                    if p_dir != dir_upper:
+                        return False, f"Crypto Coherence: Cannot {dir_upper} {sym} while {p_sym} is {p_dir}"
 
     if account["halted"]:
         if account["halt_until"] <= now:
@@ -906,7 +915,7 @@ def find_sl(direction: str, entry: float, symbol: str = SYMBOL, trade_mode: str 
     return round(sl_price, 2), round(sl_dist, 2)
 
 # ─── SIZING ───────────────────────────────────────────────────────────────────
-def size_position(sl_dist: float, prob: float, entry: float, council_score: float = 0.7, direction: str = "LONG", symbol: str = SYMBOL) -> tuple[float, float, float]:
+def size_position(sl_dist: float, prob: float, entry: float, council_score: float = 0.7, direction: str = "LONG", symbol: str = SYMBOL, trade_mode: str = "SCALP", potential_rr: float = 2.5) -> tuple[float, float, float]:
     sym = symbol.upper()
     # ── PROP FIRM MODE: Size directly to Challenge Target & Drawdown Limits ──
     if PROP_FIRM_MODE and prop_firm_manager:
@@ -918,14 +927,17 @@ def size_position(sl_dist: float, prob: float, entry: float, council_score: floa
             council_score=council_score,
             consecutive_losses=consec,
             symbol=sym,
+            trade_mode=trade_mode,
+            potential_rr=potential_rr,
         )
         notional = round(lots * entry, 2)
         return lots, risk_usd, notional
 
     # ── STANDARD BALANCE SIZING (Personal Account / Demo) ──
-    if prob >= STRONG_PROB or council_score >= 0.80:
+    is_high_potential = (trade_mode.upper() == "SWING" or potential_rr >= 3.0 or (prob >= STRONG_PROB and council_score >= 0.75))
+    if is_high_potential:
         risk_pct = MAX_RISK_PCT
-    elif prob >= MIN_PROB + 0.04:
+    elif prob >= MIN_PROB + 0.04 or council_score >= 0.70:
         risk_pct = BASE_RISK_PCT
     else:
         risk_pct = MIN_RISK_PCT
@@ -1064,7 +1076,10 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL):
     except Exception:
         pass
 
-    entry_lots, risk_usd, notional = size_position(sl_dist, prob, entry, council, direction, symbol=sym)
+    entry_lots, risk_usd, notional = size_position(
+        sl_dist, prob, entry, council, direction,
+        symbol=sym, trade_mode=trade_mode, potential_rr=tp2_rr
+    )
     if entry_lots <= 0 or notional <= 0: return
 
     now_t   = time.time()
@@ -1369,15 +1384,15 @@ def _check_exit_for_symbol(sym: str):
         if direction == "LONG" and cur <= sl: close(cur, "STOP LOSS"); return
         if direction == "SHORT" and cur >= sl: close(cur, "STOP LOSS"); return
 
-    # ── DYNAMIC TIER 1: Risk Reduction at +1.0R (Tighten SL from -1.0R to -0.25R) ──
-    if port.get("risk_tier", 0) < 1 and r_mult >= 1.0:
-        new_sl = entry - sl_dist * 0.25 if direction == "LONG" else entry + sl_dist * 0.25
+    # ── DYNAMIC TIER 1: Risk Reduction at +0.75R (Tighten SL from -1.0R to -0.20R) ──
+    if port.get("risk_tier", 0) < 1 and r_mult >= 0.75:
+        new_sl = entry - sl_dist * 0.20 if direction == "LONG" else entry + sl_dist * 0.20
         port["sl_price"] = round(new_sl, 1)
         port["risk_tier"] = 1
-        log_msg = f"[{now_str}] {sym} TIER 1 (+1.0R): Risk reduced 75% | SL tightened to -0.25R @${new_sl:,.1f}"
+        log_msg = f"[{now_str}] {sym} TIER 1 (+0.75R): Risk reduced 80% | SL tightened to -0.20R @${new_sl:,.1f}"
         trade_log.append(log_msg)
         if HEADLESS: print(f"  ⚡ {log_msg}", flush=True)
-        send_challenge_alert("RISK REDUCED 75%", {
+        send_challenge_alert("RISK REDUCED 80%", {
             "symbol": sym, "action": direction, "price": cur, "new_sl": port["sl_price"],
         })
         if DEMO_MODE and _active_broker is not None and t_id:
@@ -1393,13 +1408,13 @@ def _check_exit_for_symbol(sym: str):
             except Exception:
                 pass
 
-    # ── DYNAMIC TIER 2: Break-Even Lock at +1.5R ──
-    if port.get("risk_tier", 0) < 2 and r_mult >= 1.5:
+    # ── DYNAMIC TIER 2: Break-Even Lock at +1.1R ──
+    if port.get("risk_tier", 0) < 2 and r_mult >= 1.1:
         fee_buf = entry * (ROUNDTRIP_BPS * 1.5 / 10000.0)
         new_sl = entry + fee_buf if direction == "LONG" else entry - fee_buf
         port["sl_price"] = round(new_sl, 1)
         port["risk_tier"] = 2
-        log_msg = f"[{now_str}] {sym} TIER 2 (+1.5R): SL moved to Break-Even + fees @${new_sl:,.1f} | RISK FREE"
+        log_msg = f"[{now_str}] {sym} TIER 2 (+1.1R): SL moved to Break-Even + fees @${new_sl:,.1f} | RISK FREE"
         trade_log.append(log_msg)
         if HEADLESS: print(f"  ⚡ {log_msg}", flush=True)
         send_challenge_alert("BREAK-EVEN LOCKED", {
@@ -1419,7 +1434,7 @@ def _check_exit_for_symbol(sym: str):
                 pass
 
     # ── DYNAMIC EARLY PROFIT HARVEST: Runner-Preserving OFI Reversal Protection ──
-    if r_mult >= 1.0 and is_past_min_hold:
+    if r_mult >= 0.85 and is_past_min_hold:
         try:
             m_eng = momentum_engines.get(sym, momentum_eng)
             mom_d = m_eng.get_diagnostics()

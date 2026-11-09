@@ -129,25 +129,34 @@ class InstitutionalLevelsTracker:
             orl = min(float(c["low"]) for c in first_three)
             orb_formed = True
 
-        # 4. Detect Real-time Sweeps & Benchmarks
+        # 4. Detect Real-time Sweeps, Breakouts & Benchmarks
         active_sweep = "None"
         spot = current_spot or (float(today_candles[-1]["close"]) if today_candles else p)
-        
-        if orb_formed and orh > 0 and orl > 0:
-            if spot > orh + (10.0 if "BANK" in self.index_name else 5.0):
-                active_sweep = "ORH Bullish Breakout"
-            elif spot < orl - (10.0 if "BANK" in self.index_name else 5.0):
-                active_sweep = "ORL Bearish Breakdown"
+        buf = 10.0 if "BANK" in self.index_name else 5.0
 
-        # Check PDH / PDL Liquidity Sweeps
-        if pdh > 0 and pdl > 0:
-            # Turtle Soup Sweep: High pierced PDH but current price returned below PDH
-            if today_candles:
-                day_high = max(float(c["high"]) for c in today_candles)
-                day_low = min(float(c["low"]) for c in today_candles)
-                if day_high > pdh and spot < pdh:
+        # Check PDH / PDL Outright Breakouts first (Higher priority than range levels)
+        if pdh > 0 and spot > (pdh + buf):
+            active_sweep = "PDH Bullish Breakout"
+        elif pdl > 0 and spot < (pdl - buf):
+            active_sweep = "PDL Bearish Breakdown"
+        # Check Opening Range (ORB) Breakouts
+        elif orb_formed and orh > 0 and spot > (orh + buf):
+            active_sweep = "ORH Bullish Breakout"
+        elif orb_formed and orl > 0 and spot < (orl - buf):
+            active_sweep = "ORL Bearish Breakdown"
+        # Check Recent Turtle Soup Sweeps (Only active if occurred within recent 15 minutes / 3 candles)
+        elif pdh > 0 and pdl > 0 and today_candles:
+            recent_candles = today_candles[-3:]
+            recent_high = max(float(c["high"]) for c in recent_candles)
+            recent_low = min(float(c["low"]) for c in recent_candles)
+
+            # Fresh PDH Sweep Rejection: Recent candle swept PDH, but spot rejected back below PDH
+            if recent_high > pdh and spot < (pdh - buf):
+                if not (orb_formed and spot > orh):
                     active_sweep = "PDH Sweep Rejection (Bearish Trap)"
-                elif day_low < pdl and spot > pdl:
+            # Fresh PDL Sweep Reclaim: Recent candle swept PDL, but spot reclaimed back above PDL
+            elif recent_low < pdl and spot > (pdl + buf):
+                if not (orb_formed and spot < orl):
                     active_sweep = "PDL Sweep Reclaim (Bullish Trap)"
 
         self.levels = IndexKeyLevels(

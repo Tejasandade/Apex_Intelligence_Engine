@@ -135,9 +135,19 @@ class IndianRiskManager:
         sl_points: float,
         lot_size: int,
         conviction: float = 0.60,
+        council_score: float = 0.60,
+        trade_potential: str = "NORMAL",
+        potential_rr: float = 2.0,
     ) -> dict[str, Any]:
         """Calculates sizing dictionary compatible with engine order execution."""
-        lots, qty, risk_inr = self.calculate_lot_size(sl_points=sl_points, lot_size=lot_size, conviction=conviction)
+        lots, qty, risk_inr = self.calculate_lot_size(
+            sl_points=sl_points,
+            lot_size=lot_size,
+            conviction=conviction,
+            council_score=council_score,
+            trade_potential=trade_potential,
+            potential_rr=potential_rr,
+        )
         return {
             "lots": lots,
             "quantity": qty,
@@ -150,24 +160,54 @@ class IndianRiskManager:
         sl_points: float,
         lot_size: int,
         conviction: float = 0.60,
+        council_score: float = 0.60,
+        trade_potential: str = "NORMAL",
+        potential_rr: float = 2.0,
     ) -> tuple[int, int, float]:
         """
         Calculates exact number of lots and quantity anchored to risk in INR.
+        Scales risk dynamically according to trade setup potential:
+        - Grade A+ Breakout Expansion (High conviction, high RR): 2.0% risk (enables 2-lot runner harvest)
+        - Solid Momentum (conviction >= 0.65 or potential_rr >= 2.5): 1.4% risk
+        - Defensive post-loss: 0.65% risk
+        - Standard Scalp: 1.0% risk
         Returns: (lots_count, total_quantity, planned_risk_inr)
         """
         if sl_points <= 0 or lot_size <= 0:
             return 1, lot_size, round(sl_points * lot_size, 2)
 
-        risk_pct = self.rules.max_risk_per_trade_pct
-        if conviction >= 0.70:
-            risk_pct *= 1.25  # High conviction scale-up
-        elif self.consecutive_losses >= 1:
-            risk_pct *= 0.65  # Conservative post-loss scale-down
-
-        budget_inr = self.capital_inr * (risk_pct / 100.0)
         cost_per_lot = sl_points * lot_size
 
-        raw_lots = int(budget_inr // max(cost_per_lot, 1.0))
+        is_grade_a_plus = (
+            trade_potential == "BREAKOUT_EXPANSION"
+            or (conviction >= 0.70 and council_score >= 0.65)
+            or potential_rr >= 3.0
+        )
+        is_grade_a = (conviction >= 0.65 or council_score >= 0.60 or potential_rr >= 2.5)
+
+        if self.consecutive_losses >= 1:
+            risk_pct = 0.65  # Conservative post-loss scale-down
+        elif is_grade_a_plus:
+            # 2.0% risk budget allows taking 2 lots on BankNifty/Nifty to enable partial cash harvest at +1.5R
+            risk_pct = 2.0
+        elif is_grade_a:
+            risk_pct = 1.4
+        else:
+            risk_pct = self.rules.max_risk_per_trade_pct
+
+        budget_inr = self.capital_inr * (risk_pct / 100.0)
+
+        # Ensure budget does not violate daily safety buffer (max 2.25% daily loss)
+        daily_loss_budget_left = (self.day_start_capital * (self.rules.daily_safety_buffer_pct / 100.0)) + self.daily_realized_pnl
+        if daily_loss_budget_left > 0:
+            budget_inr = min(budget_inr, daily_loss_budget_left * 0.90)
+
+        raw_lots = int(round(budget_inr / max(cost_per_lot, 1.0)))
+
+        # On Grade A+ setups with sufficient daily budget, take 2 lots so TP1 partial cash harvest activates
+        if is_grade_a_plus and self.consecutive_losses == 0 and budget_inr >= (cost_per_lot * 1.5):
+            raw_lots = max(2, raw_lots)
+
         lots = max(1, min(raw_lots, 10))  # Max 10 lots for retail protection
         qty = lots * lot_size
         planned_risk = round(qty * sl_points, 2)

@@ -265,20 +265,20 @@ class IndianOrderExecutor:
         if should_harvest:
             return self.close_trade(cur, reason=harvest_reason)
 
-        # 3. Dynamic Tier 1: Risk Reduction (+0.8R) -> Tighten SL to -0.25R
-        if trade.trailing_tier < 1 and r_mult >= 0.8:
-            new_sl = round(entry - (sl_dist * 0.25), 2)
+        # 3. Dynamic Tier 1: Risk Reduction (+0.7R) -> Tighten SL to -0.20R
+        if trade.trailing_tier < 1 and r_mult >= 0.7:
+            new_sl = round(entry - (sl_dist * 0.20), 2)
             trade.sl_price = new_sl
             trade.trailing_tier = 1
-            logger.info(f"{trade.symbol} TIER 1 (+0.8R): SL tightened to ₹{new_sl:.2f}")
+            logger.info(f"{trade.symbol} TIER 1 (+0.7R): SL tightened to ₹{new_sl:.2f}")
 
-        # 4. Dynamic Tier 2: Break-Even Lock (+1.2R) -> Lock SL to Entry + Fees
-        if trade.trailing_tier < 2 and r_mult >= 1.2:
+        # 4. Dynamic Tier 2: Break-Even Lock (+1.0R) -> Lock SL to Entry + Fees
+        if trade.trailing_tier < 2 and r_mult >= 1.0:
             fee_points = 2.0  # ₹2 premium points to cover STT/brokerage
             new_sl = round(entry + fee_points, 2)
             trade.sl_price = new_sl
             trade.trailing_tier = 2
-            logger.info(f"{trade.symbol} TIER 2 (+1.2R): SL locked to Break-Even @ ₹{new_sl:.2f}")
+            logger.info(f"{trade.symbol} TIER 2 (+1.0R): SL locked to Break-Even @ ₹{new_sl:.2f}")
 
         # 5. Take Profit 1 (+1.5R) -> Partial Cash Profit Harvest & Runner Preservation
         if trade.trailing_tier < 3 and cur >= trade.tp1_price:

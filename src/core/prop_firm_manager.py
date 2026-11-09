@@ -33,8 +33,8 @@ PROFILES: dict[str, dict[str, Any]] = {
         "daily_safety_buffer_pct": 2.25,  # $112.50 circuit breaker (halt before 3% breach!)
         "max_total_loss_pct": 6.0,        # $300.00 max overall loss (hard floor: $4,700.00)
         "total_safety_buffer_pct": 4.8,   # $240.00 emergency stop (halt before 6% breach!)
-        "base_risk_pct": 0.5,             # 0.5% risk ($25.00 per trade)
-        "strong_risk_pct": 0.65,          # 0.65% risk ($32.50) on high conviction
+        "base_risk_pct": 0.60,            # 0.60% base risk ($30.00 per trade)
+        "strong_risk_pct": 1.0,           # 1.0% risk ($50.00) on high conviction / swing setups (captures +$70-$110)
         "min_risk_pct": 0.35,             # 0.35% risk ($17.50) conservative/post-loss
         "max_concurrent_trades": 1,
         "news_blackout_mins": 10,
@@ -774,15 +774,25 @@ class PropFirmManager:
         if open_count >= max_concurrent:
             return False, f"Portfolio concurrent position limit reached ({open_count}/{max_concurrent})"
 
-        # 4. Correlation Shield: BTC and ETH are strongly correlated
-        if "ETH" in sym_key:
-            btc_pos = active_positions.get("BTCUSDT", {})
-            if btc_pos.get("position") == "OPEN" and btc_pos.get("direction") == dir_upper:
-                return False, f"Correlation Shield: BTC already {dir_upper} — blocking same-direction {sym_key}"
-        elif "BTC" in sym_key:
-            eth_pos = active_positions.get("ETHUSDT", {})
-            if eth_pos.get("position") == "OPEN" and eth_pos.get("direction") == dir_upper:
-                return False, f"Correlation Shield: ETH already {dir_upper} — blocking same-direction {sym_key}"
+        # 4. Portfolio Directional Coherence Guard (Cross-Asset Cannibalization Prevention)
+        # Never hold opposing positions across macro-correlated assets (e.g. LONG Gold vs SHORT BTC/ETH).
+        for p_sym, pos in active_positions.items():
+            if pos.get("position") == "OPEN":
+                p_dir = pos.get("direction")
+                is_gold_p = ("GOLD" in p_sym.upper() or "PAXG" in p_sym.upper())
+                is_crypto_p = ("BTC" in p_sym.upper() or "ETH" in p_sym.upper())
+                is_curr_gold = ("GOLD" in sym_key or "PAXG" in sym_key)
+                is_curr_crypto = ("BTC" in sym_key or "ETH" in sym_key)
+
+                # Cross-asset conflict: Gold vs Crypto opposing directions cancel each other out
+                if (is_gold_p and is_curr_crypto) or (is_crypto_p and is_curr_gold):
+                    if p_dir != dir_upper:
+                        return False, f"Coherence Guard: Cannot {dir_upper} {sym_key} while {p_sym} is {p_dir} (Macro Conflict)"
+
+                # Crypto-internal conflict: BTC & ETH should not hold opposing directions
+                if is_crypto_p and is_curr_crypto:
+                    if p_dir != dir_upper:
+                        return False, f"Crypto Coherence: Cannot {dir_upper} {sym_key} while {p_sym} is {p_dir}"
 
         # 5. Combined Portfolio Daily Risk Budget Pool
         # Sum of maximum potential loss if all active trades hit stop loss
@@ -820,33 +830,49 @@ class PropFirmManager:
         council_score: float = 0.65,
         consecutive_losses: int = 0,
         symbol: str = "BTCUSDT",
+        trade_mode: str = "SCALP",
+        potential_rr: float = 2.5,
     ) -> tuple[float, float]:
         """
         Calculate exact lot size anchored to the Prop Firm challenge rules.
         Dynamically adapts contract size and minimum volume for BTC, ETH, and GOLD.
+        Scales risk dynamically based on setup potential (conviction, council, R:R asymmetry).
         Returns: (lots, risk_usd)
         """
         if sl_distance <= 0 or price <= 0:
             return 0.01, 25.0
 
-        # Dynamic risk scaling based on conviction and streak
-        if conviction >= 0.65 or council_score >= 0.75:
-            risk_pct = float(self.config["strong_risk_pct"])
-        elif consecutive_losses >= 1:
-            risk_pct = float(self.config["min_risk_pct"])
+        # Dynamic risk scaling graduated strictly by trade potential and setup quality
+        is_high_potential = (
+            trade_mode.upper() == "SWING"
+            or potential_rr >= 3.0
+            or (conviction >= 0.65 and council_score >= 0.72)
+        )
+        is_grade_a = (conviction >= 0.62 and council_score >= 0.68) or potential_rr >= 2.5
+
+        if consecutive_losses >= 1:
+            # Defensive scale-down after loss to protect challenge equity
+            risk_pct = float(self.config.get("min_risk_pct", 0.35))
+        elif is_high_potential:
+            # Institutional Sniper: Grade A+ setup / 3.0R+ target -> Full dynamic sizing for +$70 to +$100 wins
+            risk_pct = float(self.config.get("strong_risk_pct", 1.0))  # 1.0% ($50 to $53)
+        elif is_grade_a:
+            # Solid confluence setup
+            risk_pct = 0.75                                           # 0.75% ($38 to $40)
         else:
-            risk_pct = float(self.config["base_risk_pct"])
+            # Baseline Scalp / Ranging
+            risk_pct = float(self.config.get("base_risk_pct", 0.55))   # 0.55% ($28 to $30)
 
         risk_usd = self.virtual_balance * (risk_pct / 100.0)
 
         # ── SOFT-LANDING RISK DECELERATION ──
-        # When approaching challenge victory (within $100 of profit target),
+        # When approaching challenge victory (within $40 of profit target),
         # smoothly taper down risk so banked profits are protected and victory is locked in.
         target_usd = self.initial_balance * (self.config["profit_target_pct"] / 100.0)
         current_profit = self.virtual_balance - self.initial_balance
         remaining_target = target_usd - current_profit
-        if 0 < remaining_target <= 100.0:
-            soft_risk = max(10.0, remaining_target * 0.35)
+        if 0 < remaining_target <= 40.0:
+            soft_risk = max(15.0, remaining_target * 0.40)
             if soft_risk < risk_usd:
                 logger.info(
                     "prop_firm_soft_landing_deceleration",
