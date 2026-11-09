@@ -962,6 +962,26 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL):
 
     if port["position"] != "FLAT": return
 
+    # ── DOUBLE-LOCK BROKER PROTECTION: Never stack or open duplicate position if broker already holds one ──
+    if DEMO_MODE and _active_broker is not None:
+        try:
+            if hasattr(_active_broker, "_get_open_position_sync"):
+                existing = _active_broker._get_open_position_sync(symbol=sym)
+                if existing:
+                    # Self-heal local portfolio to match active broker position
+                    port["position"] = "OPEN"
+                    port["direction"] = existing.get("type", "SHORT")
+                    port["broker_ticket"] = str(existing.get("ticket", ""))
+                    if port.get("entry_price", 0.0) <= 0:
+                        port["entry_price"] = float(existing.get("price_open", 0.0))
+                        port["sl_price"] = float(existing.get("sl", 0.0))
+                    log_msg = f"[{sym}] DUPLICATE PREVENTED: Broker already holds active position (Ticket #{existing.get('ticket')})"
+                    trade_log.append(log_msg)
+                    if HEADLESS: print(f"  🛑 {log_msg}", flush=True)
+                    return
+        except Exception:
+            pass
+
     direction = "LONG" if signal.direction == "BUY" else "SHORT"
     ok, reason = can_trade_symbol(sym, direction)
     if not ok: return
@@ -2702,14 +2722,33 @@ def get_dashboard_state() -> dict:
         open_time_str = str(t.get("open_ts", ""))
         if "T" in open_time_str:
             open_time_str = open_time_str.split("T")[1][:8]
+        is_open = (t.get("outcome") == "OPEN")
+        sym_t = t.get("symbol", PRIMARY_SYMBOL)
+        cur_px = _safe_price(sym_t, "ltp")
+        if is_open:
+            port_t = portfolios.get(sym_t, {})
+            u_pnl = port_t.get("broker_pnl", 0.0) if port_t.get("broker_ticket") else port_t.get("unrealized_pnl", 0.0)
+            if u_pnl == 0.0 and port_t.get("entry_price", 0.0) > 0 and cur_px > 0:
+                p_dir = port_t.get("direction", "SHORT")
+                diff = (cur_px - port_t["entry_price"]) if p_dir == "LONG" else (port_t["entry_price"] - cur_px)
+                u_pnl = (diff / port_t["entry_price"]) * port_t.get("notional", 2500.0)
+            exit_px_disp = cur_px
+            pnl_disp = round(float(u_pnl), 2)
+            reason_disp = "LIVE POSITION (Trailing)"
+        else:
+            exit_px_disp = t.get("exit_price", 0.0)
+            pnl_disp = t.get("pnl_usd", 0.0)
+            reason_disp = t.get("exit_reason", "")
+
         journal_ui.append({
             "id": t.get("id", 0),
             "open_ts": open_time_str,
             "action": t.get("action", ""),
             "entry_price": t.get("entry_price", 0.0),
-            "exit_price": t.get("exit_price", 0.0),
-            "pnl_usd": t.get("pnl_usd", 0.0),
-            "exit_reason": t.get("exit_reason", ""),
+            "exit_price": exit_px_disp,
+            "pnl_usd": pnl_disp,
+            "exit_reason": reason_disp,
+            "is_open": is_open,
         })
 
     # OFI diagnostic
@@ -2780,6 +2819,29 @@ def get_dashboard_state() -> dict:
         if not spark and _safe_price(sym, "ltp") > 0:
             spark = [_safe_price(sym, "ltp")]
 
+        # Resolve active position status and self-heal from trade_journal / broker
+        sym_port_obj = portfolios.get(sym, {})
+        pos_status = sym_port_obj.get("position", "FLAT")
+        if pos_status == "FLAT":
+            for tj in reversed(trade_journal[-5:]):
+                if tj.get("symbol") == sym and tj.get("outcome") == "OPEN":
+                    pos_status = "OPEN"
+                    sym_port_obj["position"] = "OPEN"
+                    sym_port_obj["direction"] = "LONG" if tj.get("action") == "BUY" else "SHORT"
+                    if sym_port_obj.get("entry_price", 0.0) <= 0:
+                        sym_port_obj["entry_price"] = tj.get("entry_price", 0.0)
+                        sym_port_obj["sl_price"] = tj.get("sl_price", 0.0)
+                        sym_port_obj["tp1_price"] = tj.get("tp1_price", 0.0)
+                        sym_port_obj["notional"] = tj.get("notional", 2500.0)
+                    break
+
+        cur_ltp = _safe_price(sym, "ltp")
+        u_pnl = sym_port_obj.get("broker_pnl", 0.0) if sym_port_obj.get("broker_ticket") else sym_port_obj.get("unrealized_pnl", 0.0)
+        if u_pnl == 0.0 and pos_status == "OPEN" and sym_port_obj.get("entry_price", 0.0) > 0 and cur_ltp > 0:
+            p_dir = sym_port_obj.get("direction", "SHORT")
+            diff = (cur_ltp - sym_port_obj["entry_price"]) if p_dir == "LONG" else (sym_port_obj["entry_price"] - cur_ltp)
+            u_pnl = round((diff / sym_port_obj["entry_price"]) * sym_port_obj.get("notional", 2700.0), 2)
+
         symbols_payload[sym] = {
             "ltp": _safe_price(sym, "ltp"),
             "bid": _safe_price(sym, "bid"),
@@ -2788,12 +2850,12 @@ def get_dashboard_state() -> dict:
             "prob_short": symbol_live_probs.get(sym, {}).get("short", 0.5),
             "regime": symbol_regime_info.get(sym, {}).get("current", "UNKNOWN"),
             "atr": symbol_regime_info.get(sym, {}).get("atr", 0.0),
-            "position": portfolios.get(sym, {}).get("position", "FLAT"),
-            "direction": portfolios.get(sym, {}).get("direction"),
-            "entry_price": portfolios.get(sym, {}).get("entry_price", 0.0),
-            "sl_price": portfolios.get(sym, {}).get("sl_price", 0.0),
-            "tp1_price": portfolios.get(sym, {}).get("tp1_price", 0.0),
-            "unrealized_pnl": portfolios.get(sym, {}).get("broker_pnl") if portfolios.get(sym, {}).get("broker_ticket") else portfolios.get(sym, {}).get("unrealized_pnl", 0.0),
+            "position": pos_status,
+            "direction": sym_port_obj.get("direction"),
+            "entry_price": sym_port_obj.get("entry_price", 0.0),
+            "sl_price": sym_port_obj.get("sl_price", 0.0),
+            "tp1_price": sym_port_obj.get("tp1_price", 0.0),
+            "unrealized_pnl": u_pnl,
             "sparkline": spark,
             "mtf": {
                 "1d": "BULL" if "BULL" in ms.get("trend_1d", "") else ("BEAR" if "BEAR" in ms.get("trend_1d", "") else "NEUT"),
@@ -2859,15 +2921,16 @@ def get_dashboard_state() -> dict:
                 "ofi": ofi_val,
             },
             "position": {
-                "status": portfolio.get("position", "FLAT"),
-                "direction": portfolio.get("direction", ""),
-                "entry_price": portfolio.get("entry_price", 0.0),
-                "sl_price": portfolio.get("sl_price", 0.0),
-                "tp1_price": portfolio.get("tp1_price", 0.0),
-                "tp2_price": portfolio.get("tp2_price", 0.0),
-                "unrealized_pnl": round(portfolio.get("broker_pnl") if portfolio.get("broker_ticket") and portfolio.get("broker_pnl") != 0.0 else portfolio.get("unrealized_pnl", 0.0), 2),
-                "duration_min": dur_min,
-                "broker_ticket": portfolio.get("broker_ticket", ""),
+                "status": (lambda p: p.get("position", "FLAT"))(next((p for p in portfolios.values() if p.get("position") == "OPEN"), portfolio)),
+                "symbol": (lambda p: p.get("symbol", PRIMARY_SYMBOL))(next((p for p in portfolios.values() if p.get("position") == "OPEN"), portfolio)),
+                "direction": (lambda p: p.get("direction", ""))(next((p for p in portfolios.values() if p.get("position") == "OPEN"), portfolio)),
+                "entry_price": (lambda p: p.get("entry_price", 0.0))(next((p for p in portfolios.values() if p.get("position") == "OPEN"), portfolio)),
+                "sl_price": (lambda p: p.get("sl_price", 0.0))(next((p for p in portfolios.values() if p.get("position") == "OPEN"), portfolio)),
+                "tp1_price": (lambda p: p.get("tp1_price", 0.0))(next((p for p in portfolios.values() if p.get("position") == "OPEN"), portfolio)),
+                "tp2_price": (lambda p: p.get("tp2_price", 0.0))(next((p for p in portfolios.values() if p.get("position") == "OPEN"), portfolio)),
+                "unrealized_pnl": round((lambda p: p.get("broker_pnl") if p.get("broker_ticket") and p.get("broker_pnl") != 0.0 else p.get("unrealized_pnl", 0.0))(next((p for p in portfolios.values() if p.get("position") == "OPEN"), portfolio)), 2),
+                "duration_min": (lambda p: round((time.time() - p["entry_time"]) / 60.0, 1) if p.get("entry_time", 0) > 0 else 0)(next((p for p in portfolios.values() if p.get("position") == "OPEN"), portfolio)),
+                "broker_ticket": (lambda p: p.get("broker_ticket", ""))(next((p for p in portfolios.values() if p.get("position") == "OPEN"), portfolio)),
             },
             "symbols": symbols_payload,
             "liquidity": liq_map,
