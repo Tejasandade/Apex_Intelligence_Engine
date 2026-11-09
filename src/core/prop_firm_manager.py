@@ -38,6 +38,8 @@ PROFILES: dict[str, dict[str, Any]] = {
         "min_risk_pct": 0.35,             # 0.35% risk ($17.50) conservative/post-loss
         "max_concurrent_trades": 1,
         "news_blackout_mins": 10,
+        "max_trades_per_day": 3,
+        "daily_profit_lock_usd": 50.0,
     },
     "sharkfunded_10k_lite_1step": {
         "name": "SharkFunded Lite 10K (1-Step)",
@@ -654,6 +656,7 @@ class PropFirmManager:
         self.daily_realized_pnl: float = 0.0
         self.daily_unrealized_pnl: float = 0.0
         self.total_realized_pnl: float = 0.0
+        self.daily_trades: int = 0
 
         self.wins: int = 0
         self.losses: int = 0
@@ -691,6 +694,7 @@ class PropFirmManager:
 
             self.daily_realized_pnl = 0.0
             self.daily_unrealized_pnl = 0.0
+            self.daily_trades = 0
             if self.status == "DAILY_HALT":
                 self.status = "IN_PROGRESS"
                 self.halt_reason = ""
@@ -741,6 +745,16 @@ class PropFirmManager:
                 f"(-{((self.initial_balance - current_equity)/self.initial_balance)*100:.1f}%)."
             )
             return False, self.halt_reason
+
+        # 4. Daily Profit Target Lock: Bank wins and walk away (prevent afternoon giveback)
+        daily_target_lock_usd = float(self.config.get("daily_profit_lock_usd", 50.0))
+        if self.daily_realized_pnl >= daily_target_lock_usd:
+            return False, f"DAILY PROFIT LOCKED (+${self.daily_realized_pnl:.2f} banked today). Challenge profit secured for session."
+
+        # 5. Daily Maximum Trades Cap (Sniper Discipline: max 3 trades per day)
+        max_t_day = int(self.config.get("max_trades_per_day", 3))
+        if getattr(self, "daily_trades", 0) >= max_t_day:
+            return False, f"DAILY TRADES CAP REACHED ({self.daily_trades}/{max_t_day} executed today). Standing down to protect challenge capital."
 
         return True, "CLEAR"
 
@@ -979,6 +993,7 @@ class PropFirmManager:
         self.total_realized_pnl += pnl
         self.daily_unrealized_pnl = 0.0
         self.total_trades += 1
+        self.daily_trades = getattr(self, "daily_trades", 0) + 1
 
         if pnl > 0:
             self.wins += 1
@@ -1066,6 +1081,7 @@ class PropFirmManager:
             "day_start_balance": self.day_start_balance,
             "today_date": self.today_date,
             "daily_realized_pnl": self.daily_realized_pnl,
+            "daily_trades": getattr(self, "daily_trades", 0),
             "total_realized_pnl": self.total_realized_pnl,
             "wins": self.wins,
             "losses": self.losses,
@@ -1175,6 +1191,7 @@ class PropFirmManager:
             self.day_start_balance = float(data.get("day_start_balance", self.initial_balance))
             self.today_date = data.get("today_date", self.today_date)
             self.daily_realized_pnl = float(data.get("daily_realized_pnl", 0.0))
+            self.daily_trades = int(data.get("daily_trades", 0))
             self.total_realized_pnl = float(data.get("total_realized_pnl", 0.0))
             self.wins = int(data.get("wins", 0))
             self.losses = int(data.get("losses", 0))

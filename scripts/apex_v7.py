@@ -229,11 +229,11 @@ BASE_RISK_PCT   = _rc("sizing", "min_allocation_pct", 0.010)   # from risk.yaml
 MAX_RISK_PCT   = _rc("sizing", "max_allocation_pct", 0.015)   # from risk.yaml
 MIN_RISK_PCT    = 0.005
 MAX_LEVERAGE    = 5.0
-MAX_TRADES_DAY  = int(os.getenv("APEX_MAX_TRADES_DAY", "10"))
-MIN_INTERVAL    = 300       # 5min (1 candle) between trades (was 30m)
-LOSS_COOLDOWN_1 = 600       # 10min (2 candles) after 1 loss (was 2hr!)
-LOSS_COOLDOWN_2 = 1200      # 20min (4 candles) after 2 consecutive losses
-LOSS_COOLDOWN_3 = 3600      # 60min anti-spiral after 3 consecutive losses
+MAX_TRADES_DAY  = int(os.getenv("APEX_MAX_TRADES_DAY", "3"))  # Sniper discipline: 3 quality trades/day max
+MIN_INTERVAL    = 300       # 5min (1 candle) between trades
+LOSS_COOLDOWN_1 = 1800      # 30min cooling pause after 1 loss (allows market chop to settle)
+LOSS_COOLDOWN_2 = 3600      # 60min cooling pause after 2 consecutive losses
+LOSS_COOLDOWN_3 = 7200      # 120min anti-spiral protection after 3 losses
 SESSION_LOSSES  = 3         # halt after N consecutive losses
 
 # ─── BROKER (Bybit Testnet — only active when DEMO_MODE=true) ─────────────────
@@ -790,20 +790,18 @@ def can_trade_symbol(symbol: str = SYMBOL, direction: str = "LONG") -> tuple[boo
         if is_metals_closed:
             return False, "METALS MARKET CLOSED (MT5 Gold reopens Sunday 22:00 UTC)"
 
-    # ── Macro Market Structure Filter (1D & 4H Trend Alignment) ──
+    # ── Strict Macro Market Structure Guard (1D & 4H Trend Alignment) ──
+    # Prohibits fighting higher timeframe trends. Never short a macro bull or long a macro bear.
     macro = symbol_macro_structure.get(sym)
     if macro:
-        if dir_upper == "LONG" and macro.get("macro_bias") == "STRONG_BEAR":
-            # Allow high-conviction counter-trend scalp ONLY if backed by confirmed liquidity sweep or expansion breakout
-            lev = liquidity_engine.get_levels(sym) if 'liquidity_engine' in globals() else {}
-            has_edge = lev.get("sweep_bullish", False) or lev.get("breakout_bullish", False)
-            if not has_edge:
-                return False, f"MACRO SHIELD: {sym} Strong Bear Macro (requires confirmed sweep/breakout)"
-        elif dir_upper == "SHORT" and macro.get("macro_bias") == "STRONG_BULL":
-            lev = liquidity_engine.get_levels(sym) if 'liquidity_engine' in globals() else {}
-            has_edge = lev.get("sweep_bearish", False) or lev.get("breakout_bearish", False)
-            if not has_edge:
-                return False, f"MACRO SHIELD: {sym} Strong Bull Macro (requires confirmed sweep/breakout)"
+        m_bias = str(macro.get("macro_bias", "NEUTRAL")).upper()
+        trend_1d = str(macro.get("trend_1d", "NEUTRAL")).upper()
+        trend_4h = str(macro.get("trend_4h", "NEUTRAL")).upper()
+
+        if dir_upper == "SHORT" and ("BULL" in m_bias or "BULL" in trend_4h or "BULL" in trend_1d):
+            return False, f"MACRO SHIELD: {sym} is Macro Bullish ({m_bias} / 4H:{trend_4h} / 1D:{trend_1d}) — Shorts Prohibited"
+        elif dir_upper == "LONG" and ("BEAR" in m_bias or "BEAR" in trend_4h or "BEAR" in trend_1d):
+            return False, f"MACRO SHIELD: {sym} is Macro Bearish ({m_bias} / 4H:{trend_4h} / 1D:{trend_1d}) — Longs Prohibited"
 
     return True, "CLEAR"
 
@@ -1000,6 +998,14 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL):
 
     prob      = signal.conviction
     council   = signal.council_score
+
+    # ── PROP FIRM SNIPER CONVICTION GATE ──
+    # Reject coin-flips (e.g. p=0.51, council=0.54) in prop firm mode; only institutional Grade A/A+ permitted
+    if PROP_FIRM_MODE and (prob < 0.60 or council < 0.62):
+        log_msg = f"[{sym}] SNIPER QUALITY GATE: Signal conviction ({prob:.3f}) or council ({council:.2f}) below prop firm minimum (0.60 / 0.62)"
+        trade_log.append(log_msg)
+        if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
+        return
 
     entry = mkt["ask"] if direction == "LONG" else mkt["bid"]
     if entry <= 0: entry = mkt.get("ltp", 0.0)
@@ -1538,19 +1544,8 @@ def _check_exit_for_symbol(sym: str):
                 except Exception:
                     pass
 
-    # ── DYNAMIC TIER 4: Dynamic Runner Chandelier Trail + Full TP2 + Stagnant Runner Harvest ──
+    # ── DYNAMIC TIER 4: Dynamic Runner Chandelier Trail + Full TP2 Target Exit ──
     if port["phase"] == 2:
-        if not is_swing and r_mult >= 1.0 and dur_min >= 75.0 and is_past_min_hold:
-            try:
-                m_eng = momentum_engines.get(sym, momentum_eng)
-                mom_d = m_eng.get_diagnostics()
-                ofi_val = abs(float(mom_d.get("ofi", 0.0)))
-                if ofi_val < 0.20:
-                    close(cur, f"STAGNANT RUNNER HARVEST (+{r_mult:.1f}R after {dur_min:.0f}m, OFI neutral)")
-                    return
-            except Exception:
-                pass
-
         if is_swing:
             trail_buf = max(atr * 3.5, 25.0 if "ETH" in sym else (10.0 if "GOLD" in sym else 400.0))
         else:

@@ -124,6 +124,11 @@ class IndianRiskManager:
             self.halt_reason = f"Daily safety buffer hit (-₹{abs(current_net_pnl):,.2f} / -₹{hard_limit:,.2f})"
             return False, self.halt_reason
 
+        # 5. Daily Profit Target Lock (Bank profits and lock session)
+        profit_lock_inr = self.day_start_capital * (self.rules.daily_profit_lock_pct / 100.0)
+        if self.daily_realized_pnl >= profit_lock_inr:
+            return False, f"Daily profit target secured (+₹{self.daily_realized_pnl:,.2f} banked today) — Trading concluded for the session"
+
         return True, "CLEAR"
 
     can_trade = can_enter_trade

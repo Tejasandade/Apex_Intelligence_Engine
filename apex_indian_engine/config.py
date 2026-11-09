@@ -80,10 +80,11 @@ class RiskRules:
     max_daily_loss_pct: float = 3.0          # Max loss 3.0% (₹3,000 on ₹1 Lakh)
     daily_safety_buffer_pct: float = 2.25    # Circuit breaker halts at 2.25% (₹2,250)
     max_risk_per_trade_pct: float = 1.0      # 1.0% risk per trade (₹1,000)
-    max_trades_per_day: int = 4              # Strictly prevents overtrading & fee drag
-    consecutive_loss_limit: int = 2          # 2 back-to-back losses = 60m cooling pause
+    max_trades_per_day: int = 3              # Strictly prevents overtrading (3 sniper setups max)
+    daily_profit_lock_pct: float = 2.5       # +2.5% (₹2,500) banked halts trading to secure day's profit
+    consecutive_loss_limit: int = 2          # 2 back-to-back losses = 45m cooling pause
     min_trade_duration_sec: int = 45         # Anti-tick scalping hold
-    target_profit_rr: float = 2.0            # Minimum 1:2 Risk-Reward ratio
+    target_profit_rr: float = 2.5            # Minimum 1:2.5 Risk-Reward ratio
     trail_sl_trigger_r: float = 1.0          # Move to break-even at +1.0R
 
 
