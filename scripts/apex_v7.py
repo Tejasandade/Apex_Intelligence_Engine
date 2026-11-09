@@ -2717,6 +2717,13 @@ async def handle_web_action(action: str, payload: dict) -> dict:
 
 def get_dashboard_state() -> dict:
     """Extract real-time metrics for Web Dashboard & remote monitoring."""
+    def _safe_price(sym: str, field: str) -> float:
+        v = float(symbol_markets.get(sym, {}).get(field, 0.0))
+        if v > 0: return v
+        c_list = list(symbol_candles_5m.get(sym, []))
+        if c_list: return float(c_list[-1].get("close", 0.0))
+        return 0.0
+
     dur_min = 0
     if portfolio.get("entry_time", 0) > 0:
         dur_min = round((time.time() - portfolio["entry_time"]) / 60.0, 1)
@@ -2816,13 +2823,6 @@ def get_dashboard_state() -> dict:
         lead_lag_diag = getattr(lead_lag_engine, "_diagnostics", {})
     except Exception:
         pass
-
-    def _safe_price(sym: str, field: str) -> float:
-        v = float(symbol_markets.get(sym, {}).get(field, 0.0))
-        if v > 0: return v
-        c_list = list(symbol_candles_5m.get(sym, []))
-        if c_list: return float(c_list[-1].get("close", 0.0))
-        return 0.0
 
     # Build symbols payload with MTF trends and sparkline closes
     symbols_payload = {}
