@@ -601,24 +601,28 @@ class MT5Broker:
         # Look for the exit deal (entry == 1, DEAL_ENTRY_OUT)
         for d in reversed(deals):
             if d.entry == 1:
+                net_profit = round(float(d.profit) + float(getattr(d, "commission", 0.0)) + float(getattr(d, "swap", 0.0)) + float(getattr(d, "fee", 0.0)), 2)
                 return {
                     "deal_ticket": d.ticket,
                     "order": d.order,
                     "price": d.price,
-                    "profit": d.profit,
-                    "commission": d.commission,
-                    "swap": d.swap,
+                    "profit": net_profit,
+                    "gross_profit": d.profit,
+                    "commission": getattr(d, "commission", 0.0),
+                    "swap": getattr(d, "swap", 0.0),
                     "comment": d.comment,
                     "time": d.time,
                 }
 
         # Fallback to last deal
         last_d = deals[-1]
+        net_profit_last = round(float(last_d.profit) + float(getattr(last_d, "commission", 0.0)) + float(getattr(last_d, "swap", 0.0)) + float(getattr(last_d, "fee", 0.0)), 2)
         return {
             "deal_ticket": last_d.ticket,
             "order": last_d.order,
             "price": last_d.price,
-            "profit": last_d.profit,
+            "profit": net_profit_last,
+            "gross_profit": last_d.profit,
             "comment": last_d.comment,
             "time": last_d.time,
         }

@@ -268,9 +268,25 @@ class Council:
         consensus = max(0.0, raw_score - risk_penalty)
         approve_count = sum(1 for v in votes if v.vote == Vote.APPROVE)
         reject_count = sum(1 for v in votes if v.vote == Vote.REJECT)
+        voting_count = approve_count + reject_count
 
-        # Institutional confirmation: must have at least 1 affirmative APPROVE and positive net weight
-        approved = (consensus >= self.consensus_threshold) and (approve_count > 0) and (weight_approve > weight_reject)
+        # Institutional confirmation:
+        # 1. Must have at least min_voting_advisors actively voting (not abstaining)
+        # 2. At least 2 affirmative APPROVE votes required
+        # 3. Active voting approval ratio >= 65% of participating advisor weight
+        # 4. Consensus score meets calibrated threshold
+        active_weight = weight_approve + weight_reject
+        active_approval_ratio = (weight_approve / active_weight) if active_weight > 0 else 0.0
+        min_required_voters = getattr(self, "min_voting_advisors", 3)
+        has_quorum = (voting_count >= min_required_voters)
+
+        approved = (
+            (consensus >= self.consensus_threshold)
+            and has_quorum
+            and (approve_count >= 2)
+            and (weight_approve > weight_reject)
+            and (active_approval_ratio >= 0.65)
+        )
 
         # ── Build explanation ────────────────────────────────────────────────
         explanation = self._build_explanation(votes, consensus, approved, direction)

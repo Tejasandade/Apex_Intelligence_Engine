@@ -203,26 +203,26 @@ def get_calibrated_threshold(symbol: str, regime: str = "UNKNOWN") -> float:
     - Pacific low-liquidity: +0.02
     """
     sym = symbol.upper()
-    base = 0.60 if "ETH" in sym else 0.58
+    base = 0.62 if "ETH" in sym else 0.60
     reg_l = str(regime).lower()
     if "trending_high_vol" in reg_l:
         base -= 0.02
     elif "ranging_low_vol" in reg_l:
-        base += 0.02
+        base += 0.08  # Strictly protect against dead low-vol chop
     elif "ranging_high_vol" in reg_l:
-        base += 0.01
+        base += 0.04
 
     s_name = session.get("name", "UNKNOWN")
     if s_name in ("LONDON", "NEW_YORK"):
         base -= 0.01
     elif s_name == "PACIFIC":
-        base += 0.01
+        base += 0.02
 
     # ICT Kill Zone institutional liquidity alignment
     if session.get("is_kill_zone", False):
         base -= 0.01
 
-    return round(float(np.clip(base, 0.53, 0.65)), 3)
+    return round(float(np.clip(base, 0.55, 0.72)), 3)
 
 # Risk
 BASE_RISK_PCT   = _rc("sizing", "min_allocation_pct", 0.010)   # from risk.yaml
@@ -358,11 +358,14 @@ def compute_macro_structure(symbol: str) -> dict:
     }
 
     score = 0
+    cur_px = float(symbol_markets.get(sym, {}).get("ltp", 0.0))
+    if cur_px <= 0 and symbol_candles_5m.get(sym):
+        cur_px = float(symbol_candles_5m[sym][-1].get("close", 0.0))
 
     # 1. Daily (1D) Analysis
     if len(c_1d) >= 15:
         closes_1d = [float(c["close"]) for c in c_1d]
-        cur_1d = closes_1d[-1]
+        cur_1d = cur_px if cur_px > 0 else closes_1d[-1]
         ema20_1d = _calc_ema(closes_1d, 20)
         ema50_1d = _calc_ema(closes_1d, min(50, len(closes_1d)))
         rsi_1d = _calc_rsi(closes_1d, 14)
@@ -387,7 +390,7 @@ def compute_macro_structure(symbol: str) -> dict:
     # 2. 4-Hour (4H) Intermediate Structure
     if len(c_4h) >= 12:
         closes_4h = [float(c["close"]) for c in c_4h]
-        cur_4h = closes_4h[-1]
+        cur_4h = cur_px if cur_px > 0 else closes_4h[-1]
         ema20_4h = _calc_ema(closes_4h, 20)
         ema50_4h = _calc_ema(closes_4h, min(50, len(closes_4h)))
 
@@ -418,7 +421,7 @@ def compute_macro_structure(symbol: str) -> dict:
     # 3. 1-Hour (1H) Setup Analysis
     if len(c_1h) >= 12:
         closes_1h = [float(c["close"]) for c in c_1h]
-        cur_1h = closes_1h[-1]
+        cur_1h = cur_px if cur_px > 0 else closes_1h[-1]
         ema20_1h = _calc_ema(closes_1h, 20)
         ema50_1h = _calc_ema(closes_1h, min(50, len(closes_1h)))
 
@@ -892,11 +895,12 @@ def find_sl(direction: str, entry: float, symbol: str = SYMBOL, trade_mode: str 
             max_sl = min(15.0, entry * 0.005)
     else:  # BTC
         if is_swing:
-            min_sl = max(450.0, atr * 4.5)
-            max_sl = min(950.0, atr * 8.0)
+            min_sl = max(400.0, atr * 3.5)
+            max_sl = min(800.0, atr * 6.0)
         else:
-            min_sl = max(320.0, atr * 2.5)
-            max_sl = min(550.0, atr * 4.5)
+            # Scalp stops: tight and responsive to 5m/15m micro pivots
+            min_sl = max(140.0, atr * 1.4)
+            max_sl = min(320.0, atr * 2.4)
 
     candidates = []
 
@@ -2459,7 +2463,7 @@ async def binance_ws():
     streams = []
     for s in TRADED_SYMBOLS:
         sl = s.lower()
-        streams.extend([f"{sl}@trade", f"{sl}@bookTicker", f"{sl}@depth20@500ms", f"{sl}@kline_5m"])
+        streams.extend([f"{sl}@trade", f"{sl}@bookTicker", f"{sl}@depth20@500ms", f"{sl}@kline_5m", f"{sl}@kline_15m", f"{sl}@kline_1h"])
     url = f"wss://fstream.binance.com/stream?streams={'/'.join(streams)}"
 
     while True:
@@ -2583,6 +2587,31 @@ async def binance_ws():
                                     _candle_queue.put_nowait((sym, c5))
                                 except asyncio.QueueFull:
                                     pass
+                    elif "@kline_15m" in st:
+                        k = pay.get("k", {})
+                        if k.get("x"):
+                            c15 = {
+                                "open": float(k["o"]), "high": float(k["h"]),
+                                "low": float(k["l"]), "close": float(k["c"]),
+                                "volume": float(k["v"]), "timestamp": int(k["t"]),
+                            }
+                            if sym in symbol_candles_15m:
+                                symbol_candles_15m[sym].append(dict(c15))
+                            if sym == PRIMARY_SYMBOL:
+                                candles_15m.append(dict(c15))
+                    elif "@kline_1h" in st:
+                        k = pay.get("k", {})
+                        if k.get("x"):
+                            c1h = {
+                                "open": float(k["o"]), "high": float(k["h"]),
+                                "low": float(k["l"]), "close": float(k["c"]),
+                                "volume": float(k["v"]), "timestamp": int(k["t"]),
+                            }
+                            if sym in symbol_candles_1h:
+                                symbol_candles_1h[sym].append(dict(c1h))
+                            if sym == PRIMARY_SYMBOL:
+                                candles_1h.append(dict(c1h))
+                            compute_macro_structure(sym)
         except Exception:
             for s in TRADED_SYMBOLS:
                 symbol_markets[s]["ws_connected"] = False
