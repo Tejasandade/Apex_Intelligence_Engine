@@ -797,18 +797,37 @@ def can_trade_symbol(symbol: str = SYMBOL, direction: str = "LONG", is_high_prob
         if is_metals_closed:
             return False, "METALS MARKET CLOSED (MT5 Gold reopens Sunday 22:00 UTC)"
 
-    # ── Strict Macro Market Structure Guard (1D & 4H Trend Alignment) ──
-    # Prohibits fighting higher timeframe trends. Never short a macro bull or long a macro bear.
+    # ── Strict Multi-Timeframe Alignment Guard (1D, 4H, and 1H Confluence) ──
+    # Prohibits fighting higher timeframe trends and shorting into intraday relief rallies.
     macro = symbol_macro_structure.get(sym)
     if macro:
         m_bias = str(macro.get("macro_bias", "NEUTRAL")).upper()
         trend_1d = str(macro.get("trend_1d", "NEUTRAL")).upper()
         trend_4h = str(macro.get("trend_4h", "NEUTRAL")).upper()
+        trend_1h = str(macro.get("trend_1h", "NEUTRAL")).upper()
 
-        if dir_upper == "SHORT" and ("BULL" in m_bias or "BULL" in trend_4h or "BULL" in trend_1d):
-            return False, f"MACRO SHIELD: {sym} is Macro Bullish ({m_bias} / 4H:{trend_4h} / 1D:{trend_1d}) — Shorts Prohibited"
-        elif dir_upper == "LONG" and ("BEAR" in m_bias or "BEAR" in trend_4h or "BEAR" in trend_1d):
-            return False, f"MACRO SHIELD: {sym} is Macro Bearish ({m_bias} / 4H:{trend_4h} / 1D:{trend_1d}) — Longs Prohibited"
+        # 1. Direct Intraday Momentum Alignment: Never short into a 1H bull rally or long into a 1H selloff!
+        if dir_upper == "SHORT":
+            if "BULL" in trend_1h:
+                return False, f"MTF SHIELD: {sym} 1H is Bullish ({trend_1h}) — Shorts Prohibited into intraday upward momentum"
+            if "BULL" in m_bias or "BULL" in trend_4h or "BULL" in trend_1d:
+                return False, f"MACRO SHIELD: {sym} is Macro Bullish ({m_bias} / 4H:{trend_4h} / 1D:{trend_1d}) — Shorts Prohibited"
+        elif dir_upper == "LONG":
+            if "BEAR" in trend_1h:
+                return False, f"MTF SHIELD: {sym} 1H is Bearish ({trend_1h}) — Longs Prohibited into intraday downward momentum"
+            if "BEAR" in m_bias or "BEAR" in trend_4h or "BEAR" in trend_1d:
+                return False, f"MACRO SHIELD: {sym} is Macro Bearish ({m_bias} / 4H:{trend_4h} / 1D:{trend_1d}) — Longs Prohibited"
+
+        # 2. Counter-Trend Relief Rally Chop Shield:
+        # If 4H/1D is Bearish but 1H is Bullish, price is in an active relief rally/short squeeze.
+        # Shorting into the bounce causes instant stop-outs (e.g. today's 5 short losses).
+        # Stand down until 1H aligns with the macro trend!
+        is_macro_bear = ("BEAR" in trend_4h or "BEAR" in trend_1d)
+        is_macro_bull = ("BULL" in trend_4h or "BULL" in trend_1d)
+        if is_macro_bear and "BULL" in trend_1h:
+            return False, f"CHOP SHIELD: {sym} in Counter-Trend Relief Rally (4H/1D Bear vs 1H Bull) — Entries locked until 1H aligns"
+        if is_macro_bull and "BEAR" in trend_1h:
+            return False, f"CHOP SHIELD: {sym} in Counter-Trend Dip (4H/1D Bull vs 1H Bear) — Entries locked until 1H aligns"
 
     return True, "CLEAR"
 
@@ -1015,9 +1034,9 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL):
     if not ok: return
 
     # ── PROP FIRM SNIPER CONVICTION GATE ──
-    # Reject coin-flips (e.g. p=0.51, council=0.54) in prop firm mode; only institutional Grade A/A+ permitted
-    if PROP_FIRM_MODE and (prob < 0.60 or council < 0.62):
-        log_msg = f"[{sym}] SNIPER QUALITY GATE: Signal conviction ({prob:.3f}) or council ({council:.2f}) below prop firm minimum (0.60 / 0.62)"
+    # Reject coin-flips and low-confluence signals in prop firm mode; only institutional Grade A/A+ permitted
+    if PROP_FIRM_MODE and (prob < 0.66 or council < 0.68):
+        log_msg = f"[{sym}] SNIPER QUALITY GATE: Signal conviction ({prob:.3f}) or council ({council:.2f}) below prop firm minimum (0.66 / 0.68)"
         trade_log.append(log_msg)
         if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
         return
@@ -2085,6 +2104,17 @@ def prewarm():
     update_session()
     load_journal()
     state_manager.load_state(portfolio, account)
+
+    # Reconcile today's trades directly from trade journal to prevent restart amnesia
+    today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+    today_trades = [t for t in trade_journal if str(t.get("open_ts", "")).startswith(today_str)]
+    account["trades_today"] = max(account.get("trades_today", 0), len(today_trades))
+    account["today_date"] = today_str
+    if PROP_FIRM_MODE and prop_firm_manager:
+        prop_firm_manager.daily_trades = max(getattr(prop_firm_manager, "daily_trades", 0), len(today_trades))
+        prop_firm_manager.save_state()
+    print(f"  ✓ Session Reconciled: {account['trades_today']} trades recorded today ({today_str})")
+
     update_health()
 
     # Prewarm Institutional Liquidity & Lead-Lag Engines with historical data

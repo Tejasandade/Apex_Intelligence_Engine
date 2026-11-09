@@ -120,9 +120,14 @@ class StateManager:
         account["halt_reason"] = ""
         account["halt_until"] = 0.0
 
-        # Reset daily counters (new session)
-        account["trades_today"] = 0
-        account["today_date"] = ""
+        # Restore daily counters if same calendar day, reset only on rollover
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        if saved_account.get("today_date") == today_str:
+            account["trades_today"] = int(saved_account.get("trades_today", 0))
+            account["today_date"] = today_str
+        else:
+            account["trades_today"] = 0
+            account["today_date"] = today_str
 
         # If there was an OPEN position when we crashed, treat as cancelled
         if saved_portfolio.get("position") == "OPEN":
