@@ -1,5 +1,5 @@
 {
-  "today_date": "2026-11-08",
+  "today_date": "2026-11-09",
   "capital_inr": 100000.0,
   "day_start_capital": 100000.0,
   "daily_realized_pnl": 0.0,
@@ -9,5 +9,5 @@
   "consecutive_losses": 0,
   "status": "READY",
   "halt_reason": "",
-  "last_updated": 1794148000.0
+  "last_updated": 1794210000.0
 }

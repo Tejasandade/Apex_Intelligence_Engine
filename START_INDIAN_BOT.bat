@@ -12,7 +12,7 @@ echo.
 
 :run_loop
 echo [%date% %time%] Launching Apex Indian Engine in PAPER mode...
-python -m apex_indian_engine.run_indian --mode paper --capital 100000
+python -m apex_indian_engine.run_indian --mode paper --capital 100000 %*
 
 echo.
 echo [%date% %time%] Indian Engine process stopped.
