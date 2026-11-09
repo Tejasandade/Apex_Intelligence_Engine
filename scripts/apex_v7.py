@@ -819,12 +819,10 @@ def can_trade_symbol(symbol: str = SYMBOL, direction: str = "LONG", is_high_prob
         except Exception as e:
             logger.debug("gold_structure_check_error", error=str(e))
 
-    # ── Strict Multi-Timeframe Alignment Guard (1D, 4H, and 1H Confluence) ──
+    # ── Strict Multi-Timeframe Alignment Guard (4H and 1H Confluence) ──
     # Prohibits fighting higher timeframe trends and shorting into intraday relief rallies.
     macro = symbol_macro_structure.get(sym)
     if macro:
-        m_bias = str(macro.get("macro_bias", "NEUTRAL")).upper()
-        trend_1d = str(macro.get("trend_1d", "NEUTRAL")).upper()
         trend_4h = str(macro.get("trend_4h", "NEUTRAL")).upper()
         trend_1h = str(macro.get("trend_1h", "NEUTRAL")).upper()
 
@@ -832,24 +830,21 @@ def can_trade_symbol(symbol: str = SYMBOL, direction: str = "LONG", is_high_prob
         if dir_upper == "SHORT":
             if "BULL" in trend_1h:
                 return False, f"MTF SHIELD: {sym} 1H is Bullish ({trend_1h}) — Shorts Prohibited into intraday upward momentum"
-            if "BULL" in m_bias or "BULL" in trend_4h or "BULL" in trend_1d:
-                return False, f"MACRO SHIELD: {sym} is Macro Bullish ({m_bias} / 4H:{trend_4h} / 1D:{trend_1d}) — Shorts Prohibited"
+            if "BULL" in trend_4h:
+                return False, f"MACRO SHIELD: {sym} 4H is Bullish ({trend_4h}) — Shorts Prohibited into higher-timeframe uptrend"
         elif dir_upper == "LONG":
             if "BEAR" in trend_1h:
                 return False, f"MTF SHIELD: {sym} 1H is Bearish ({trend_1h}) — Longs Prohibited into intraday downward momentum"
-            if "BEAR" in m_bias or "BEAR" in trend_4h or "BEAR" in trend_1d:
-                return False, f"MACRO SHIELD: {sym} is Macro Bearish ({m_bias} / 4H:{trend_4h} / 1D:{trend_1d}) — Longs Prohibited"
+            if "BEAR" in trend_4h:
+                return False, f"MACRO SHIELD: {sym} 4H is Bearish ({trend_4h}) — Longs Prohibited into higher-timeframe downtrend"
 
         # 2. Counter-Trend Relief Rally Chop Shield:
-        # If 4H/1D is Bearish but 1H is Bullish, price is in an active relief rally/short squeeze.
-        # Shorting into the bounce causes instant stop-outs (e.g. today's 5 short losses).
-        # Stand down until 1H aligns with the macro trend!
-        is_macro_bear = ("BEAR" in trend_4h or "BEAR" in trend_1d)
-        is_macro_bull = ("BULL" in trend_4h or "BULL" in trend_1d)
-        if is_macro_bear and "BULL" in trend_1h:
-            return False, f"CHOP SHIELD: {sym} in Counter-Trend Relief Rally (4H/1D Bear vs 1H Bull) — Entries locked until 1H aligns"
-        if is_macro_bull and "BEAR" in trend_1h:
-            return False, f"CHOP SHIELD: {sym} in Counter-Trend Dip (4H/1D Bull vs 1H Bear) — Entries locked until 1H aligns"
+        # If 4H is Bearish but 1H is Bullish, price is in an active relief rally/short squeeze.
+        # Shorting into the bounce causes instant stop-outs. Stand down until 1H aligns with 4H!
+        if "BEAR" in trend_4h and "BULL" in trend_1h and dir_upper == "SHORT":
+            return False, f"CHOP SHIELD: {sym} in 1H Relief Rally against 4H Bear — Shorts paused until 1H aligns"
+        if "BULL" in trend_4h and "BEAR" in trend_1h and dir_upper == "LONG":
+            return False, f"CHOP SHIELD: {sym} in 1H Pullback against 4H Bull — Longs paused until 1H aligns"
 
     return True, "CLEAR"
 
