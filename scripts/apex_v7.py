@@ -2389,7 +2389,17 @@ def render():
         mom_sig_str = mom_d.get("signal", "FLAT")
         mom_c = GRN if mom_sig_str == "LONG" else (RED if mom_sig_str == "SHORT" else GRY)
         ofi_v = float(mom_d.get("ofi", 0.0))
-        mom_display = f"{mom_c}{mom_sig_str:<5}{R} (OFI:{ofi_v:+.2f})"
+        label_str = "OFI"
+        if any(g in sym for g in ("GOLD", "PAXG")):
+            try:
+                from src.data.providers.delta_feed import delta_gold_feed
+                d_tel = delta_gold_feed.get_telemetry()
+                if d_tel.get("fresh") and abs(ofi_v) < 0.01:
+                    ofi_v = float(d_tel.get("book_imbalance_5", 0.0))
+                    label_str = "L2_OBI"
+            except Exception:
+                pass
+        mom_display = f"{mom_c}{mom_sig_str:<5}{R} ({label_str}:{ofi_v:+.2f})"
 
         buf.append(row(f" {BOLD}{sym:<8}{R} {ltp_str:>10} │ {pos_str:<25} │ L:{pl_c}{pl:.3f}{R} S:{ps_c}{ps:.3f}{R} │ {mom_display:<24} │ {reg_display:<18}"))
 
