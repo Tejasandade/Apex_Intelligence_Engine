@@ -87,68 +87,51 @@ def apply_triple_barrier_labels(
             bars_to_barrier[i] = 0
             continue
 
-        upper_barrier = entry_price + (entry_atr * profit_target_atr)
-        lower_barrier = entry_price - (entry_atr * stop_loss_atr)
+        # Evaluate Long and Short barriers independently so asymmetric TP:SL ratios are symmetric for both sides
+        long_tp = entry_price + (entry_atr * profit_target_atr)
+        long_sl = entry_price - (entry_atr * stop_loss_atr)
+        short_tp = entry_price - (entry_atr * profit_target_atr)
+        short_sl = entry_price + (entry_atr * stop_loss_atr)
 
-        # Look forward bar by bar
-        upper_hit_bar = -1
-        lower_hit_bar = -1
+        l_tp_bar, l_sl_bar = -1, -1
+        s_tp_bar, s_sl_bar = -1, -1
 
         end_idx = min(i + max_holding_bars, n - 1)
 
         for j in range(i + 1, end_idx + 1):
-            # Check if high touches upper barrier
-            if upper_hit_bar == -1 and high[j] >= upper_barrier:
-                upper_hit_bar = j - i
+            # Long barriers
+            if l_tp_bar == -1 and high[j] >= long_tp:
+                l_tp_bar = j - i
+            if l_sl_bar == -1 and low[j] <= long_sl:
+                l_sl_bar = j - i
 
-            # Check if low touches lower barrier
-            if lower_hit_bar == -1 and low[j] <= lower_barrier:
-                lower_hit_bar = j - i
+            # Short barriers
+            if s_tp_bar == -1 and low[j] <= short_tp:
+                s_tp_bar = j - i
+            if s_sl_bar == -1 and high[j] >= short_sl:
+                s_sl_bar = j - i
 
-            # If both hit on same bar, we need to determine which came first
-            # Conservative assumption: if both barriers are hit on the same bar,
-            # we assume the STOP was hit first (conservative bias)
-            if upper_hit_bar > 0 and lower_hit_bar > 0:
+            long_done = (l_tp_bar > 0 or l_sl_bar > 0)
+            short_done = (s_tp_bar > 0 or s_sl_bar > 0)
+            if long_done and short_done:
                 break
 
-        # Determine the label
-        if upper_hit_bar > 0 and lower_hit_bar > 0:
-            if upper_hit_bar < lower_hit_bar:
-                # Upper hit first: Long Win, Short Loss
-                targets_long[i] = 1
-                targets_short[i] = 0
-                barrier_types[i] = "upper"
-                bars_to_barrier[i] = upper_hit_bar
-            elif lower_hit_bar < upper_hit_bar:
-                # Lower hit first: Short Win, Long Loss
-                targets_long[i] = 0
-                targets_short[i] = 1
-                barrier_types[i] = "lower"
-                bars_to_barrier[i] = lower_hit_bar
-            else:
-                # Same bar — conservative: assume both lost
-                targets_long[i] = 0
-                targets_short[i] = 0
-                barrier_types[i] = "lower"
-                bars_to_barrier[i] = lower_hit_bar
-        elif upper_hit_bar > 0:
-            # Only upper hit
-            targets_long[i] = 1
-            targets_short[i] = 0
+        # Resolve Long outcome (conservative tie-break: same-bar SL assumed hit first)
+        long_win = (l_tp_bar > 0) and (l_sl_bar == -1 or l_tp_bar < l_sl_bar)
+        short_win = (s_tp_bar > 0) and (s_sl_bar == -1 or s_tp_bar < s_sl_bar)
+
+        targets_long[i] = 1 if long_win else 0
+        targets_short[i] = 1 if short_win else 0
+
+        if long_win:
             barrier_types[i] = "upper"
-            bars_to_barrier[i] = upper_hit_bar
-        elif lower_hit_bar > 0:
-            # Only lower hit
-            targets_long[i] = 0
-            targets_short[i] = 1
+            bars_to_barrier[i] = l_tp_bar
+        elif short_win:
             barrier_types[i] = "lower"
-            bars_to_barrier[i] = lower_hit_bar
+            bars_to_barrier[i] = s_tp_bar
         else:
-            # Time barrier — neither hit
-            targets_long[i] = 0
-            targets_short[i] = 0
-            barrier_types[i] = "time"
-            bars_to_barrier[i] = max_holding_bars
+            barrier_types[i] = "time" if (l_sl_bar == -1 and s_sl_bar == -1) else "lower"
+            bars_to_barrier[i] = l_sl_bar if l_sl_bar > 0 else (s_sl_bar if s_sl_bar > 0 else max_holding_bars)
 
     result = df.copy()
     result["target_long"] = targets_long

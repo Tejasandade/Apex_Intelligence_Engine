@@ -186,14 +186,52 @@ def send_challenge_alert(event_type: str, details: dict):
 MIN_PROB        = _rc("conviction", "min_signal_threshold", 0.58)   # from risk.yaml
 STRONG_PROB     = 0.65      # High-conviction → full risk
 MIN_PROB_DIFF   = 0.06      # Long vs Short separation
-MIN_RR          = _rc("trade_management", "default_rr_target", 3.0)   # from risk.yaml
+MIN_RR          = _rc("trade_management", "default_rr_target", 2.2)   # Realistic intraday R:R from risk.yaml
 MIN_SL_USD      = 250.0     # Never tighter than $250 stop
 MAX_SL_USD      = 800.0     # Never wider than $800
 
-def get_calibrated_threshold(symbol: str, regime: str = "UNKNOWN") -> float:
+def compute_auction_location(symbol: str, direction: str, price: float, atr: float) -> tuple[float, float, str]:
     """
-    Asset-Calibrated Conviction Thresholds & Regime-Adaptive Sensitivity.
-    Balanced to prevent both dead gridlock (0.68+) and low-edge spam (< 0.55).
+    Evaluates trade location using Auction Market Theory (proximity to 5m value equilibrium & liquidity origin).
+    Rewards entries near institutional value/sweeps (-0.02 threshold) and adds smooth progressive stretch
+    friction (+0.025/ATR beyond 1.2 ATR) so late extended entries require proportionally higher conviction.
+    """
+    sym = symbol.upper()
+    if atr <= 0 or price <= 0:
+        return 0.0, 0.0, "neutral"
+
+    c5_buf = list(symbol_candles_5m.get(sym, []))
+    if len(c5_buf) < 20:
+        return 0.0, 0.0, "warmup"
+
+    closes = [float(c["close"]) for c in c5_buf[-20:]]
+    ema20 = closes[0]
+    k = 2.0 / 21.0
+    for val in closes[1:]:
+        ema20 = (val - ema20) * k + ema20
+
+    # Directional extension away from 5m value mean (positive = extended in trade direction)
+    dir_u = direction.upper()
+    ext_pts = (price - ema20) if dir_u in ("LONG", "BUY") else (ema20 - price)
+    ext_atr = ext_pts / atr
+
+    lev = liquidity_engine.get_levels(sym) if "liquidity_engine" in globals() else {}
+    at_origin = (
+        abs(ext_atr) <= 0.65
+        or (dir_u in ("LONG", "BUY") and (lev.get("sweep_bullish") or lev.get("fvg_bullish")))
+        or (dir_u in ("SHORT", "SELL") and (lev.get("sweep_bearish") or lev.get("fvg_bearish")))
+    )
+
+    if at_origin and ext_atr <= 0.90:
+        return round(ext_atr, 2), -0.02, "ORIGIN/VALUE"
+    if ext_atr > 1.2:
+        penalty = min(0.06, round(0.025 * (ext_atr - 1.2), 3))
+        return round(ext_atr, 2), penalty, f"STRETCHED({ext_atr:.1f}ATR)"
+    return round(ext_atr, 2), 0.0, "BALANCED"
+
+def get_calibrated_threshold(symbol: str, regime: str = "UNKNOWN", loc_delta: float = 0.0) -> float:
+    """
+    Asset-Calibrated Conviction Thresholds with Regime & Auction Location Sensitivity.
     """
     sym = symbol.upper()
     base = 0.59 if "ETH" in sym else 0.57
@@ -201,7 +239,7 @@ def get_calibrated_threshold(symbol: str, regime: str = "UNKNOWN") -> float:
     if "trending_high_vol" in reg_l:
         base -= 0.02
     elif "ranging_low_vol" in reg_l:
-        base += 0.03  # Reasonable chop protection (0.60-0.62) without locking out pre-breakouts
+        base += 0.03
     elif "ranging_high_vol" in reg_l:
         base += 0.02
 
@@ -211,11 +249,11 @@ def get_calibrated_threshold(symbol: str, regime: str = "UNKNOWN") -> float:
     elif s_name == "PACIFIC":
         base += 0.02
 
-    # ICT Kill Zone institutional liquidity alignment
     if session.get("is_kill_zone", False):
         base -= 0.01
 
-    return round(float(np.clip(base, 0.55, 0.65)), 3)
+    base += loc_delta
+    return round(float(np.clip(base, 0.53, 0.66)), 3)
 
 # Risk
 BASE_RISK_PCT   = _rc("sizing", "min_allocation_pct", 0.010)   # from risk.yaml
@@ -532,6 +570,8 @@ trade_journal: list[dict] = []
 trade_log = deque(maxlen=12)
 # P3: last gate rejection — shown on dashboard when a signal is approved but not executed
 last_gate_rejection = {"reason": "", "signal": "", "ts": 0.0}
+# Institutional Fair-Value Pullback Retest Queue {symbol: {signal, direction, retest_px, inv_px, expires_ts}}
+pending_retest_zones: dict[str, dict] = {}
 
 # ─── PERSISTENCE ──────────────────────────────────────────────────────────────
 def save_journal():
@@ -890,29 +930,28 @@ def find_sl(direction: str, entry: float, symbol: str = SYMBOL, trade_mode: str 
     atr = max(sym_reg.get("atr", 10.0), 1.0)
     is_swing = (trade_mode == "SWING")
 
-    # Asset & Horizon Adaptive ATR bounds
+    # Asset & Horizon Adaptive ATR bounds (prevents 4-5 ATR stops that make TP unreachable)
     if "ETH" in sym:
         if is_swing:
-            min_sl = max(25.0, entry * 0.012)
-            max_sl = min(60.0, entry * 0.025)
+            min_sl = max(18.0, atr * 2.5)
+            max_sl = min(40.0, atr * 4.2)
         else:
-            min_sl = max(14.0, entry * 0.006)
-            max_sl = min(30.0, entry * 0.012)
+            min_sl = max(7.0, atr * 1.3)
+            max_sl = min(18.0, atr * 2.1)
     elif "GOLD" in sym or "XAU" in sym or "PAXG" in sym:
         if is_swing:
-            min_sl = max(10.0, entry * 0.003)
-            max_sl = min(25.0, entry * 0.007)
+            min_sl = max(8.0, atr * 2.5)
+            max_sl = min(18.0, atr * 4.2)
         else:
-            min_sl = max(7.0, entry * 0.002)
-            max_sl = min(15.0, entry * 0.005)
+            min_sl = max(4.5, atr * 1.3)
+            max_sl = min(11.0, atr * 2.1)
     else:  # BTC
         if is_swing:
-            min_sl = max(400.0, atr * 3.5)
-            max_sl = min(800.0, atr * 6.0)
+            min_sl = max(320.0, atr * 2.5)
+            max_sl = min(600.0, atr * 4.2)
         else:
-            # Scalp stops: tight and responsive to 5m/15m micro pivots
-            min_sl = max(140.0, atr * 1.4)
-            max_sl = min(320.0, atr * 2.4)
+            min_sl = max(120.0, atr * 1.2)
+            max_sl = min(260.0, atr * 2.0)
 
     candidates = []
 
@@ -1011,8 +1050,37 @@ def size_position(sl_dist: float, prob: float, entry: float, council_score: floa
     actual_risk = round(lots * sl_dist * contract_size, 2)
     return lots, actual_risk, notional
 
-# ─── ENTRY EXECUTION ──────────────────────────────────────────────────────────
-def execute_signal(signal: TradingSignal, symbol: str = SYMBOL):
+# ─── INSTITUTIONAL RETEST LIMIT QUEUE & ENTRY EXECUTION ──────────────────────
+def check_pending_retests(sym: str, price: float):
+    """Evaluate queued fair-value pullback limit zones on every incoming tick."""
+    z = pending_retest_zones.get(sym)
+    if not z or price <= 0:
+        return
+
+    now = time.time()
+    direction = z["direction"]
+    if now > z["expires_ts"]:
+        pending_retest_zones.pop(sym, None)
+        trade_log.append(f"[{sym}] RETEST EXPIRED: Missed pullback zone ${z['retest_px']:,.2f} — stood aside safely")
+        return
+
+    # Invalidation fence protects against fakeouts before fill
+    if (direction == "LONG" and price <= z["inv_px"]) or (direction == "SHORT" and price >= z["inv_px"]):
+        pending_retest_zones.pop(sym, None)
+        trade_log.append(f"[{sym}] RETEST INVALIDATED: Structure broke ${z['inv_px']:,.2f} before entry ($0 loss)")
+        return
+
+    touched = (direction == "LONG" and price <= z["retest_px"]) or (direction == "SHORT" and price >= z["retest_px"])
+    if touched:
+        pending_retest_zones.pop(sym, None)
+        sig = z["signal"]
+        is_hp = ((sig.conviction >= 0.66 and sig.council_score >= 0.70) or sig.conviction >= 0.70)
+        ok, _ = can_trade_symbol(sym, direction, is_high_prob=is_hp)
+        if ok and portfolios.get(sym, portfolio)["position"] == "FLAT":
+            trade_log.append(f"[{sym}] RETEST FILLED @ ${price:,.2f} (Zone: ${z['retest_px']:,.2f})")
+            execute_signal(sig, symbol=sym, bypass_retest=True)
+
+def execute_signal(signal: TradingSignal, symbol: str = SYMBOL, bypass_retest: bool = False):
     """Execute a TradingSignal from the LiveSignalEngine for a specific symbol."""
     global last_signal
     sym = symbol.upper()
@@ -1149,13 +1217,45 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL):
             if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
             return
 
+    # ── INSTITUTIONAL FAIR-VALUE RETEST QUEUE (Avoids market-chasing big impulse candles) ──
+    ext_atr, _, _ = compute_auction_location(sym, direction, entry, max(sym_atr, 1e-6))
+    lev_snap = liquidity_engine.get_levels(sym) if "liquidity_engine" in globals() else {}
+    has_sweep_origin = (
+        (direction == "LONG" and lev_snap.get("sweep_bullish"))
+        or (direction == "SHORT" and lev_snap.get("sweep_bearish"))
+    )
+    if not bypass_retest and sym_atr > 0 and len(c5_list) >= 20 and not has_sweep_origin:
+        lc = c5_list[-1]
+        lc_o, lc_c = float(lc["open"]), float(lc["close"])
+        bar_move = (lc_c - lc_o) if direction == "LONG" else (lc_o - lc_c)
+        if bar_move > (0.70 * sym_atr) or ext_atr > 0.90:
+            mid_bar = (lc_o + lc_c) / 2.0
+            if direction == "LONG":
+                retest_px = round(min(mid_bar, entry - 0.25 * sym_atr), 2)
+                inv_px = round(float(lc["low"]) - 0.35 * sym_atr, 2)
+            else:
+                retest_px = round(max(mid_bar, entry + 0.25 * sym_atr), 2)
+                inv_px = round(float(lc["high"]) + 0.35 * sym_atr, 2)
+
+            pending_retest_zones[sym] = {
+                "signal": signal,
+                "direction": direction,
+                "retest_px": retest_px,
+                "inv_px": inv_px,
+                "expires_ts": time.time() + 600.0,  # 2x 5m bars
+            }
+            log_msg = f"[{sym}] RETEST LIMIT QUEUED ({direction}): Wait pullback to ${retest_px:,.2f} (from ${entry:,.2f}, inv ${inv_px:,.2f})"
+            trade_log.append(log_msg)
+            if HEADLESS: print(f"  ⏳ {log_msg}", flush=True)
+            return
+
     # ── DUAL-HORIZON TRADE CLASSIFICATION: SWING vs PRECISION SCALP ──
     macro = compute_macro_structure(sym)
     is_ranging = "ranging" in str(signal.regime).lower()
 
-    # Swing criteria: Trending regime + High Conviction + Macro 1D/4H Alignment
+    # Swing only when high-conviction AND near equilibrium (never swing-tag late extended moves)
     is_swing = False
-    if not is_ranging and prob >= 0.65 and council >= 0.72:
+    if not is_ranging and prob >= 0.65 and council >= 0.72 and ext_atr <= 1.2:
         if direction == "LONG" and macro.get("swing_eligible_long", False):
             is_swing = True
         elif direction == "SHORT" and macro.get("swing_eligible_short", False):
@@ -1167,7 +1267,6 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL):
     if sl_dist <= 0: return
 
     # ── SPREAD-TO-RISK GATE (Adapted from xau_c / breakout_admission.py) ──
-    # Prohibit entry if broker spread exceeds 10% of total stop-loss distance
     bid = mkt.get("bid", 0.0)
     ask = mkt.get("ask", 0.0)
     if bid > 0 and ask > 0 and sl_dist > 0:
@@ -1182,47 +1281,54 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL):
             if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
             return
 
-    # ── VOLATILITY & HORIZON ADAPTIVE TARGETS (Regime-Adaptive R:R) ──
+    # ── MARKET-ANCHORED TARGET ARCHITECTURE (Realistic ATR & Liquidity Targets) ──
+    eff_atr = sym_atr if sym_atr > 0 else sl_dist
     if trade_mode == "SWING":
-        tp1_rr = 2.5
-        tp2_rr = 5.0 if council >= 0.80 else 4.5
-        max_duration_min = 2880.0  # 48 hours for swing trades
-        adverse_decay_min = 720.0  # 12 hours adverse hold
+        tp1_dist = min(sl_dist * 1.6, eff_atr * 2.8)
+        tp2_dist = min(sl_dist * 3.2, eff_atr * 5.5)
+        tp1_dist = max(tp1_dist, sl_dist * 1.3)
+        tp2_dist = max(tp2_dist, sl_dist * 2.4)
+        max_duration_min = 2880.0  # 48h
+        adverse_decay_min = 480.0  # 8h adverse hold
     else:
-        # Precision SCALP
-        max_duration_min = 360.0   # 6 hours
-        adverse_decay_min = 240.0  # 4 hours
-        if is_ranging:
-            tp1_rr = 1.5
-            tp2_rr = 2.2 if "low_vol" in str(signal.regime).lower() else 2.4
-        else:
-            tp1_rr = 1.8 if council < 0.75 else 2.0
-            tp2_rr = 3.5 if council >= 0.85 else (3.2 if council >= 0.70 else MIN_RR)
+        max_duration_min = 360.0   # 6h
+        adverse_decay_min = 240.0  # 4h
+        base_tp1_r = 1.25 if is_ranging else 1.4
+        base_tp2_r = 2.2 if is_ranging else 2.5
+        tp1_dist = max(sl_dist * 1.15, min(sl_dist * base_tp1_r, eff_atr * 1.8))
+        tp2_dist = max(sl_dist * 1.9, min(sl_dist * base_tp2_r, eff_atr * 3.5))
 
-    tp1 = round(entry + sl_dist * tp1_rr if direction == "LONG" else entry - sl_dist * tp1_rr, 2)
-    tp2 = round(entry + sl_dist * tp2_rr if direction == "LONG" else entry - sl_dist * tp2_rr, 2)
+    tp1 = round(entry + tp1_dist if direction == "LONG" else entry - tp1_dist, 2)
+    tp2 = round(entry + tp2_dist if direction == "LONG" else entry - tp2_dist, 2)
 
-    # APEX v7.2: Snap TP2 to nearest Volume Profile HVN / VPOC level
+    # Snap TP2 to nearest genuine Volume Profile / Liquidity Pool within achievable reach
     try:
         from src.features.indicators.volume_profile import compute_volume_profile_snapshot
         c_buf = symbol_candles_5m.get(sym, candles_5m)
         vp = compute_volume_profile_snapshot(pd.DataFrame(list(c_buf)[-100:]))
+        candidates = []
         if vp["profile_ready"]:
-            candidates = [vp["poc"], vp["vah"]] + vp["hvn_prices"]
-            if direction == "LONG":
-                valid_tps = [p for p in candidates if p > entry + sl_dist * 2.0]
-                if valid_tps:
-                    nearest = min(valid_tps)
-                    if (nearest - entry) / sl_dist >= MIN_RR:
-                        tp2 = round(nearest, 2)
-            else:
-                valid_tps = [p for p in candidates if p < entry - sl_dist * 2.0]
-                if valid_tps:
-                    nearest = max(valid_tps)
-                    if (entry - nearest) / sl_dist >= MIN_RR:
-                        tp2 = round(nearest, 2)
+            candidates.extend([vp["poc"], vp["vah"]] + vp["hvn_prices"])
+        for lvl_k in ("pdh", "pdl", "ash", "asl"):
+            lv = float(lev_snap.get(lvl_k, 0.0))
+            if lv > 0:
+                candidates.append(lv)
+
+        min_reach = sl_dist * 1.85
+        max_reach = eff_atr * (5.5 if trade_mode == "SWING" else 3.6)
+        if direction == "LONG":
+            valid_tps = [p for p in candidates if entry + min_reach <= p <= entry + max_reach]
+            if valid_tps:
+                tp2 = round(min(valid_tps), 2)
+        else:
+            valid_tps = [p for p in candidates if entry - max_reach <= p <= entry - min_reach]
+            if valid_tps:
+                tp2 = round(max(valid_tps), 2)
     except Exception:
         pass
+
+    tp1_rr = round(abs(tp1 - entry) / max(sl_dist, 1e-6), 2)
+    tp2_rr = round(abs(tp2 - entry) / max(sl_dist, 1e-6), 2)
 
     entry_lots, risk_usd, notional = size_position(
         sl_dist, prob, entry, council, direction,
@@ -1876,16 +1982,17 @@ async def _candle_worker():
 
                     total_intel_delta = liq_delta + ll_delta + micro_delta + fund_delta
                     calibrated_conviction = round(float(np.clip(sig.conviction + total_intel_delta, 0.0, 1.0)), 4)
-                    required_threshold = get_calibrated_threshold(sym, sig.regime)
+                    ext_atr, loc_delta, loc_note = compute_auction_location(sym, direction, sig.price, sig.atr)
+                    required_threshold = get_calibrated_threshold(sym, sig.regime, loc_delta=loc_delta)
 
                     # Update signal conviction with market intelligence calibration
                     sig.conviction = calibrated_conviction
 
-                    # Check if post-intelligence conviction satisfies asset-calibrated threshold
+                    # Check if post-intelligence conviction satisfies auction-calibrated threshold
                     if sig.conviction < required_threshold:
                         intel_notes = [n for n in (liq_reason, ll_reason, micro_reason, fund_reason) if n and n != "NEUTRAL"]
                         intel_str = " | ".join(intel_notes) if intel_notes else "Low Intel Delta"
-                        last_gate_rejection["reason"] = f"[{sym}] Intel Conviction {sig.conviction:.3f} < {required_threshold:.3f} ({intel_str})"
+                        last_gate_rejection["reason"] = f"[{sym}] Intel {sig.conviction:.3f} < {required_threshold:.3f} [{loc_note}] ({intel_str})"
                         last_gate_rejection["signal"] = f"[{sym}] {direction} raw={sig.conviction - total_intel_delta:.3f} adj={sig.conviction:.3f}"
                         last_gate_rejection["ts"] = time.time()
                         continue
@@ -1984,7 +2091,8 @@ def process_tick_for_symbol(sym: str, price: float, qty: float, is_buyer_maker: 
     m_eng = momentum_engines.get(sym, momentum_eng)
     mom_sig = m_eng.add_tick(price, qty, is_buyer_maker, int(now * 1000))
 
-    # On every tick: check exits across all open positions
+    # Evaluate queued institutional retest limits & active exits on every tick
+    check_pending_retests(sym, price)
     check_exits()
 
 

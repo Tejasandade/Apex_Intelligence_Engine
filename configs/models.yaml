@@ -54,10 +54,10 @@ models:
       reg_lambda: 5.0
       subsample: 0.7
     labeling:
-      max_holding_bars: 45
+      max_holding_bars: 48
       method: triple_barrier
-      profit_target_atr: 3.0
-      stop_loss_atr: 2.0
+      profit_target_atr: 2.5
+      stop_loss_atr: 1.25
     regime_split: true
     regime_thresholds:
       adx_trending: 25.0
