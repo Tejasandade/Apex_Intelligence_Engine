@@ -53,6 +53,8 @@ class LiquidityEngine:
             "dist_to_support_pct": 99.0,
             "lbma_am_fix": 0.0,  # London Gold AM Fix (10:30 UTC benchmark)
             "lbma_pm_fix": 0.0,  # London Gold PM Fix (15:00 UTC benchmark)
+            "latest_fix_val": 0.0,
+            "latest_fix_label": "",
         }
 
         # 1. Previous Day High & Low (PDH / PDL)
@@ -83,9 +85,17 @@ class LiquidityEngine:
                 if ts > 0:
                     dt = datetime.datetime.fromtimestamp(ts / 1000.0, tz=datetime.timezone.utc)
                     if dt.hour == 10 and res["lbma_am_fix"] == 0.0:
-                        res["lbma_am_fix"] = float(c.get("close", 0.0))
+                        val_am = float(c.get("close", 0.0))
+                        res["lbma_am_fix"] = val_am
+                        if res["latest_fix_val"] == 0.0 and val_am > 0.0:
+                            res["latest_fix_val"] = val_am
+                            res["latest_fix_label"] = "AM Fix"
                     elif dt.hour == 15 and res["lbma_pm_fix"] == 0.0:
-                        res["lbma_pm_fix"] = float(c.get("close", 0.0))
+                        val_pm = float(c.get("close", 0.0))
+                        res["lbma_pm_fix"] = val_pm
+                        if res["latest_fix_val"] == 0.0 and val_pm > 0.0:
+                            res["latest_fix_val"] = val_pm
+                            res["latest_fix_label"] = "PM Fix"
 
         # 4. Fair Value Gap (FVG) on latest 5m candles
         if len(candles_5m) >= 3:

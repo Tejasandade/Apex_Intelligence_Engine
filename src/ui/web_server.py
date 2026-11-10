@@ -1739,8 +1739,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
             sweepBadge = `<span class="pill-tag bull">Sweep Bull (${l.sweep_level || 'PDL'})</span>`;
           } else if (l.sweep_bearish) {
             sweepBadge = `<span class="pill-tag bear">Sweep Bear (${l.sweep_level || 'PDH'})</span>`;
-          } else if (l.lbma_pm_fix > 0) {
-            sweepBadge = `<span style="color:var(--blue); font-size:11px;" class="tabular">Fix $${l.lbma_pm_fix.toFixed(1)}</span>`;
+          } else if (l.latest_fix_val > 0 || l.lbma_pm_fix > 0 || l.lbma_am_fix > 0) {
+            const fixPx = l.latest_fix_val || l.lbma_pm_fix || l.lbma_am_fix;
+            const fixLbl = l.latest_fix_label || (l.lbma_pm_fix > 0 ? 'PM Fix' : 'AM Fix');
+            sweepBadge = `<span style="color:var(--blue); font-size:11px;" class="tabular">${fixLbl} $${fixPx.toFixed(1)}</span>`;
           }
 
           const row = document.createElement('tr');

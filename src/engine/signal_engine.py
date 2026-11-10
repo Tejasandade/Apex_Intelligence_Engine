@@ -208,6 +208,9 @@ class LiveSignalEngine:
         self._pending_signals: dict[str, TradingSignal] = {}
         self._halted = False  # True if critical decay detected
         self._last_adx: float = 0.0  # Track for dashboard
+        self._last_prob_long: float = 0.5
+        self._last_prob_short: float = 0.5
+        self._last_regime: str = "UNKNOWN"
         
         # Deduplication
         self._last_signal_direction = ""
@@ -380,6 +383,11 @@ class LiveSignalEngine:
                 except Exception as e:
                     logger.error("signal_predict_error", error=str(e))
                     return None
+
+        # Always publish latest ensemble probabilities so UI reflects every bar without double-updating live_store
+        self._last_prob_long = round(float(prob_long), 4)
+        self._last_prob_short = round(float(prob_short), 4)
+        self._last_regime = regime.value
 
         # ── Step 7: Signal decision (True Dual-Probability) ─────────────────
         buy_threshold = self.conviction_threshold

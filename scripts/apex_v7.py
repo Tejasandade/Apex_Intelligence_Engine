@@ -1875,6 +1875,27 @@ def _check_exit_for_symbol(sym: str):
     if sym_eng and sym_eng.is_halted and port["unrealized_pnl"] > 0:
         close(cur, "ENGINE HALTED — locking profits"); return
 
+def _sync_live_probs(sym: str, eng: LiveSignalEngine) -> None:
+    """Sync cached L/S ensemble probabilities from LiveSignalEngine without re-appending live_store."""
+    try:
+        if not eng:
+            return
+        pl = float(getattr(eng, "_last_prob_long", 0.5))
+        ps = float(getattr(eng, "_last_prob_short", 0.5))
+        r_val = str(getattr(eng, "_last_regime", "") or (eng.regime_detector.current_regime.value if hasattr(eng, "regime_detector") else "UNKNOWN"))
+        if sym in symbol_live_probs:
+            symbol_live_probs[sym]["long"]    = round(pl, 4)
+            symbol_live_probs[sym]["short"]   = round(ps, 4)
+            symbol_live_probs[sym]["updated"] = True
+            symbol_live_probs[sym]["regime"]  = r_val
+        if sym == PRIMARY_SYMBOL:
+            live_probs["long"]    = round(pl, 4)
+            live_probs["short"]   = round(ps, 4)
+            live_probs["updated"] = True
+            regime_info["current"] = r_val
+    except Exception:
+        pass
+
 # ─── CANDLE PIPELINE ──────────────────────────────────────────────────────────
 async def _candle_worker():
     """Async worker: drains _candle_queue and processes each 5m candle through the symbol's ML engine."""
@@ -1921,25 +1942,8 @@ async def _candle_worker():
                 except Exception:
                     pass
 
-                # Always extract live probabilities from the ensemble — even if no signal
-                try:
-                    feats = eng.live_store.update(c5)  # already called inside; uses cached
-                    if feats is not None and eng.ensemble_long and eng.ensemble_short:
-                        re = eng.regime_detector.current_regime
-                        pl, _, _ = eng.ensemble_long.predict(feats, current_regime=re.value)
-                        ps, _, _ = eng.ensemble_short.predict(feats, current_regime=re.value)
-                        if sym in symbol_live_probs:
-                            symbol_live_probs[sym]["long"]    = round(pl, 4)
-                            symbol_live_probs[sym]["short"]   = round(ps, 4)
-                            symbol_live_probs[sym]["updated"] = True
-                            symbol_live_probs[sym]["regime"]  = re.value
-                        if sym == PRIMARY_SYMBOL:
-                            live_probs["long"]    = round(pl, 4)
-                            live_probs["short"]   = round(ps, 4)
-                            live_probs["updated"] = True
-                            regime_info["current"] = re.value
-                except Exception:
-                    pass
+                # Always sync live probabilities published by eng.process_candle() (never re-call live_store.update)
+                _sync_live_probs(sym, eng)
 
                 # Strictly enforce ML + 10-Advisor Council Authority: Never fabricate blind bypass signals when sig is None
                 # Institutional liquidity sweeps/breakouts boost conviction cleanly via evaluate_signal_synergy below.
@@ -2260,15 +2264,18 @@ def prewarm():
             if sym == PRIMARY_SYMBOL:
                 prewarm.replay_candles = []
         else:
-            hist = pd.DataFrame(raw5m)
-            df_15 = pd.DataFrame(raw15m) if raw15m else None
-            df_1h = pd.DataFrame(raw1h) if raw1h else None
+            # Drop the trailing unclosed REST candle so live @kline_5m/15m/1h closes never collide or duplicate
+            closed_5m  = raw5m[:-1]  if len(raw5m)  > 1 else raw5m
+            closed_15m = raw15m[:-1] if raw15m and len(raw15m) > 1 else (raw15m or [])
+            closed_1h  = raw1h[:-1]  if raw1h  and len(raw1h)  > 1 else (raw1h or [])
+
+            hist = pd.DataFrame(closed_5m)
+            df_15 = pd.DataFrame(closed_15m) if closed_15m else None
+            df_1h = pd.DataFrame(closed_1h) if closed_1h else None
             df_4h = pd.DataFrame(raw4h) if raw4h else None
             engine.warm_up(hist[["timestamp","open","high","low","close","volume"]], df_15m=df_15, df_1h=df_1h, df_4h=df_4h)
-            for c in raw5m:
+            for c in closed_5m:
                 symbol_candles_5m[sym].append(c)
-                if sym == PRIMARY_SYMBOL:
-                    candles_5m.append(c)
 
             last_close = float(raw5m[-1]["close"])
             symbol_markets[sym]["ltp"] = last_close
@@ -2278,24 +2285,16 @@ def prewarm():
                 market["ltp"] = last_close
                 market["bid"] = last_close
                 market["ask"] = last_close
-                prewarm.replay_candles = raw5m[-3:]
+                prewarm.replay_candles = closed_5m[-3:]
 
-        for c in (raw15m or []):
+        for c in (raw15m[:-1] if raw15m and len(raw15m) > 1 else (raw15m or [])):
             symbol_candles_15m[sym].append(c)
-            if sym == PRIMARY_SYMBOL:
-                candles_15m.append(c)
-        for c in (raw1h or []):
+        for c in (raw1h[:-1] if raw1h and len(raw1h) > 1 else (raw1h or [])):
             symbol_candles_1h[sym].append(c)
-            if sym == PRIMARY_SYMBOL:
-                candles_1h.append(c)
         for c in (raw4h or []):
             symbol_candles_4h[sym].append(c)
-            if sym == PRIMARY_SYMBOL:
-                candles_4h.append(c)
         for c in (raw1d or []):
             symbol_candles_1d[sym].append(c)
-            if sym == PRIMARY_SYMBOL:
-                candles_1d.append(c)
 
         macro = compute_macro_structure(sym)
         bias_str = macro.get("macro_bias", "NEUTRAL")
@@ -2701,6 +2700,7 @@ async def binance_ws():
         streams.extend([f"{sl}@trade", f"{sl}@bookTicker", f"{sl}@depth20@500ms", f"{sl}@kline_5m", f"{sl}@kline_15m", f"{sl}@kline_1h"])
     url = f"wss://fstream.binance.com/stream?streams={'/'.join(streams)}"
 
+    _last_queued_5m_ts: dict[str, int] = {}
     while True:
         try:
             # Resilient ping and buffer settings so rapid price spikes never drop connection
@@ -2765,13 +2765,15 @@ async def binance_ws():
                                 "volume":    float(k["v"]),
                                 "timestamp": int(k["t"]),
                             }
-                            buf5 = symbol_candles_5m.get(sym)
-                            if buf5 is not None and buf5 and buf5[-1].get("timestamp") == c5["timestamp"]:
+                            if _last_queued_5m_ts.get(sym) == c5["timestamp"]:
                                 continue
+                            _last_queued_5m_ts[sym] = c5["timestamp"]
+                            buf5 = symbol_candles_5m.get(sym)
                             if buf5 is not None:
-                                buf5.append(dict(c5))
-                            if sym == PRIMARY_SYMBOL:
-                                candles_5m.append(dict(c5))
+                                if buf5 and buf5[-1].get("timestamp") == c5["timestamp"]:
+                                    buf5[-1] = dict(c5)
+                                else:
+                                    buf5.append(dict(c5))
 
                             if _candle_queue is not None:
                                 try:
@@ -2789,8 +2791,6 @@ async def binance_ws():
                             buf15 = symbol_candles_15m.get(sym)
                             if buf15 is not None and (not buf15 or buf15[-1].get("timestamp") != c15["timestamp"]):
                                 buf15.append(dict(c15))
-                                if sym == PRIMARY_SYMBOL:
-                                    candles_15m.append(dict(c15))
                     elif "@kline_1h" in st:
                         k = pay.get("k", {})
                         if k.get("x"):
@@ -2802,8 +2802,6 @@ async def binance_ws():
                             buf1h = symbol_candles_1h.get(sym)
                             if buf1h is not None and (not buf1h or buf1h[-1].get("timestamp") != c1h["timestamp"]):
                                 buf1h.append(dict(c1h))
-                                if sym == PRIMARY_SYMBOL:
-                                    candles_1h.append(dict(c1h))
                                 acc4h = symbol_acc_1h_4h.get(sym)
                                 if acc4h is not None:
                                     acc4h.append(dict(c1h))
@@ -2813,8 +2811,6 @@ async def binance_ws():
                                                "volume": sum(x["volume"] for x in acc4h), "timestamp": int(k["t"])}
                                         acc4h.clear()
                                         symbol_candles_4h[sym].append(dict(c4h))
-                                        if sym == PRIMARY_SYMBOL:
-                                            candles_4h.append(dict(c4h))
                                         acc1d = symbol_acc_4h_1d.get(sym)
                                         if acc1d is not None:
                                             acc1d.append(dict(c4h))
@@ -2824,8 +2820,6 @@ async def binance_ws():
                                                        "volume": sum(x["volume"] for x in acc1d), "timestamp": int(k["t"])}
                                                 acc1d.clear()
                                                 symbol_candles_1d[sym].append(dict(c1d))
-                                                if sym == PRIMARY_SYMBOL:
-                                                    candles_1d.append(dict(c1d))
                             compute_macro_structure(sym)
         except Exception:
             for s in TRADED_SYMBOLS:
@@ -3795,6 +3789,7 @@ async def main():
                 symbol_live_probs[sym]["regime"] = r_val
                 if sym == PRIMARY_SYMBOL:
                     regime_info["current"] = r_val
+            _sync_live_probs(sym, eng)
             try:
                 buf = eng.live_store.get_buffer_as_df()
                 if not buf.empty:
