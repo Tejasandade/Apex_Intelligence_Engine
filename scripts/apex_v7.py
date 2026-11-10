@@ -1889,6 +1889,11 @@ def _sync_live_probs(sym: str, eng: LiveSignalEngine) -> None:
             symbol_live_probs[sym]["short"]   = round(ps, 4)
             symbol_live_probs[sym]["updated"] = True
             symbol_live_probs[sym]["regime"]  = r_val
+        if sym in symbol_regime_info:
+            symbol_regime_info[sym]["current"] = r_val
+            last_atr = float(getattr(eng, "_last_atr", 0.0))
+            if last_atr > 0:
+                symbol_regime_info[sym]["atr"] = round(last_atr, 2)
         if sym == PRIMARY_SYMBOL:
             live_probs["long"]    = round(pl, 4)
             live_probs["short"]   = round(ps, 4)

@@ -208,6 +208,7 @@ class LiveSignalEngine:
         self._pending_signals: dict[str, TradingSignal] = {}
         self._halted = False  # True if critical decay detected
         self._last_adx: float = 0.0  # Track for dashboard
+        self._last_atr: float = 0.0
         self._last_prob_long: float = 0.5
         self._last_prob_short: float = 0.5
         self._last_regime: str = "UNKNOWN"
@@ -310,6 +311,7 @@ class LiveSignalEngine:
         adx = float(features.iloc[0].get("ADX", 0.0))
         chop = float(features.iloc[0].get("CHOP", 50.0))
         self._last_adx = adx  # Track for dashboard
+        self._last_atr = atr
 
         if atr <= 0:
             return None
