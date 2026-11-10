@@ -637,9 +637,26 @@ def load_journal():
         account["best"]  = max(t.get("pnl_usd",0) for t in closed)
         account["worst"] = min(t.get("pnl_usd",0) for t in closed)
         streak = 0
+        next_loss_dt = None
         for t in reversed(closed):
-            if t["outcome"] == "LOSS": streak += 1
-            else: break
+            if t["outcome"] != "LOSS":
+                break
+            ts_str = t.get("exit_ts") or t.get("open_ts") or ""
+            cur_dt = None
+            if ts_str:
+                try:
+                    cur_dt = datetime.datetime.fromisoformat(str(ts_str).replace("Z", "+00:00"))
+                    if cur_dt.tzinfo is not None:
+                        cur_dt = cur_dt.astimezone().replace(tzinfo=None)
+                except Exception:
+                    cur_dt = None
+            # Break loss streak when two losses are separated by > LOSS_COOLDOWN_3 (2h) reset window
+            if next_loss_dt is not None and cur_dt is not None:
+                if (next_loss_dt - cur_dt).total_seconds() > LOSS_COOLDOWN_3:
+                    break
+            streak += 1
+            if cur_dt is not None:
+                next_loss_dt = cur_dt
         account["consecutive_losses"] = streak
         if streak < 2 and "consecutive losses" in account.get("halt_reason", "").lower():
             account["halted"] = False; account["halt_reason"] = ""; account["halt_until"] = 0.0
@@ -2368,11 +2385,11 @@ def prewarm():
         prop_firm_manager.window_key = win_key
         prop_firm_manager.window_trades = len(window_trades)
         prop_firm_manager.save_state()
-    state_manager.save_state(portfolio, account)
 
     # Reset stale consecutive loss streak if last loss was more than cooldown period ago (> 2 hours)
     if account.get("last_loss_time", 0) > 0 and (time.time() - account["last_loss_time"]) > LOSS_COOLDOWN_3:
         account["consecutive_losses"] = 0
+    state_manager.save_state(portfolio, account)
 
     print(f"  ✓ Session Reconciled: {account['trades_today']} trades recorded in active session (since {session_start_iso})")
 
