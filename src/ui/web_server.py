@@ -1055,7 +1055,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
           <thead>
             <tr>
               <th>ID</th>
-              <th>Time (UTC)</th>
+              <th>Time</th>
+              <th>Symbol</th>
               <th>Action</th>
               <th>Entry Price</th>
               <th>Exit Price</th>
@@ -1681,30 +1682,34 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
           const pnlVal = info.unrealized_pnl || 0;
           const pnlSign = pnlVal >= 0 ? '+' : '';
-          document.getElementById(`pos-pnl-${sym}`).textContent = isPosition ? `PnL: ${pnlSign}$${pnlVal.toFixed(2)}` : 'Scanning 5m setup...';
+          const pnlEl = document.getElementById(`pos-pnl-${sym}`);
+          pnlEl.textContent = isPosition ? `PnL: ${pnlSign}$${pnlVal.toFixed(2)}` : 'Scanning 5m setup...';
+          pnlEl.style.color = isPosition ? (pnlVal > 0 ? 'var(--green)' : (pnlVal < 0 ? 'var(--red)' : 'var(--text-primary)')) : '';
+          pnlEl.style.fontWeight = isPosition ? '700' : '';
           document.getElementById(`pos-close-${sym}`).style.display = isPosition ? 'inline-block' : 'none';
 
-          // Quant Center-Zero Delta Gauge
-          const pLong = (info.prob_long || 0.5);
-          const pShort = 1.0 - pLong;
+          // Quant Center-Zero Delta Gauge (uses real independent prob_long & prob_short edge across all symbols)
+          const pLong = Number(info.prob_long ?? 0.5);
+          const pShort = Number(info.prob_short ?? (1.0 - pLong));
           document.getElementById(`prob-long-${sym}`).textContent = `P(L) ${pLong.toFixed(2)}`;
           document.getElementById(`prob-short-${sym}`).textContent = `P(S) ${pShort.toFixed(2)}`;
 
           const gLong = document.getElementById(`gauge-long-${sym}`);
           const gShort = document.getElementById(`gauge-short-${sym}`);
           const bTag = document.getElementById(`bias-tag-${sym}`);
+          const edge = pLong - pShort;
 
-          if (pLong >= 0.54) {
-            const deltaPct = Math.min(50, (pLong - 0.50) * 200);
+          if (edge >= 0.015) {
+            const deltaPct = Math.min(50, Math.max(4, edge * 250));
             gLong.style.width = `${deltaPct}%`;
             gShort.style.width = `0%`;
-            bTag.textContent = `+${Math.round(deltaPct * 2)}% BULLISH BIAS`;
+            bTag.textContent = `+${Math.round(deltaPct * 2)}% ${edge >= 0.04 ? 'BULLISH BIAS' : 'SLIGHT BULL'}`;
             bTag.style.color = 'var(--green)';
-          } else if (pShort >= 0.54) {
-            const deltaPct = Math.min(50, (pShort - 0.50) * 200);
+          } else if (edge <= -0.015) {
+            const deltaPct = Math.min(50, Math.max(4, Math.abs(edge) * 250));
             gShort.style.width = `${deltaPct}%`;
             gLong.style.width = `0%`;
-            bTag.textContent = `-${Math.round(deltaPct * 2)}% BEARISH BIAS`;
+            bTag.textContent = `-${Math.round(deltaPct * 2)}% ${edge <= -0.04 ? 'BEARISH BIAS' : 'SLIGHT BEAR'}`;
             bTag.style.color = 'var(--red)';
           } else {
             gLong.style.width = `0%`;
@@ -1791,15 +1796,17 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         const jBody = document.getElementById('journal-tbody');
         jBody.innerHTML = '';
         if (jList.length === 0) {
-          jBody.innerHTML = '<tr><td colspan="7" style="text-align:center; color:var(--text-dim); padding:16px;">No closed trades recorded yet.</td></tr>';
+          jBody.innerHTML = '<tr><td colspan="8" style="text-align:center; color:var(--text-dim); padding:16px;">No closed trades recorded yet.</td></tr>';
         } else {
           jList.slice(0, 15).forEach(t => {
             const pnl = Number(t.pnl_usd || 0);
             const pnlTag = pnl >= 0 ? `<span class="pill-tag bull">+$${pnl.toFixed(2)}</span>` : `<span class="pill-tag bear">-$${Math.abs(pnl).toFixed(2)}</span>`;
+            const symLabel = (t.symbol || '—').replace('USDT', '');
             const row = document.createElement('tr');
             row.innerHTML = `
               <td style="color:var(--text-muted);">#${t.id}</td>
               <td style="color:var(--text-secondary);">${t.open_ts}</td>
+              <td style="font-weight:600; color:var(--text-primary);">${symLabel}</td>
               <td style="font-weight:600;">${t.action}</td>
               <td>$${Number(t.entry_price).toLocaleString()}</td>
               <td>$${Number(t.exit_price).toLocaleString()}</td>
@@ -1935,9 +1942,9 @@ class ApexWebServer:
         try:
             state = self.state_provider()
             journal = state.get("journal", [])
-            lines = ["ID,Time,Action,Entry Price,Exit Price,PnL USD,Exit Reason"]
+            lines = ["ID,Time,Symbol,Action,Entry Price,Exit Price,PnL USD,Exit Reason"]
             for t in journal:
-                lines.append(f"{t.get('id', '')},{t.get('open_ts', '')},{t.get('action', '')},{t.get('entry_price', 0.0)},{t.get('exit_price', 0.0)},{t.get('pnl_usd', 0.0)},\"{t.get('exit_reason', '')}\"")
+                lines.append(f"{t.get('id', '')},{t.get('open_ts', '')},{t.get('symbol', '')},{t.get('action', '')},{t.get('entry_price', 0.0)},{t.get('exit_price', 0.0)},{t.get('pnl_usd', 0.0)},\"{t.get('exit_reason', '')}\"")
             csv_content = "\n".join(lines)
             return web.Response(
                 text=csv_content,

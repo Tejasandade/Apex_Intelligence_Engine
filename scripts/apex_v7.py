@@ -288,6 +288,7 @@ def _create_symbol_portfolio(sym: str) -> dict:
         "council_score": 0.0, "regime_entry": "",
         "source": "", "highest_fav": 0.0,
         "broker_ticket": "", "broker_pnl": 0.0,
+        "broker_entry_price": 0.0, "broker_offset": 0.0,
     }
 
 portfolios: dict[str, dict] = {sym: _create_symbol_portfolio(sym) for sym in TRADED_SYMBOLS}
@@ -1245,7 +1246,7 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL, bypass_retest: b
             return
 
     # ── ANTI-TRAP GUARD: Dual Advisor Veto ──
-    v_dict = getattr(signal, "metadata", {}).get("council_votes", {})
+    v_dict = getattr(signal, "council_votes", None) or getattr(signal, "metadata", {}).get("council_votes", {})
     if v_dict:
         mom_vote = v_dict.get("Momentum", {}).get("vote")
         vol_vote = v_dict.get("Volume", {}).get("vote")
@@ -1466,6 +1467,15 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL, bypass_retest: b
                 )
                 if oid:
                     port["broker_ticket"] = str(oid)
+                    try:
+                        if hasattr(_active_broker, "get_open_position"):
+                            pos_info = await _active_broker.get_open_position(ticket=int(oid))
+                            if pos_info and float(pos_info.get("price_open", 0.0)) > 0:
+                                b_entry = float(pos_info["price_open"])
+                                port["broker_entry_price"] = b_entry
+                                port["broker_offset"] = round(b_entry - entry, 4)
+                    except Exception:
+                        pass
                     trade_log.append(f"[{b_name}] {sym} Order placed: {oid}")
                     telegram(f"{b_name} ORDER {side} {qty} {sym} | SL:{sl_price:.1f} TP:{tp2:.1f} | id:{oid}")
                     save_journal()
@@ -1623,10 +1633,39 @@ def _check_exit_for_symbol(sym: str):
                     pass
 
         port.update({"position": "FLAT", "direction": None,
-                     "unrealized_pnl": 0.0, "banked_pnl": 0.0, "phase": 0, "broker_ticket": "", "broker_pnl": 0.0})
+                     "unrealized_pnl": 0.0, "banked_pnl": 0.0, "phase": 0,
+                     "broker_ticket": "", "broker_pnl": 0.0,
+                     "broker_entry_price": 0.0, "broker_offset": 0.0})
         if sym == PRIMARY_SYMBOL:
             portfolio.update(port)
         state_manager.save_state(portfolio, account)   # APEX v7.2: crash-resume
+
+    def _schedule_broker_sync(ticket_id, binance_sl: float, binance_tp: float | None = None, part_vol: float = 0.0, err_label: str = ""):
+        """Push trailing/BE stop updates (and optional partial close) offset to broker's actual fill quote."""
+        if not (DEMO_MODE and _active_broker is not None and ticket_id):
+            return
+        offset = float(port.get("broker_offset", 0.0))
+        sl_adj = round(binance_sl + offset, 2)
+        tp_adj = round(binance_tp + offset, 2) if binance_tp is not None else None
+
+        async def _run_sync():
+            try:
+                if part_vol >= 0.01 and hasattr(_active_broker, "partial_close_position"):
+                    await _active_broker.partial_close_position(int(ticket_id), volume=part_vol)
+                if hasattr(_active_broker, "modify_position_stops"):
+                    if tp_adj is not None:
+                        await _active_broker.modify_position_stops(int(ticket_id), new_sl=sl_adj, new_tp=tp_adj)
+                    else:
+                        await _active_broker.modify_position_stops(int(ticket_id), new_sl=sl_adj)
+            except Exception as _be_err:
+                if err_label:
+                    trade_log.append(f"[{BROKER_TYPE.upper()}] {sym} {err_label}: {_be_err}")
+
+        try:
+            import asyncio as _aio
+            _aio.get_event_loop().create_task(_run_sync())
+        except Exception:
+            pass
 
     sl = port["sl_price"]
     tp1 = port["tp1_price"]
@@ -1668,18 +1707,7 @@ def _check_exit_for_symbol(sym: str):
                     new_sl = entry + fee_buf if direction == "LONG" else entry - fee_buf
                     port["sl_price"] = round(new_sl, 1)
                     port["risk_tier"] = 2
-                    if DEMO_MODE and _active_broker is not None and t_id:
-                        async def _exec_modify_news(ticket_id, sl_v, tp_v):
-                            try:
-                                if hasattr(_active_broker, "modify_position_stops"):
-                                    await _active_broker.modify_position_stops(int(ticket_id), new_sl=sl_v, new_tp=tp_v)
-                            except Exception:
-                                pass
-                        try:
-                            import asyncio as _aio
-                            _aio.get_event_loop().create_task(_exec_modify_news(t_id, port["sl_price"], port["tp2_price"]))
-                        except Exception:
-                            pass
+                    _schedule_broker_sync(t_id, port["sl_price"], port["tp2_price"])
         except Exception:
             pass
 
@@ -1688,54 +1716,32 @@ def _check_exit_for_symbol(sym: str):
         if direction == "LONG" and cur <= sl: close(cur, "STOP LOSS"); return
         if direction == "SHORT" and cur >= sl: close(cur, "STOP LOSS"); return
 
-    # ── DYNAMIC TIER 1: Risk Reduction at +0.75R (Tighten SL from -1.0R to -0.20R) ──
-    if port.get("risk_tier", 0) < 1 and r_mult >= 0.75:
-        new_sl = entry - sl_dist * 0.20 if direction == "LONG" else entry + sl_dist * 0.20
+    # ── DYNAMIC TIER 1: Risk Reduction at +0.90R (Tighten SL to -0.35R with breathing room for pullbacks) ──
+    if port.get("risk_tier", 0) < 1 and r_mult >= 0.90:
+        new_sl = entry - sl_dist * 0.35 if direction == "LONG" else entry + sl_dist * 0.35
         port["sl_price"] = round(new_sl, 1)
         port["risk_tier"] = 1
-        log_msg = f"[{now_str}] {sym} TIER 1 (+0.75R): Risk reduced 80% | SL tightened to -0.20R @${new_sl:,.1f}"
+        log_msg = f"[{now_str}] {sym} TIER 1 (+0.90R): Risk reduced 65% | SL tightened to -0.35R @${new_sl:,.1f}"
         trade_log.append(log_msg)
         if HEADLESS: print(f"  ⚡ {log_msg}", flush=True)
-        send_challenge_alert("RISK REDUCED 80%", {
+        send_challenge_alert("RISK REDUCED 65%", {
             "symbol": sym, "action": direction, "price": cur, "new_sl": port["sl_price"],
         })
-        if DEMO_MODE and _active_broker is not None and t_id:
-            async def _exec_modify_t1(ticket_id, sl_v, tp_v):
-                try:
-                    if hasattr(_active_broker, "modify_position_stops"):
-                        await _active_broker.modify_position_stops(int(ticket_id), new_sl=sl_v, new_tp=tp_v)
-                except Exception:
-                    pass
-            try:
-                import asyncio as _aio
-                _aio.get_event_loop().create_task(_exec_modify_t1(t_id, port["sl_price"], port["tp2_price"]))
-            except Exception:
-                pass
+        _schedule_broker_sync(t_id, port["sl_price"], port["tp2_price"])
 
-    # ── DYNAMIC TIER 2: Break-Even Lock at +1.1R ──
-    if port.get("risk_tier", 0) < 2 and r_mult >= 1.1:
+    # ── DYNAMIC TIER 2: Break-Even Lock at +1.15R ──
+    if port.get("risk_tier", 0) < 2 and r_mult >= 1.15:
         fee_buf = entry * (ROUNDTRIP_BPS * 1.5 / 10000.0)
         new_sl = entry + fee_buf if direction == "LONG" else entry - fee_buf
         port["sl_price"] = round(new_sl, 1)
         port["risk_tier"] = 2
-        log_msg = f"[{now_str}] {sym} TIER 2 (+1.1R): SL moved to Break-Even + fees @${new_sl:,.1f} | RISK FREE"
+        log_msg = f"[{now_str}] {sym} TIER 2 (+1.15R): SL moved to Break-Even + fees @${new_sl:,.1f} | RISK FREE"
         trade_log.append(log_msg)
         if HEADLESS: print(f"  ⚡ {log_msg}", flush=True)
         send_challenge_alert("BREAK-EVEN LOCKED", {
             "symbol": sym, "action": direction, "price": cur, "new_sl": port["sl_price"],
         })
-        if DEMO_MODE and _active_broker is not None and t_id:
-            async def _exec_modify_t2(ticket_id, sl_v, tp_v):
-                try:
-                    if hasattr(_active_broker, "modify_position_stops"):
-                        await _active_broker.modify_position_stops(int(ticket_id), new_sl=sl_v, new_tp=tp_v)
-                except Exception:
-                    pass
-            try:
-                import asyncio as _aio
-                _aio.get_event_loop().create_task(_exec_modify_t2(t_id, port["sl_price"], port["tp2_price"]))
-            except Exception:
-                pass
+        _schedule_broker_sync(t_id, port["sl_price"], port["tp2_price"])
 
     # ── DYNAMIC EARLY PROFIT HARVEST: Runner-Preserving OFI Reversal Protection ──
     if r_mult >= 0.85 and is_past_min_hold:
@@ -1774,19 +1780,7 @@ def _check_exit_for_symbol(sym: str):
                         part_vol = round(cur_vol * part_frac, 2)
                         min_step = 0.02 if "ETH" in sym else 0.01
                         part_vol = max(min_step, part_vol)
-                        async def _exec_harvest_partial(ticket_id, vol, sl_v):
-                            try:
-                                if hasattr(_active_broker, "partial_close_position") and vol >= 0.01:
-                                    await _active_broker.partial_close_position(int(ticket_id), volume=vol)
-                                if hasattr(_active_broker, "modify_position_stops"):
-                                    await _active_broker.modify_position_stops(int(ticket_id), new_sl=sl_v)
-                            except Exception:
-                                pass
-                        try:
-                            import asyncio as _aio
-                            _aio.get_event_loop().create_task(_exec_harvest_partial(t_id, part_vol, port["sl_price"]))
-                        except Exception:
-                            pass
+                        _schedule_broker_sync(t_id, port["sl_price"], part_vol=part_vol)
                 elif port.get("phase", 1) == 2 and r_mult >= 2.5:
                     # In Phase 2, only close runner if it is already past +2.5R
                     close(cur, f"OFI RUNNER HARVEST (OFI {ofi_v:+.2f} at +{r_mult:.1f}R)")
@@ -1826,21 +1820,7 @@ def _check_exit_for_symbol(sym: str):
                 part_vol = round(cur_vol * part_frac, 2)
                 min_step = 0.02 if "ETH" in sym else 0.01
                 part_vol = max(min_step, part_vol)
-                new_be_sl = port["sl_price"]
-                new_tp2 = port["tp2_price"]
-                async def _exec_broker_partial(ticket_id, vol, sl_v, tp_v):
-                    try:
-                        if hasattr(_active_broker, "partial_close_position") and vol >= 0.01:
-                            await _active_broker.partial_close_position(int(ticket_id), volume=vol)
-                        if hasattr(_active_broker, "modify_position_stops"):
-                            await _active_broker.modify_position_stops(int(ticket_id), new_sl=sl_v, new_tp=tp_v)
-                    except Exception as _e:
-                        trade_log.append(f"[{BROKER_TYPE.upper()}] {sym} TP1 sync err: {_e}")
-                try:
-                    import asyncio as _aio
-                    _aio.get_event_loop().create_task(_exec_broker_partial(t_id, part_vol, new_be_sl, new_tp2))
-                except Exception:
-                    pass
+                _schedule_broker_sync(t_id, port["sl_price"], port["tp2_price"], part_vol=part_vol, err_label="TP1 sync err")
 
     # ── DYNAMIC TIER 4: Dynamic Runner Chandelier Trail + Full TP2 Target Exit ──
     if port["phase"] == 2:
@@ -1849,41 +1829,22 @@ def _check_exit_for_symbol(sym: str):
         else:
             trail_buf = max(atr * 2.0, 10.0 if "ETH" in sym else (5.0 if "GOLD" in sym else 160.0))
 
+        ratchet_step = 2.0 if "ETH" in sym else 25.0
         if direction == "LONG":
             new_sl = cur - trail_buf
             if new_sl > port["sl_price"]:
                 old_sl = port["sl_price"]
                 port["sl_price"] = round(new_sl, 1)
-                if (new_sl - old_sl) >= (2.0 if "ETH" in sym else 25.0) and DEMO_MODE and _active_broker is not None and t_id:
-                    async def _ratchet_sl(ticket_id, sl_v, tp_v):
-                        try:
-                            if hasattr(_active_broker, "modify_position_stops"):
-                                await _active_broker.modify_position_stops(int(ticket_id), new_sl=sl_v, new_tp=tp_v)
-                        except Exception:
-                            pass
-                    try:
-                        import asyncio as _aio
-                        _aio.get_event_loop().create_task(_ratchet_sl(t_id, port["sl_price"], port["tp2_price"]))
-                    except Exception:
-                        pass
+                if (new_sl - old_sl) >= ratchet_step:
+                    _schedule_broker_sync(t_id, port["sl_price"], port["tp2_price"])
             if cur >= tp2: close(cur, f"FULL TP2 ({port.get('tp2_rr', 3.5):.1f}R [{port.get('trade_mode','SCALP')}])"); return
         else:
             new_sl = cur + trail_buf
             if new_sl < port["sl_price"]:
                 old_sl = port["sl_price"]
                 port["sl_price"] = round(new_sl, 1)
-                if (old_sl - new_sl) >= (2.0 if "ETH" in sym else 25.0) and DEMO_MODE and _active_broker is not None and t_id:
-                    async def _ratchet_sl(ticket_id, sl_v, tp_v):
-                        try:
-                            if hasattr(_active_broker, "modify_position_stops"):
-                                await _active_broker.modify_position_stops(int(ticket_id), new_sl=sl_v, new_tp=tp_v)
-                        except Exception:
-                            pass
-                    try:
-                        import asyncio as _aio
-                        _aio.get_event_loop().create_task(_ratchet_sl(t_id, port["sl_price"], port["tp2_price"]))
-                    except Exception:
-                        pass
+                if (old_sl - new_sl) >= ratchet_step:
+                    _schedule_broker_sync(t_id, port["sl_price"], port["tp2_price"])
             if cur <= tp2: close(cur, f"FULL TP2 ({port.get('tp2_rr', 3.5):.1f}R [{port.get('trade_mode','SCALP')}])"); return
 
     # 4. Time decay & Structural 1H Reversal Invalidation
@@ -2098,21 +2059,7 @@ def process_tick_for_symbol(sym: str, price: float, qty: float, is_buyer_maker: 
                 live_candle.update(live_c)
 
         if now >= cur_min + 60:
-            acc1 = symbol_acc_1m.get(sym, [])
-            acc1.append(dict(live_c))
-            if len(acc1) >= 5:
-                c5 = {"open": acc1[0]["open"], "high": max(x["high"] for x in acc1),
-                      "low": min(x["low"] for x in acc1), "close": acc1[-1]["close"],
-                      "volume": sum(x["volume"] for x in acc1), "timestamp": int(now * 1000)}
-                acc1.clear()
-                symbol_candles_5m[sym].append(dict(c5))
-                if sym == PRIMARY_SYMBOL:
-                    candles_5m.append(dict(c5))
-                if _candle_queue is not None:
-                    try:
-                        _candle_queue.put_nowait((sym, c5))
-                    except asyncio.QueueFull:
-                        pass
+            # 1m rollover updates live_candle telemetry; closed 5m bars arrive authoritatively via @kline_5m
             symbol_cur_min_ts[sym] = int(now // 60) * 60
             live_c.update({"open": price, "high": price, "low": price, "close": price, "volume": 0.0, "timestamp": symbol_cur_min_ts[sym] * 1000})
             if sym == PRIMARY_SYMBOL:
@@ -2818,57 +2765,13 @@ async def binance_ws():
                                 "volume":    float(k["v"]),
                                 "timestamp": int(k["t"]),
                             }
-                            # Update symbol buffers
-                            if sym in symbol_candles_5m:
-                                symbol_candles_5m[sym].append(dict(c5))
+                            buf5 = symbol_candles_5m.get(sym)
+                            if buf5 is not None and buf5 and buf5[-1].get("timestamp") == c5["timestamp"]:
+                                continue
+                            if buf5 is not None:
+                                buf5.append(dict(c5))
                             if sym == PRIMARY_SYMBOL:
                                 candles_5m.append(dict(c5))
-
-                            acc15 = symbol_acc_5m_15m.get(sym)
-                            if acc15 is not None:
-                                acc15.append(dict(c5))
-                                if len(acc15) >= 3:
-                                    c15 = {"open": acc15[0]["open"], "high": max(x["high"] for x in acc15),
-                                           "low": min(x["low"] for x in acc15), "close": acc15[-1]["close"],
-                                           "volume": sum(x["volume"] for x in acc15), "timestamp": int(k["t"])}
-                                    acc15.clear()
-                                    symbol_candles_15m[sym].append(dict(c15))
-                                    if sym == PRIMARY_SYMBOL:
-                                        candles_15m.append(dict(c15))
-                                    acc1h = symbol_acc_15m_1h.get(sym)
-                                    if acc1h is not None:
-                                        acc1h.append(dict(c15))
-                                        if len(acc1h) >= 4:
-                                            c1h = {"open": acc1h[0]["open"], "high": max(x["high"] for x in acc1h),
-                                                   "low": min(x["low"] for x in acc1h), "close": acc1h[-1]["close"],
-                                                   "volume": sum(x["volume"] for x in acc1h), "timestamp": int(k["t"])}
-                                            acc1h.clear()
-                                            symbol_candles_1h[sym].append(dict(c1h))
-                                            if sym == PRIMARY_SYMBOL:
-                                                candles_1h.append(dict(c1h))
-                                            acc4h = symbol_acc_1h_4h.get(sym)
-                                            if acc4h is not None:
-                                                acc4h.append(dict(c1h))
-                                                if len(acc4h) >= 4:
-                                                    c4h = {"open": acc4h[0]["open"], "high": max(x["high"] for x in acc4h),
-                                                           "low": min(x["low"] for x in acc4h), "close": acc4h[-1]["close"],
-                                                           "volume": sum(x["volume"] for x in acc4h), "timestamp": int(k["t"])}
-                                                    acc4h.clear()
-                                                    symbol_candles_4h[sym].append(dict(c4h))
-                                                    if sym == PRIMARY_SYMBOL:
-                                                        candles_4h.append(dict(c4h))
-                                                    acc1d = symbol_acc_4h_1d.get(sym)
-                                                    if acc1d is not None:
-                                                        acc1d.append(dict(c4h))
-                                                        if len(acc1d) >= 6:
-                                                            c1d = {"open": acc1d[0]["open"], "high": max(x["high"] for x in acc1d),
-                                                                   "low": min(x["low"] for x in acc1d), "close": acc1d[-1]["close"],
-                                                                   "volume": sum(x["volume"] for x in acc1d), "timestamp": int(k["t"])}
-                                                            acc1d.clear()
-                                                            symbol_candles_1d[sym].append(dict(c1d))
-                                                            if sym == PRIMARY_SYMBOL:
-                                                                candles_1d.append(dict(c1d))
-                                                    compute_macro_structure(sym)
 
                             if _candle_queue is not None:
                                 try:
@@ -2883,10 +2786,11 @@ async def binance_ws():
                                 "low": float(k["l"]), "close": float(k["c"]),
                                 "volume": float(k["v"]), "timestamp": int(k["t"]),
                             }
-                            if sym in symbol_candles_15m:
-                                symbol_candles_15m[sym].append(dict(c15))
-                            if sym == PRIMARY_SYMBOL:
-                                candles_15m.append(dict(c15))
+                            buf15 = symbol_candles_15m.get(sym)
+                            if buf15 is not None and (not buf15 or buf15[-1].get("timestamp") != c15["timestamp"]):
+                                buf15.append(dict(c15))
+                                if sym == PRIMARY_SYMBOL:
+                                    candles_15m.append(dict(c15))
                     elif "@kline_1h" in st:
                         k = pay.get("k", {})
                         if k.get("x"):
@@ -2895,10 +2799,33 @@ async def binance_ws():
                                 "low": float(k["l"]), "close": float(k["c"]),
                                 "volume": float(k["v"]), "timestamp": int(k["t"]),
                             }
-                            if sym in symbol_candles_1h:
-                                symbol_candles_1h[sym].append(dict(c1h))
-                            if sym == PRIMARY_SYMBOL:
-                                candles_1h.append(dict(c1h))
+                            buf1h = symbol_candles_1h.get(sym)
+                            if buf1h is not None and (not buf1h or buf1h[-1].get("timestamp") != c1h["timestamp"]):
+                                buf1h.append(dict(c1h))
+                                if sym == PRIMARY_SYMBOL:
+                                    candles_1h.append(dict(c1h))
+                                acc4h = symbol_acc_1h_4h.get(sym)
+                                if acc4h is not None:
+                                    acc4h.append(dict(c1h))
+                                    if len(acc4h) >= 4:
+                                        c4h = {"open": acc4h[0]["open"], "high": max(x["high"] for x in acc4h),
+                                               "low": min(x["low"] for x in acc4h), "close": acc4h[-1]["close"],
+                                               "volume": sum(x["volume"] for x in acc4h), "timestamp": int(k["t"])}
+                                        acc4h.clear()
+                                        symbol_candles_4h[sym].append(dict(c4h))
+                                        if sym == PRIMARY_SYMBOL:
+                                            candles_4h.append(dict(c4h))
+                                        acc1d = symbol_acc_4h_1d.get(sym)
+                                        if acc1d is not None:
+                                            acc1d.append(dict(c4h))
+                                            if len(acc1d) >= 6:
+                                                c1d = {"open": acc1d[0]["open"], "high": max(x["high"] for x in acc1d),
+                                                       "low": min(x["low"] for x in acc1d), "close": acc1d[-1]["close"],
+                                                       "volume": sum(x["volume"] for x in acc1d), "timestamp": int(k["t"])}
+                                                acc1d.clear()
+                                                symbol_candles_1d[sym].append(dict(c1d))
+                                                if sym == PRIMARY_SYMBOL:
+                                                    candles_1d.append(dict(c1d))
                             compute_macro_structure(sym)
         except Exception:
             for s in TRADED_SYMBOLS:
@@ -3122,6 +3049,7 @@ def get_dashboard_state() -> dict:
 
         journal_ui.append({
             "id": t.get("id", 0),
+            "symbol": sym_t,
             "open_ts": open_time_str,
             "action": t.get("action", ""),
             "entry_price": t.get("entry_price", 0.0),
@@ -3188,9 +3116,13 @@ def get_dashboard_state() -> dict:
         c5 = list(symbol_candles_5m.get(sym, []))
         ms = symbol_macro_structure.get(sym, {})
         trend_5m = "BULL" if (len(c5) >= 2 and float(c5[-1].get("close", 0)) >= float(c5[-2].get("close", 0))) else "BEAR"
-        spark = [round(float(c.get("close", 0.0)), 2) for c in c5[-16:]]
-        if not spark and _safe_price(sym, "ltp") > 0:
-            spark = [_safe_price(sym, "ltp")]
+        cur_ltp_val = _safe_price(sym, "ltp")
+        if len(c5) >= 15 and cur_ltp_val > 0:
+            spark = [round(float(c.get("close", 0.0)), 2) for c in c5[-15:]] + [round(cur_ltp_val, 2)]
+        else:
+            spark = [round(float(c.get("close", 0.0)), 2) for c in c5[-16:]]
+        if not spark and cur_ltp_val > 0:
+            spark = [round(cur_ltp_val, 2)]
 
         # Resolve active position status and self-heal from trade_journal / broker
         sym_port_obj = portfolios.get(sym, {})
@@ -3296,7 +3228,7 @@ def get_dashboard_state() -> dict:
                 "drawdown_pct": round(account.get("drawdown_pct", 0.0), 2),
                 "wins": account.get("wins", 0),
                 "losses": account.get("losses", 0),
-                "total": account.get("total_trades", 0),
+                "total": account.get("total", 0),
                 "win_rate": round(account.get("win_rate", 0.0), 1),
                 "profit_factor": round(account.get("profit_factor", 0.0), 2),
                 "trades_today": account.get("trades_today", 0),
@@ -3397,7 +3329,8 @@ def _do_close_symbol(sym: str, exit_profit: float, exit_price: float, reason: st
     save_journal()
     sym_port.update({"position": "FLAT", "direction": None,
                      "unrealized_pnl": 0.0, "banked_pnl": 0.0, "phase": 0,
-                     "broker_ticket": "", "broker_pnl": 0.0})
+                     "broker_ticket": "", "broker_pnl": 0.0,
+                     "broker_entry_price": 0.0, "broker_offset": 0.0})
     if sym == PRIMARY_SYMBOL:
         portfolio.update(sym_port)
     state_manager.save_state(portfolio, account)
