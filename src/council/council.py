@@ -123,8 +123,8 @@ class Council:
             VolumeAdvisor(weight=council_weights.get("weight_volume", 1.0)),
             RegimeAdvisor(weight=council_weights.get("weight_regime", 1.3)),
             SessionAdvisor(weight=council_weights.get("weight_session", 1.0)),
-            ExhaustionAdvisor(weight=2.0),
-            VelocityAdvisor(weight=2.5),  # High weight for strict channel-bottom veto
+            ExhaustionAdvisor(weight=1.6),
+            VelocityAdvisor(weight=1.4),  # Balanced ATR-normalized velocity guard
             self._cross_market_advisor,
             self._sentiment_advisor,
             self._risk_advisor,

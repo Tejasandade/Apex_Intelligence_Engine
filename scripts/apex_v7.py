@@ -193,24 +193,17 @@ MAX_SL_USD      = 800.0     # Never wider than $800
 def get_calibrated_threshold(symbol: str, regime: str = "UNKNOWN") -> float:
     """
     Asset-Calibrated Conviction Thresholds & Regime-Adaptive Sensitivity.
-    - BTC: baseline 0.58
-    - ETH: baseline 0.60 (higher noise on 5m)
-    - Gold / PAXG: baseline 0.59
-    - Trending high vol: -0.02 (allow clean momentum breakouts)
-    - Ranging low vol: +0.03 (prevent overtrading in dead chop)
-    - Ranging high vol: +0.01
-    - London/NY prime liquidity: -0.01
-    - Pacific low-liquidity: +0.02
+    Balanced to prevent both dead gridlock (0.68+) and low-edge spam (< 0.55).
     """
     sym = symbol.upper()
-    base = 0.62 if "ETH" in sym else 0.60
+    base = 0.59 if "ETH" in sym else 0.57
     reg_l = str(regime).lower()
     if "trending_high_vol" in reg_l:
         base -= 0.02
     elif "ranging_low_vol" in reg_l:
-        base += 0.08  # Strictly protect against dead low-vol chop
+        base += 0.03  # Reasonable chop protection (0.60-0.62) without locking out pre-breakouts
     elif "ranging_high_vol" in reg_l:
-        base += 0.04
+        base += 0.02
 
     s_name = session.get("name", "UNKNOWN")
     if s_name in ("LONDON", "NEW_YORK"):
@@ -222,7 +215,7 @@ def get_calibrated_threshold(symbol: str, regime: str = "UNKNOWN") -> float:
     if session.get("is_kill_zone", False):
         base -= 0.01
 
-    return round(float(np.clip(base, 0.55, 0.72)), 3)
+    return round(float(np.clip(base, 0.55, 0.65)), 3)
 
 # Risk
 BASE_RISK_PCT   = _rc("sizing", "min_allocation_pct", 0.010)   # from risk.yaml
@@ -819,32 +812,38 @@ def can_trade_symbol(symbol: str = SYMBOL, direction: str = "LONG", is_high_prob
         except Exception as e:
             logger.debug("gold_structure_check_error", error=str(e))
 
-    # ── Strict Multi-Timeframe Alignment Guard (4H and 1H Confluence) ──
-    # Prohibits fighting higher timeframe trends and shorting into intraday relief rallies.
+    # ── Dynamic Multi-Timeframe Alignment + Liquidity Reversal Allowance ──
+    # Blocks sloppy counter-trend entries, while dynamically permitting Sniper Top/Bottom Reversals
+    # when Liquidity Sweeps + Order Flow Imbalance confirm a turn BEFORE the lagging 1H EMA flips!
     macro = symbol_macro_structure.get(sym)
     if macro:
         trend_4h = str(macro.get("trend_4h", "NEUTRAL")).upper()
         trend_1h = str(macro.get("trend_1h", "NEUTRAL")).upper()
 
-        # 1. Direct Intraday Momentum Alignment: Never short into a 1H bull rally or long into a 1H selloff!
-        if dir_upper == "SHORT":
-            if "BULL" in trend_1h:
-                return False, f"MTF SHIELD: {sym} 1H is Bullish ({trend_1h}) — Shorts Prohibited into intraday upward momentum"
-            if "BULL" in trend_4h:
-                return False, f"MACRO SHIELD: {sym} 4H is Bullish ({trend_4h}) — Shorts Prohibited into higher-timeframe uptrend"
-        elif dir_upper == "LONG":
-            if "BEAR" in trend_1h:
-                return False, f"MTF SHIELD: {sym} 1H is Bearish ({trend_1h}) — Longs Prohibited into intraday downward momentum"
-            if "BEAR" in trend_4h:
-                return False, f"MACRO SHIELD: {sym} 4H is Bearish ({trend_4h}) — Longs Prohibited into higher-timeframe downtrend"
+        lev = liquidity_engine.get_levels(sym) if 'liquidity_engine' in globals() else {}
+        cur_obi = float(mkt.get("obi", 0.0))
+        cur_ofi = float(momentum_engines[sym].get_diagnostics().get("ofi", 0.0)) if sym in momentum_engines else 0.0
 
-        # 2. Counter-Trend Relief Rally Chop Shield:
-        # If 4H is Bearish but 1H is Bullish, price is in an active relief rally/short squeeze.
-        # Shorting into the bounce causes instant stop-outs. Stand down until 1H aligns with 4H!
-        if "BEAR" in trend_4h and "BULL" in trend_1h and dir_upper == "SHORT":
-            return False, f"CHOP SHIELD: {sym} in 1H Relief Rally against 4H Bear — Shorts paused until 1H aligns"
-        if "BULL" in trend_4h and "BEAR" in trend_1h and dir_upper == "LONG":
-            return False, f"CHOP SHIELD: {sym} in 1H Pullback against 4H Bull — Longs paused until 1H aligns"
+        has_sweep_turn = (
+            (dir_upper == "SHORT" and (lev.get("sweep_bearish") or lev.get("breakout_bearish")))
+            or (dir_upper == "LONG" and (lev.get("sweep_bullish") or lev.get("breakout_bullish")))
+        )
+        has_flow_turn = (
+            (dir_upper == "SHORT" and (cur_obi <= -0.15 or cur_ofi <= -0.25))
+            or (dir_upper == "LONG" and (cur_obi >= 0.15 or cur_ofi >= 0.25))
+        )
+        allow_counter_1h = (has_sweep_turn and has_flow_turn) or (is_high_prob and has_flow_turn)
+
+        if dir_upper == "SHORT":
+            if "BULL" in trend_1h and not allow_counter_1h:
+                return False, f"MTF SHIELD: {sym} 1H is Bullish ({trend_1h}) without Sweep/OFI turn confirmation — Shorts paused"
+            if "BULL" in trend_4h and not (has_sweep_turn and is_high_prob and has_flow_turn):
+                return False, f"MACRO SHIELD: {sym} 4H is Bullish ({trend_4h}) — Shorts Prohibited without Grade A+ sweep turn"
+        elif dir_upper == "LONG":
+            if "BEAR" in trend_1h and not allow_counter_1h:
+                return False, f"MTF SHIELD: {sym} 1H is Bearish ({trend_1h}) without Sweep/OFI turn confirmation — Longs paused"
+            if "BEAR" in trend_4h and not (has_sweep_turn and is_high_prob and has_flow_turn):
+                return False, f"MACRO SHIELD: {sym} 4H is Bearish ({trend_4h}) — Longs Prohibited without Grade A+ sweep turn"
 
     return True, "CLEAR"
 
@@ -1082,55 +1081,57 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL):
             return
 
     # ── 5m V-REVERSAL, EXHAUSTION & OBI COUNTER-FLOW GUARD ──
-    # Prevents shorting the exact bottom of a crash into green bounce candles or positive OBI buyers!
+    # Blocks impulsive opposite bounce/dump candles and extreme >2.8 ATR rubber-band stretches,
+    # without blocking normal small pullback rejection candles.
     c5_list = list(symbol_candles_5m.get(sym, []))
     if len(c5_list) >= 20:
         last_c = c5_list[-1]
         prev_c = c5_list[-2]
         lc_o = float(last_c["open"])
         lc_c = float(last_c["close"])
-        pc_c = float(prev_c["close"])
+        pc_h = float(prev_c["high"])
+        pc_l = float(prev_c["low"])
         is_last_green = lc_c > lc_o
         is_last_red = lc_c < lc_o
 
-        # 1. Immediate 5m reversal candle opposition check
-        if direction == "SHORT" and is_last_green and (lc_c > pc_c or (lc_c - lc_o) > 0.25 * max(sym_atr, 1.0)):
-            log_msg = f"[{sym}] ANTI-REVERSAL GUARD: Cancelled SHORT at bottom into active green 5m bounce candle (O:{lc_o:,.2f} -> C:{lc_c:,.2f})"
+        # 1. Impulsive 5m reversal candle opposition check (only blocks strong engulfing reversal bars)
+        if direction == "SHORT" and is_last_green and (lc_c - lc_o) > 0.40 * max(sym_atr, 1.0) and lc_c > pc_h:
+            log_msg = f"[{sym}] ANTI-REVERSAL GUARD: Cancelled SHORT into strong impulsive green 5m reversal (O:{lc_o:,.2f} -> C:{lc_c:,.2f})"
             trade_log.append(log_msg)
             if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
             return
-        if direction == "LONG" and is_last_red and (lc_c < pc_c or (lc_o - lc_c) > 0.25 * max(sym_atr, 1.0)):
-            log_msg = f"[{sym}] ANTI-REVERSAL GUARD: Cancelled LONG at top into active red 5m selloff candle (O:{lc_o:,.2f} -> C:{lc_c:,.2f})"
+        if direction == "LONG" and is_last_red and (lc_o - lc_c) > 0.40 * max(sym_atr, 1.0) and lc_c < pc_l:
+            log_msg = f"[{sym}] ANTI-REVERSAL GUARD: Cancelled LONG into strong impulsive red 5m selloff (O:{lc_o:,.2f} -> C:{lc_c:,.2f})"
             trade_log.append(log_msg)
             if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
             return
 
-        # 2. Rubber-Band Exhaustion check (> 2.5 ATR stretch away from 5m EMA20)
+        # 2. Rubber-Band Exhaustion check (> 2.8 ATR stretch away from 5m EMA20)
         closes_20 = [float(x["close"]) for x in c5_list[-20:]]
         ema20 = closes_20[0]
         k = 2.0 / 21.0
         for val in closes_20[1:]:
             ema20 = (val - ema20) * k + ema20
         if sym_atr > 0:
-            if direction == "SHORT" and (ema20 - entry) > (2.5 * sym_atr):
-                log_msg = f"[{sym}] EXHAUSTION GUARD: Cancelled SHORT {ema20 - entry:.1f} pts (> 2.5 ATR) oversold below 5m EMA20"
+            if direction == "SHORT" and (ema20 - entry) > (2.8 * sym_atr):
+                log_msg = f"[{sym}] EXHAUSTION GUARD: Cancelled SHORT {ema20 - entry:.1f} pts (> 2.8 ATR) oversold below 5m EMA20"
                 trade_log.append(log_msg)
                 if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
                 return
-            if direction == "LONG" and (entry - ema20) > (2.5 * sym_atr):
-                log_msg = f"[{sym}] EXHAUSTION GUARD: Cancelled LONG {entry - ema20:.1f} pts (> 2.5 ATR) overbought above 5m EMA20"
+            if direction == "LONG" and (entry - ema20) > (2.8 * sym_atr):
+                log_msg = f"[{sym}] EXHAUSTION GUARD: Cancelled LONG {entry - ema20:.1f} pts (> 2.8 ATR) overbought above 5m EMA20"
                 trade_log.append(log_msg)
                 if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
                 return
 
     # 3. Real-time L2 Order Book Imbalance (OBI) Counter-Flow Guard
     cur_obi = float(mkt.get("obi", 0.0))
-    if direction == "SHORT" and cur_obi > 0.20:
+    if direction == "SHORT" and cur_obi > 0.25:
         log_msg = f"[{sym}] OBI COUNTER-FLOW GUARD: Cancelled SHORT into strong positive buy pressure (OBI: {cur_obi:+.3f})"
         trade_log.append(log_msg)
         if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
         return
-    if direction == "LONG" and cur_obi < -0.20:
+    if direction == "LONG" and cur_obi < -0.25:
         log_msg = f"[{sym}] OBI COUNTER-FLOW GUARD: Cancelled LONG into strong negative sell pressure (OBI: {cur_obi:+.3f})"
         trade_log.append(log_msg)
         if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)

@@ -1104,17 +1104,15 @@ class VelocityAdvisor(BaseAdvisor):
         # Calculate 20-EMA
         ema_20 = df_5m['close'].ewm(span=20).mean()
         
-        # Calculate Slope over 10 periods
+        # Calculate Slope over 10 periods normalized by asset's ATR (fair across Gold, BTC, ETH)
         ema_current = float(ema_20.iloc[-1])
         ema_past = float(ema_20.iloc[-10]) if len(ema_20) >= 10 else float(ema_20.iloc[0])
         
-        slope_pct = (ema_current - ema_past) / ema_past
-        abs_slope = abs(slope_pct)
+        slope_pct = (ema_current - ema_past) / max(ema_past, 1e-6)
+        slope_atr = abs(ema_current - ema_past) / max(atr, 1e-6)
         
-        # Define perfectly flat slope threshold (0.05% move over 10 candles)
-        FLAT_THRESHOLD = 0.0005
-        
-        is_flat = abs_slope < FLAT_THRESHOLD
+        # Market is only truly sideways dead chop if 10-bar EMA moved less than 0.18 ATR
+        is_flat = slope_atr < 0.18
         
         reasons = []
         veto = False
@@ -1122,22 +1120,22 @@ class VelocityAdvisor(BaseAdvisor):
         if is_flat:
             if direction == "SELL" and price < ema_current:
                 veto = True
-                reasons.append(f"Selling channel bottom in flat range (Slope: {slope_pct:.5f})")
+                reasons.append(f"Selling channel bottom in flat range (SlopeATR: {slope_atr:.2f})")
             elif direction == "BUY" and price > ema_current:
                 veto = True
-                reasons.append(f"Buying channel top in flat range (Slope: {slope_pct:.5f})")
+                reasons.append(f"Buying channel top in flat range (SlopeATR: {slope_atr:.2f})")
                 
         if veto:
             return self._make_vote(
-                Vote.REJECT, 1.0,
+                Vote.REJECT, 0.85,
                 f"VELOCITY VETO: {' | '.join(reasons)}",
-                {"slope_pct": slope_pct, "ema_20": ema_current}
+                {"slope_pct": slope_pct, "slope_atr": slope_atr, "ema_20": ema_current}
             )
 
         return self._make_vote(
             Vote.ABSTAIN, 0.0,
-            f"Velocity is sufficient ({slope_pct:.5f})",
-            {"slope_pct": slope_pct}
+            f"Velocity sufficient ({slope_atr:.2f} ATR)",
+            {"slope_pct": slope_pct, "slope_atr": slope_atr}
         )
 
 
