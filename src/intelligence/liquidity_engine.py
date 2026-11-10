@@ -44,6 +44,9 @@ class LiquidityEngine:
             "sweep_bullish": False,  # Swept low and closed back inside (Turtle Soup Long)
             "sweep_bearish": False,  # Swept high and closed back inside (Turtle Soup Short)
             "sweep_level": "",
+            "breakout_bullish": False,
+            "breakout_bearish": False,
+            "breakout_level": "",
             "nearest_resistance": 0.0,
             "nearest_support": 0.0,
             "dist_to_resistance_pct": 99.0,
@@ -99,46 +102,53 @@ class LiquidityEngine:
         # 4. Liquidity Sweep Detection (ICT Turtle Soup / AMD)
         if len(candles_5m) >= 2:
             cur_5m = candles_5m[-1]
+            prev_5m = candles_5m[-2]
+            cur_open = float(cur_5m["open"])
             cur_high = float(cur_5m["high"])
             cur_low = float(cur_5m["low"])
             cur_close = float(cur_5m["close"])
+            prev_close = float(prev_5m["close"])
+            is_bull_bar = cur_close > cur_open
+            is_bear_bar = cur_close < cur_open
 
-            # Check PDL sweep
-            if res["pdl"] > 0:
+            # Check PDL sweep (must show bullish rejection close)
+            if res["pdl"] > 0 and cur_close >= cur_open:
                 if cur_low < res["pdl"] and cur_close > res["pdl"]:
                     res["sweep_bullish"] = True
                     res["sweep_level"] = "PDL"
-            # Check ASL sweep
-            if not res["sweep_bullish"] and res["asl"] > 0:
+            # Check ASL sweep (must show bullish rejection close)
+            if not res["sweep_bullish"] and res["asl"] > 0 and cur_close >= cur_open:
                 if cur_low < res["asl"] and cur_close > res["asl"]:
                     res["sweep_bullish"] = True
                     res["sweep_level"] = "ASL"
 
-            # Check PDH sweep
-            if res["pdh"] > 0:
+            # Check PDH sweep (must show bearish rejection close)
+            if res["pdh"] > 0 and cur_close <= cur_open:
                 if cur_high > res["pdh"] and cur_close < res["pdh"]:
                     res["sweep_bearish"] = True
                     res["sweep_level"] = "PDH"
-            # Check ASH sweep
-            if not res["sweep_bearish"] and res["ash"] > 0:
+            # Check ASH sweep (must show bearish rejection close)
+            if not res["sweep_bearish"] and res["ash"] > 0 and cur_close <= cur_open:
                 if cur_high > res["ash"] and cur_close < res["ash"]:
                     res["sweep_bearish"] = True
                     res["sweep_level"] = "ASH"
 
-            # Check Expansion Breakouts (Continuation moves above/below Session & Daily levels)
-            if res["ash"] > 0 and cur_close > res["ash"]:
-                res["breakout_bullish"] = True
-                res["breakout_level"] = "ASH"
-            elif res["pdh"] > 0 and cur_close > res["pdh"]:
-                res["breakout_bullish"] = True
-                res["breakout_level"] = "PDH"
+            # Check Expansion Breakouts (STRICTLY on exact directional crossing candle, never continuous)
+            if is_bull_bar:
+                if res["ash"] > 0 and prev_close <= res["ash"] < cur_close:
+                    res["breakout_bullish"] = True
+                    res["breakout_level"] = "ASH"
+                elif res["pdh"] > 0 and prev_close <= res["pdh"] < cur_close:
+                    res["breakout_bullish"] = True
+                    res["breakout_level"] = "PDH"
 
-            if res["asl"] > 0 and cur_close < res["asl"]:
-                res["breakout_bearish"] = True
-                res["breakout_level"] = "ASL"
-            elif res["pdl"] > 0 and cur_close < res["pdl"]:
-                res["breakout_bearish"] = True
-                res["breakout_level"] = "PDL"
+            if is_bear_bar:
+                if res["asl"] > 0 and prev_close >= res["asl"] > cur_close:
+                    res["breakout_bearish"] = True
+                    res["breakout_level"] = "ASL"
+                elif res["pdl"] > 0 and prev_close >= res["pdl"] > cur_close:
+                    res["breakout_bearish"] = True
+                    res["breakout_level"] = "PDL"
 
             # 5. Distance to nearest Key Levels
             cur_p = cur_close

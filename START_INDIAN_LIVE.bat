@@ -1,7 +1,9 @@
 @echo off
 title APEX INDIAN INTELLIGENCE ENGINE v1.0 — LIVE BROKER EXECUTION (ANGEL ONE)
 color 0C
-cd /d "%~dp0"
+set "ROOT=%~dp0"
+cd /d "%ROOT%"
+set "PYTHON=%ROOT%venv\Scripts\python.exe"
 
 echo ======================================================================
 echo    APEX INDIAN INTELLIGENCE ENGINE v1.0 — LIVE BROKER TRADING
@@ -16,10 +18,10 @@ pause
 
 :run_loop
 echo [%date% %time%] Launching Apex Indian Engine in LIVE mode...
-python -m apex_indian_engine.run_indian --mode live --capital 100000 %*
+"%PYTHON%" -m apex_indian_engine.run_indian --mode live --capital 100000 %*
 
 echo.
 echo [%date% %time%] Indian Engine process stopped.
 echo Auto-restarting in 5 seconds (Press Ctrl+C to abort)...
-timeout /t 5 >nul
+timeout /t 5
 goto run_loop

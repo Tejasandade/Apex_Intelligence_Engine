@@ -825,10 +825,9 @@ class PropFirmManager:
                     if p_dir != dir_upper:
                         return False, f"Coherence Guard: Cannot {dir_upper} {sym_key} while {p_sym} is {p_dir} (Macro Conflict)"
 
-                # Crypto-internal conflict: BTC & ETH should not hold opposing directions
+                # Crypto Correlation Cluster Lock: BTC & ETH are 0.92 correlated — never hold BOTH simultaneously!
                 if is_crypto_p and is_curr_crypto and p_sym.upper() != sym_key:
-                    if p_dir != dir_upper:
-                        return False, f"Crypto Coherence: Cannot {dir_upper} {sym_key} while {p_sym} is {p_dir}"
+                    return False, f"Crypto Cluster Lock: Cannot open {sym_key} while correlated {p_sym} is already OPEN"
 
         # 5. Combined Portfolio Daily Risk Budget Pool
         # Sum of maximum potential loss if all active trades hit stop loss
@@ -841,10 +840,16 @@ class PropFirmManager:
         remaining_daily_budget = daily_safety_stop_usd + self.daily_realized_pnl
 
         projected_combined_risk = total_open_risk + float(estimated_risk_usd)
+        max_portfolio_risk = self.virtual_balance * 0.012  # Strict 1.2% combined risk cap (~$60 on $5k account)
         if projected_combined_risk > remaining_daily_budget:
             return False, (
                 f"Combined Risk Pool: Projected risk (${projected_combined_risk:.2f}) "
                 f"exceeds remaining daily safety buffer (${remaining_daily_budget:.2f})"
+            )
+        if projected_combined_risk > max_portfolio_risk:
+            return False, (
+                f"Portfolio Exposure Cap: Combined risk (${projected_combined_risk:.2f}) "
+                f"exceeds 1.2% hard limit (${max_portfolio_risk:.2f})"
             )
 
         return True, "CLEAR"
@@ -872,33 +877,27 @@ class PropFirmManager:
         """
         Calculate exact lot size anchored to the Prop Firm challenge rules.
         Dynamically adapts contract size and minimum volume for BTC, ETH, and GOLD.
-        Scales risk dynamically based on setup potential (conviction, council, R:R asymmetry).
+        Scales risk smoothly with strict evaluation caps (0.50% base / 0.65% A / 0.80% A+).
         Returns: (lots, risk_usd)
         """
         if sl_distance <= 0 or price <= 0:
             return 0.01, 25.0
 
-        # Dynamic risk scaling graduated strictly by trade potential and setup quality
+        # Strict verification for High Potential sizing (never balloon risk on generic signals)
         is_high_potential = (
-            trade_mode.upper() == "SWING"
-            or potential_rr >= 3.0
-            or (conviction >= 0.65 and council_score >= 0.72)
-            or conviction >= 0.70
+            (conviction >= 0.70 and council_score >= 0.72)
+            or (trade_mode.upper() == "SWING" and conviction >= 0.65 and council_score >= 0.72)
         )
-        is_grade_a = (conviction >= 0.62 and council_score >= 0.68) or potential_rr >= 2.5
+        is_grade_a = (conviction >= 0.62 and council_score >= 0.68)
 
         if consecutive_losses >= 1 and not is_high_potential:
-            # Defensive scale-down after loss to protect challenge equity, UNLESS setup is Grade A+
             risk_pct = float(self.config.get("min_risk_pct", 0.35))
         elif is_high_potential:
-            # Institutional Sniper: Grade A+ setup / 3.0R+ target -> Full dynamic sizing for +$70 to +$100 wins
-            risk_pct = float(self.config.get("strong_risk_pct", 1.0))  # 1.0% ($50 to $53)
+            risk_pct = min(float(self.config.get("strong_risk_pct", 0.80)), 0.80)  # Max 0.80% (~$42)
         elif is_grade_a:
-            # Solid confluence setup
-            risk_pct = 0.75                                           # 0.75% ($38 to $40)
+            risk_pct = 0.65                                                       # 0.65% (~$34)
         else:
-            # Baseline Scalp / Ranging
-            risk_pct = float(self.config.get("base_risk_pct", 0.50))   # 0.50% ($25 to $26)
+            risk_pct = min(float(self.config.get("base_risk_pct", 0.50)), 0.55)   # 0.50%-0.55% (~$26-$28)
 
         risk_usd = self.virtual_balance * (risk_pct / 100.0)
 

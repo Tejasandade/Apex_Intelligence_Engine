@@ -721,12 +721,14 @@ def can_trade_symbol(symbol: str = SYMBOL, direction: str = "LONG", is_high_prob
 
     # ── Modular Prop Firm Gate (SharkFunded, FTMO, FundedNext, etc.) ──
     if PROP_FIRM_MODE and prop_firm_manager:
+        cfg_max_c = int(prop_firm_manager.config.get("max_concurrent_trades", 1))
+        est_risk = float(prop_firm_manager.virtual_balance * (float(prop_firm_manager.config.get("base_risk_pct", 0.6)) / 100.0))
         pf_ok, pf_reason = prop_firm_manager.can_open_multi_asset_trade(
             symbol=sym,
             direction=dir_upper,
             active_positions=portfolios,
-            estimated_risk_usd=25.0,
-            max_concurrent=2,
+            estimated_risk_usd=est_risk,
+            max_concurrent=cfg_max_c,
             is_grade_a_plus=is_high_prob,
         )
         if not pf_ok:
@@ -738,14 +740,13 @@ def can_trade_symbol(symbol: str = SYMBOL, direction: str = "LONG", is_high_prob
             return False, f"{sym} already has an OPEN position"
 
         # 2. Maximum concurrent trades across portfolio
-        max_c = int(_rc("sizing", "max_concurrent_trades", 3))
+        max_c = int(_rc("sizing", "max_concurrent_trades", 2))
         active_count = sum(1 for p in portfolios.values() if p.get("position") == "OPEN")
         if active_count >= max_c:
             return False, f"Max concurrent trades reached ({active_count}/{max_c})"
 
-    # ── Universal Portfolio Directional Coherence Guard (Cross-Asset Cannibalization Lock) ──
+    # ── Universal Portfolio Directional Coherence & Correlation Cluster Guard ──
     # Runs unconditionally in both Prop Firm and Personal mode.
-    # Prevents holding opposing positions between macro-correlated assets (e.g. LONG Gold vs SHORT BTC/ETH).
     for p_sym, pos in portfolios.items():
         if pos.get("position") == "OPEN":
             p_dir = str(pos.get("direction", "")).upper()
@@ -759,10 +760,9 @@ def can_trade_symbol(symbol: str = SYMBOL, direction: str = "LONG", is_high_prob
                 if p_dir != dir_upper:
                     return False, f"Coherence Lock: Cannot {dir_upper} {sym} while {p_sym} is {p_dir} (Macro Conflict eating profits)"
 
-            # Crypto-internal conflict: BTC & ETH should never hold opposing directions
+            # Crypto Correlation Cluster Lock: BTC & ETH are 0.92 correlated — NEVER hold BOTH open simultaneously!
             if is_crypto_p and is_curr_crypto and sym != p_sym.upper():
-                if p_dir != dir_upper:
-                    return False, f"Crypto Coherence: Cannot {dir_upper} {sym} while {p_sym} is {p_dir}"
+                return False, f"Crypto Cluster Lock: Cannot open {sym} while correlated {p_sym} is already OPEN (prevents 2x leveraged crypto exposure)"
 
     if account["halted"]:
         if account["halt_until"] <= now:
@@ -1068,7 +1068,7 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL):
     # ── NO-CHASE GATE (Adapted from xau_c / autonomous.py) ──
     # Prohibit entering if market price has already slipped > 0.35 ATR away from trigger
     sym_atr = symbol_regime_info.get(sym, {}).get("atr", 0.0)
-    sig_price = getattr(signal, "price", 0.0)
+    sig_price = getattr(signal, "entry_price", 0.0) or getattr(signal, "price", 0.0)
     if sym_atr > 0 and sig_price > 0:
         chase_dist = (entry - sig_price) if direction == "LONG" else (sig_price - entry)
         max_chase = 0.35 * sym_atr
@@ -1080,6 +1080,61 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL):
             trade_log.append(log_msg)
             if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
             return
+
+    # ── 5m V-REVERSAL, EXHAUSTION & OBI COUNTER-FLOW GUARD ──
+    # Prevents shorting the exact bottom of a crash into green bounce candles or positive OBI buyers!
+    c5_list = list(symbol_candles_5m.get(sym, []))
+    if len(c5_list) >= 20:
+        last_c = c5_list[-1]
+        prev_c = c5_list[-2]
+        lc_o = float(last_c["open"])
+        lc_c = float(last_c["close"])
+        pc_c = float(prev_c["close"])
+        is_last_green = lc_c > lc_o
+        is_last_red = lc_c < lc_o
+
+        # 1. Immediate 5m reversal candle opposition check
+        if direction == "SHORT" and is_last_green and (lc_c > pc_c or (lc_c - lc_o) > 0.25 * max(sym_atr, 1.0)):
+            log_msg = f"[{sym}] ANTI-REVERSAL GUARD: Cancelled SHORT at bottom into active green 5m bounce candle (O:{lc_o:,.2f} -> C:{lc_c:,.2f})"
+            trade_log.append(log_msg)
+            if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
+            return
+        if direction == "LONG" and is_last_red and (lc_c < pc_c or (lc_o - lc_c) > 0.25 * max(sym_atr, 1.0)):
+            log_msg = f"[{sym}] ANTI-REVERSAL GUARD: Cancelled LONG at top into active red 5m selloff candle (O:{lc_o:,.2f} -> C:{lc_c:,.2f})"
+            trade_log.append(log_msg)
+            if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
+            return
+
+        # 2. Rubber-Band Exhaustion check (> 2.5 ATR stretch away from 5m EMA20)
+        closes_20 = [float(x["close"]) for x in c5_list[-20:]]
+        ema20 = closes_20[0]
+        k = 2.0 / 21.0
+        for val in closes_20[1:]:
+            ema20 = (val - ema20) * k + ema20
+        if sym_atr > 0:
+            if direction == "SHORT" and (ema20 - entry) > (2.5 * sym_atr):
+                log_msg = f"[{sym}] EXHAUSTION GUARD: Cancelled SHORT {ema20 - entry:.1f} pts (> 2.5 ATR) oversold below 5m EMA20"
+                trade_log.append(log_msg)
+                if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
+                return
+            if direction == "LONG" and (entry - ema20) > (2.5 * sym_atr):
+                log_msg = f"[{sym}] EXHAUSTION GUARD: Cancelled LONG {entry - ema20:.1f} pts (> 2.5 ATR) overbought above 5m EMA20"
+                trade_log.append(log_msg)
+                if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
+                return
+
+    # 3. Real-time L2 Order Book Imbalance (OBI) Counter-Flow Guard
+    cur_obi = float(mkt.get("obi", 0.0))
+    if direction == "SHORT" and cur_obi > 0.20:
+        log_msg = f"[{sym}] OBI COUNTER-FLOW GUARD: Cancelled SHORT into strong positive buy pressure (OBI: {cur_obi:+.3f})"
+        trade_log.append(log_msg)
+        if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
+        return
+    if direction == "LONG" and cur_obi < -0.20:
+        log_msg = f"[{sym}] OBI COUNTER-FLOW GUARD: Cancelled LONG into strong negative sell pressure (OBI: {cur_obi:+.3f})"
+        trade_log.append(log_msg)
+        if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
+        return
 
     # ── ANTI-TRAP GUARD: Dual Advisor Veto ──
     # If both Momentum AND Volume advisors explicitly vote REJECT, abort entry
@@ -1099,7 +1154,7 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL):
 
     # Swing criteria: Trending regime + High Conviction + Macro 1D/4H Alignment
     is_swing = False
-    if not is_ranging and prob >= 0.62 and council >= 0.70:
+    if not is_ranging and prob >= 0.65 and council >= 0.72:
         if direction == "LONG" and macro.get("swing_eligible_long", False):
             is_swing = True
         elif direction == "SHORT" and macro.get("swing_eligible_short", False):
@@ -1674,7 +1729,7 @@ def _check_exit_for_symbol(sym: str):
                         pass
             if cur <= tp2: close(cur, f"FULL TP2 ({port.get('tp2_rr', 3.5):.1f}R [{port.get('trade_mode','SCALP')}])"); return
 
-    # 4. Time decay (Horizon-adaptive)
+    # 4. Time decay & Structural 1H Reversal Invalidation
     max_dur = port.get("max_duration_min", 360.0)
     adv_dur = port.get("adverse_decay_min", 240.0)
     if dur_min > max_dur:
@@ -1683,6 +1738,19 @@ def _check_exit_for_symbol(sym: str):
     if dur_min > adv_dur and port["phase"] == 1 and port["unrealized_pnl"] < 0:
         close(cur, f"TIME DECAY {adv_dur/60:.0f}h adverse ({port.get('trade_mode', 'SCALP')})")
         return
+
+    # 4b. Early Structural Invalidation (cuts losses at -0.75R instead of waiting for -1.0R hard SL when 1H flips against us)
+    if dur_min >= 45.0 and port.get("phase", 1) == 1 and r_mult <= -0.75:
+        try:
+            macro_t = symbol_macro_structure.get(sym, {})
+            t_1h = str(macro_t.get("trend_1h", "NEUTRAL")).upper()
+            m_eng = momentum_engines.get(sym, momentum_eng)
+            ofi_v = float(m_eng.get_diagnostics().get("ofi", 0.0)) if m_eng else 0.0
+            if (direction == "SHORT" and "BULL" in t_1h and ofi_v > 0.25) or (direction == "LONG" and "BEAR" in t_1h and ofi_v < -0.25):
+                close(cur, f"STRUCTURAL INVALIDATION (1H={t_1h}, OFI={ofi_v:+.2f} at {r_mult:.2f}R)")
+                return
+        except Exception:
+            pass
 
     # 5. Model-halt exit
     sym_eng = signal_engines.get(sym, signal_engine)
@@ -1755,40 +1823,8 @@ async def _candle_worker():
                 except Exception:
                     pass
 
-                # Institutional Setup Discovery: Capture breakouts & liquidity sweeps across ALL symbols & sessions
-                if sig is None and feats is not None:
-                    lev = liquidity_engine.get_levels(sym) if 'liquidity_engine' in globals() else {}
-                    re = eng.regime_detector.current_regime
-                    atr_val = float(feats.iloc[0].get("ATR", 10.0)) if "ATR" in feats.columns else 10.0
-                    close_p = float(c5["close"])
-                    if lev.get("sweep_bullish") or lev.get("breakout_bullish"):
-                        sig = TradingSignal(
-                            symbol=sym,
-                            direction="BUY",
-                            conviction=max(symbol_live_probs.get(sym, {}).get("long", 0.50), 0.50),
-                            entry_price=close_p,
-                            stop_loss=close_p - max(atr_val, 1.0),
-                            take_profit=close_p + max(atr_val, 1.0) * MIN_RR,
-                            regime=re.value,
-                            atr=atr_val,
-                            council_approved=True,
-                            council_score=0.85,
-                            metadata={"trigger": "INSTITUTIONAL_LIQUIDITY_DISCOVERY"}
-                        )
-                    elif lev.get("sweep_bearish") or lev.get("breakout_bearish"):
-                        sig = TradingSignal(
-                            symbol=sym,
-                            direction="SELL",
-                            conviction=max(symbol_live_probs.get(sym, {}).get("short", 0.50), 0.50),
-                            entry_price=close_p,
-                            stop_loss=close_p + max(atr_val, 1.0),
-                            take_profit=close_p - max(atr_val, 1.0) * MIN_RR,
-                            regime=re.value,
-                            atr=atr_val,
-                            council_approved=True,
-                            council_score=0.85,
-                            metadata={"trigger": "INSTITUTIONAL_LIQUIDITY_DISCOVERY"}
-                        )
+                # Strictly enforce ML + 10-Advisor Council Authority: Never fabricate blind bypass signals when sig is None
+                # Institutional liquidity sweeps/breakouts boost conviction cleanly via evaluate_signal_synergy below.
 
                 if sig is not None:
                     last_signal = sig
