@@ -65,8 +65,8 @@ class VixRegimeManager:
                 size_multiplier=1.00,
                 sl_points_banknifty=25.0,
                 sl_points_nifty=15.0,
-                tp_multiplier=2.5,
-                description="Golden Zone: Clean trending expansions — ATM options with full runner targets",
+                tp_multiplier=2.1,
+                description="Golden Zone: Clean trending expansions — ATM options with achievable runner targets",
             )
 
         # 3. ELEVATED VOLATILITY (18.0 < VIX <= 22.0) — Wide swings, momentum breakouts
@@ -78,8 +78,8 @@ class VixRegimeManager:
                 size_multiplier=1.00,
                 sl_points_banknifty=32.0,  # Wider SL to withstand high ATR wicks
                 sl_points_nifty=18.0,
-                tp_multiplier=3.0,
-                description="Elevated VIX: Fast momentum expansion — Wider stop buffer, large runner targets",
+                tp_multiplier=2.4,
+                description="Elevated VIX: Fast momentum expansion — Wider stop buffer, realistic momentum targets",
             )
 
         # 4. EXTREME / EVENT (VIX > 22.0) — High IV crush danger (Budget/Election/RBI Policy)

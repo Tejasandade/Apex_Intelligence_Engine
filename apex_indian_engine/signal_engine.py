@@ -276,9 +276,13 @@ class IndianSignalEngine:
                     notes.append("VETO: Trapped inside CPR (Theta chop zone)")
                     return None
 
-            # VETO 3: Higher-Timeframe Trend (15m) Bearish Opposing
+            # VETO 3: Higher-Timeframe Trend (15m) Bearish Opposing (permits breakouts & PDL Sweep Reclaim turns)
             if htf_bias == "BEARISH":
-                is_breakout = key_levels and ("Breakout" in key_levels.active_sweep or "ORH Bullish" in key_levels.active_sweep)
+                is_breakout = key_levels and (
+                    "Breakout" in key_levels.active_sweep
+                    or "ORH Bullish" in key_levels.active_sweep
+                    or "Reclaim" in key_levels.active_sweep
+                )
                 if not (is_breakout and cur_close > vwap):
                     if not is_preview:
                         now_t = time.time()
@@ -360,9 +364,13 @@ class IndianSignalEngine:
                     notes.append("VETO: Trapped inside CPR (Theta chop zone)")
                     return None
 
-            # VETO 3: Higher-Timeframe Trend (15m) Bullish Opposing
+            # VETO 3: Higher-Timeframe Trend (15m) Bullish Opposing (permits breakdowns & PDH Sweep Rejection turns)
             if htf_bias == "BULLISH":
-                is_breakdown = key_levels and ("Breakdown" in key_levels.active_sweep or "ORL Bearish" in key_levels.active_sweep)
+                is_breakdown = key_levels and (
+                    "Breakdown" in key_levels.active_sweep
+                    or "ORL Bearish" in key_levels.active_sweep
+                    or "Rejection" in key_levels.active_sweep
+                )
                 if not (is_breakdown and cur_close < vwap):
                     if not is_preview:
                         now_t = time.time()

@@ -367,14 +367,14 @@ class ApexIndianEngine:
         # Adaptive Risk-Proportional Stop Loss (No micro-pip whipsaws on expensive options)
         prem = float(selected.est_premium)
         if "BANK" in idx:
-            # BankNifty option SL: 16% of premium, bounded between 35.0 and 70.0 pts
-            sl_pts = max(35.0, min(prem * 0.16, 70.0))
+            # BankNifty option SL: 14% of premium, bounded 30-55 pts (keeps TP2 ~65-115 pts achievable!)
+            sl_pts = max(30.0, min(prem * 0.14, 55.0))
         else:
-            # Nifty 50 option SL: 18% of premium, bounded between 14.0 and 30.0 pts
-            sl_pts = max(14.0, min(prem * 0.18, 30.0))
+            # Nifty 50 option SL: 18% of premium, bounded 14-26 pts
+            sl_pts = max(14.0, min(prem * 0.18, 26.0))
         sl_pts = round(sl_pts, 1)
 
-        # 7a. Institutional No-Chase Gate (0.35 x ATR)
+        # 7a. Institutional No-Chase & Climax Exhaustion Guard
         atr = sig_engine._calc_atr(14)
         live_spot = self.ws_streamer.latest_prices.get(idx, cur_spot) if self.ws_streamer else cur_spot
         drift = (live_spot - cur_spot) if opt_type == "CE" else (cur_spot - live_spot)
@@ -382,6 +382,15 @@ class ApexIndianEngine:
             logger.warning(
                 f"⚠️ NO-CHASE GATE ({idx} {opt_type}): Spot moved {drift:+.1f} pts past signal close "
                 f"(> 0.35 ATR {0.35 * atr:.1f} pts). Rejecting late market entry into overextension."
+            )
+            return None
+
+        c_body = abs(float(candle.get("close", cur_spot)) - float(candle.get("open", cur_spot)))
+        vwap_ext = (cur_spot - cur_vwap) if opt_type == "CE" else (cur_vwap - cur_spot)
+        if atr > 0 and vwap_ext > (2.5 * atr) and c_body > (1.4 * atr):
+            logger.warning(
+                f"⚠️ CLIMAX EXHAUSTION GUARD ({idx} {opt_type}): Spot extended {vwap_ext:.1f} pts (>2.5 ATR) "
+                f"from VWAP on huge {c_body:.1f} pt bar. Skipping buying peak!"
             )
             return None
 

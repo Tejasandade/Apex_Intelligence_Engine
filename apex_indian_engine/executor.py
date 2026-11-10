@@ -49,6 +49,7 @@ class ActiveOptionTrade:
     initial_quantity: int = 30
     spot_entry_price: float = 0.0
     spot_sl_price: float = 0.0
+    initial_sl_dist: float = 0.0
 
 
 class IndianOrderExecutor:
@@ -167,11 +168,12 @@ class IndianOrderExecutor:
             return None
 
         sl_price = max(1.0, round(fill_price - sl_points, 2))
-        tp1_price = round(fill_price + (sl_points * 1.5), 2)
+        tp1_price = round(fill_price + (sl_points * 1.25), 2)
         tp2_price = round(fill_price + (sl_points * tp_multiplier), 2)
 
         # Structural Underlying Spot Invalidation (Nifty: 30 pts, BankNifty: 90 pts)
-        spot_dist = 30.0 if "NIFTY" in index_name.upper() else 90.0
+        # Note: Check "BANK" explicitly because "NIFTY" is a substring of "BANKNIFTY"!
+        spot_dist = 90.0 if "BANK" in index_name.upper() else 30.0
         if option_type.upper() == "CE":
             spot_sl_px = round(spot_price - spot_dist, 2) if spot_price > 0 else 0.0
         else:
@@ -207,12 +209,13 @@ class IndianOrderExecutor:
                 if real_fill_px > 0.0:
                     fill_price = real_fill_px
                     sl_price = max(1.0, round(fill_price - sl_points, 2))
-                    tp1_price = round(fill_price + (sl_points * 1.5), 2)
+                    tp1_price = round(fill_price + (sl_points * 1.25), 2)
                     tp2_price = round(fill_price + (sl_points * tp_multiplier), 2)
             except Exception as e:
                 logger.error(f"Angel SmartAPI order failed: {e}")
                 return None
 
+        init_sl_dist = round(max(fill_price - sl_price, 1.0), 2)
         trade = ActiveOptionTrade(
             trade_id=trade_id,
             index_name=index_name,
@@ -233,6 +236,7 @@ class IndianOrderExecutor:
             broker_order_id=broker_id,
             spot_entry_price=spot_price,
             spot_sl_price=spot_sl_px,
+            initial_sl_dist=init_sl_dist,
         )
 
         self.active_trade = trade
@@ -261,7 +265,8 @@ class IndianOrderExecutor:
         cur = current_option_price
         entry = trade.entry_price
         qty = trade.quantity
-        sl_dist = entry - trade.sl_price
+        # Anchor R-multiple to original planned SL risk so ratcheting SL never collapses denominator
+        sl_dist = trade.initial_sl_dist if trade.initial_sl_dist > 0 else max(entry - trade.sl_price, 1.0)
 
         # Track unrealized PnL (including banked partial cash)
         trade.unrealized_pnl = round((cur - entry) * qty + trade.partial_booked_cash, 2)
@@ -292,7 +297,7 @@ class IndianOrderExecutor:
         should_harvest, harvest_reason = self.theta_harvester.evaluate_harvest(
             entry_price=trade.entry_price,
             current_price=cur,
-            sl_price=trade.sl_price,
+            sl_price=round(entry - sl_dist, 2),
             entry_time=trade.entry_time,
             underlying_momentum_reversed=underlying_momentum_reversed,
         )
@@ -314,7 +319,7 @@ class IndianOrderExecutor:
             trade.trailing_tier = 2
             logger.info(f"{trade.symbol} TIER 2 (+1.0R): SL locked to Break-Even @ ₹{new_sl:.2f}")
 
-        # 5. Take Profit 1 (+1.5R) -> Partial Cash Profit Harvest & Runner Preservation
+        # 5. Take Profit 1 (+1.25R) -> Partial Harvest or +0.50R Profit Floor Lock on 1-Lot
         if trade.trailing_tier < 3 and cur >= trade.tp1_price:
             trade.trailing_tier = 3
             if trade.lots > 1:
@@ -325,7 +330,7 @@ class IndianOrderExecutor:
                 trade.lots -= close_lots
                 trade.quantity -= close_qty
                 logger.info(
-                    f"🏆 [PARTIAL CASH HARVEST] {trade.symbol}: Banked {close_lots} lots cash (+₹{cash_banked:,.2f}) at +1.5R! "
+                    f"🏆 [PARTIAL CASH HARVEST] {trade.symbol}: Banked {close_lots} lots cash (+₹{cash_banked:,.2f}) at TP1! "
                     f"Keeping {trade.lots} lots runner open to trail!"
                 )
                 if self.mode == "LIVE" and self.api:
@@ -343,12 +348,14 @@ class IndianOrderExecutor:
                         })
                     except Exception as e:
                         logger.error(f"Live partial sell failed: {e}")
+                trade.sl_price = round(entry + (sl_dist * 0.30), 2)
+                logger.info(f"{trade.symbol} TP1 Hit: Runner SL locked to +0.3R @ ₹{trade.sl_price:.2f}")
+            else:
+                # Single-lot protection: lock guaranteed +0.50R real profit floor instead of mere BE
+                trade.sl_price = round(entry + (sl_dist * 0.50), 2)
+                logger.info(f"{trade.symbol} TP1 Hit (1-Lot): Guaranteed +0.50R Profit Lock @ ₹{trade.sl_price:.2f}")
 
-            # Lock Stop Loss on the remaining runner to Break-Even (+₹2 fee buffer)
-            trade.sl_price = round(entry + 2.0, 2)
-            logger.info(f"{trade.symbol} TP1 Hit: Remaining runner SL locked to Break-Even @ ₹{trade.sl_price:.2f}")
-
-        # 6. Full Take Profit 2 (+2.5R to +3.5R) -> Full Exit of Remaining Runner
+        # 6. Full Take Profit 2 -> Full Exit of Remaining Position
         if cur >= trade.tp2_price:
             return self.close_trade(cur, reason=f"FULL TARGET TP2 (+{r_mult:.1f}R)")
 
