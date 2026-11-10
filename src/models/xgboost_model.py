@@ -118,9 +118,13 @@ class ApexXGBoostModel(BaseModel):
         # Handle class imbalance
         pos_count = int(y.sum())
         neg_count = len(y) - pos_count
-        scale_pos_weight = neg_count / max(pos_count, 1)
+        scale_pos_weight = float(
+            self._hyperparams.get("scale_pos_weight", neg_count / max(pos_count, 1))
+        )
 
-        early_stopping = self._hyperparams.get("early_stopping_rounds", 20)
+        raw_es = self._hyperparams.get("early_stopping_rounds", 20)
+        early_stopping = int(raw_es) if raw_es is not None and int(raw_es) > 0 else None
+        eval_metric = str(self._hyperparams.get("eval_metric", "logloss"))
 
         # Build XGBoost params
         params = {
@@ -134,12 +138,13 @@ class ApexXGBoostModel(BaseModel):
             "reg_alpha": self._hyperparams.get("reg_alpha", 0.1),
             "reg_lambda": self._hyperparams.get("reg_lambda", 1.0),
             "scale_pos_weight": scale_pos_weight,
-            "eval_metric": "logloss",
-            "early_stopping_rounds": early_stopping,
-            "random_state": 42,
-            "n_jobs": -1,
+            "eval_metric": eval_metric,
+            "random_state": int(self._hyperparams.get("random_state", 42)),
+            "n_jobs": int(self._hyperparams.get("n_jobs", -1)),
             "verbosity": 0,
         }
+        if early_stopping is not None:
+            params["early_stopping_rounds"] = early_stopping
 
         logger.info(
             "training_started",
@@ -152,12 +157,15 @@ class ApexXGBoostModel(BaseModel):
         )
 
         self._model = xgb.XGBClassifier(**params)
-        self._model.fit(
-            X,
-            y,
-            eval_set=[(X_val, y_val)],
-            verbose=False,
-        )
+        fit_kwargs: dict[str, Any] = {
+            "eval_set": [(X_val, y_val)],
+            "verbose": False,
+        }
+        # Align validation logloss weights with training scale_pos_weight so early stopping never trips at tree 0
+        if early_stopping is not None and eval_metric == "logloss" and abs(scale_pos_weight - 1.0) > 0.05:
+            val_weights = np.where(np.asarray(y_val) == 1, scale_pos_weight, 1.0)
+            fit_kwargs["sample_weight_eval_set"] = [val_weights]
+        self._model.fit(X, y, **fit_kwargs)
 
         # Validation metrics
         raw_probs_val = self._model.predict_proba(X_val)[:, 1]
@@ -170,7 +178,12 @@ class ApexXGBoostModel(BaseModel):
         else:
             ll = log_loss(y_val, raw_probs_val)
         prec = precision_score(y_val, y_pred, zero_division=0)
-        best_iter = getattr(self._model, "best_iteration", params["n_estimators"])
+        try:
+            best_iter = self._model.best_iteration
+        except AttributeError:
+            best_iter = None
+        if best_iter is None:
+            best_iter = params["n_estimators"]
 
         # Calibrate using validation set (skip if single-class — bootstrap edge case)
         if len(y_val.unique()) >= 2:

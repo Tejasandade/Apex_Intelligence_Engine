@@ -59,7 +59,7 @@ def fetch_historical_5m(symbol: str, pages: int = 8, page_size: int = 1000) -> p
     df = pd.DataFrame(all_candles, columns=cols)
     for c in ["open", "high", "low", "close", "volume"]:
         df[c] = df[c].astype(float)
-    df["timestamp"] = df["timestamp"].astype(int)
+    df["timestamp"] = df["timestamp"].astype("int64")
     df = df.drop_duplicates("timestamp").sort_values("timestamp").reset_index(drop=True)
     print(f"  [OK] Successfully loaded {len(df)} candles for {symbol}")
     return df
@@ -87,11 +87,17 @@ async def train_asset(asset_key: str, binance_symbol: str):
     print(f"  TRAINING ML ENSEMBLE: {asset_key.upper()} ({binance_symbol})")
     print("=" * 65)
 
-    # 1. Fetch 10,000 candles (~35 days of 5m data)
-    df = fetch_historical_5m(binance_symbol, pages=10, page_size=1000)
+    # 1. Fetch 50,000 candles (~173 days of 5m data)
+    df = fetch_historical_5m(binance_symbol, pages=50, page_size=1000)
     if len(df) < 500:
         print(f"ERROR: Insufficient data for {binance_symbol}")
         return
+    try:
+        hist_dir = root_dir / "data" / "historical" / "crypto"
+        hist_dir.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(hist_dir / f"{asset_key}_5m.parquet", index=False)
+    except Exception:
+        pass
 
     # 2. Run UnifiedTrainer
     trainer = UnifiedTrainer("crypto", asset_key)

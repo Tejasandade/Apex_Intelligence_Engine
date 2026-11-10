@@ -175,6 +175,6 @@ class DailyFeedProvider:
         df = pd.DataFrame(raw, columns=cols)
         for col in ["open", "high", "low", "close", "volume"]:
             df[col] = pd.to_numeric(df[col], errors="coerce")
-        df["timestamp"] = df["timestamp"].astype(int)
+        df["timestamp"] = df["timestamp"].astype("int64")
         return df[["timestamp", "open", "high", "low", "close", "volume"]].dropna()
 

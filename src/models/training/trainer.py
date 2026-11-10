@@ -88,6 +88,7 @@ class UnifiedTrainer:
         self,
         data: pd.DataFrame | None = None,
         save_models: bool = True,
+        save_dir: Path | None = None,
     ) -> dict[str, Any]:
         """
         Execute the full training pipeline.
@@ -117,10 +118,10 @@ class UnifiedTrainer:
             )
             return {"error": "insufficient_data"}
             
-        # ── MEMORY CONSTRAINT FIX ──
-        # Cap data to 10,000 rows to prevent extreme RAM OOM/Swapping
-        if len(data) > 10000:
-            data = data.iloc[-10000:].copy()
+        # Respect configured deep training history (e.g. 50,000 candles in models.yaml)
+        max_rows = int(self.model_params.get("training", {}).get("total_candles", 50000))
+        if len(data) > max_rows:
+            data = data.iloc[-max_rows:].copy()
 
         logger.info("data_loaded", rows=len(data))
 
@@ -181,11 +182,11 @@ class UnifiedTrainer:
                     continue
 
                 result = self._train_regime(
-                    regime_df, regime_name.lower(), save_models
+                    regime_df, regime_name.lower(), save_models, save_dir=save_dir
                 )
                 results[regime_name] = result
         else:
-            result = self._train_regime(labeled_df, "all", save_models)
+            result = self._train_regime(labeled_df, "all", save_models, save_dir=save_dir)
             results["ALL"] = result
 
         logger.info("training_pipeline_completed", symbol=self.symbol, results=list(results.keys()))
@@ -196,6 +197,7 @@ class UnifiedTrainer:
         df: pd.DataFrame,
         regime_suffix: str,
         save_models: bool,
+        save_dir: Path | None = None,
     ) -> dict[str, Any]:
         """
         Train both LONG and SHORT models for a specific regime subset.
@@ -293,18 +295,21 @@ class UnifiedTrainer:
                 if save_models:
                     acc = float(metrics.get("accuracy", 0.0))
                     ll = float(metrics.get("log_loss", 1.0))
+                    best_trees = float(metrics.get("best_iteration", 0.0))
+                    min_trees = 25.0 if bag_hp.get("n_estimators", 500) >= 50 else 1.0
                     passes_gate = False
-                    if acc >= 0.48 and ll <= 0.88:
-                        passes_gate = True
-                    elif acc >= 0.40 and ll <= 0.80:
-                        passes_gate = True
-                    elif acc >= 0.35 and ll <= 1.40 and ("high_vol" in bag_name or "ranging" in bag_name):
-                        passes_gate = True
-                    elif acc >= 0.20 and ll <= 0.72 and "ranging_high_vol" in bag_name:
-                        passes_gate = True
+                    if best_trees >= min_trees:
+                        if acc >= 0.48 and ll <= 0.88:
+                            passes_gate = True
+                        elif acc >= 0.40 and ll <= 0.80:
+                            passes_gate = True
+                        elif acc >= 0.35 and ll <= 1.40 and ("high_vol" in bag_name or "ranging" in bag_name):
+                            passes_gate = True
+                        elif acc >= 0.20 and ll <= 0.72 and "ranging_high_vol" in bag_name:
+                            passes_gate = True
 
                     if passes_gate:
-                        bag_model.save(WEIGHTS_DIR)
+                        bag_model.save(save_dir or WEIGHTS_DIR)
                         self._models[f"{regime_suffix}_{direction}_bag{bag_idx}"] = bag_model
                         logger.info(f"Passed quality gates: {bag_name} (acc={acc:.3f}, ll={ll:.3f})")
                     else:

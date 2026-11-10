@@ -1,6 +1,6 @@
 {
   "model_name": "ethusdt_crypto_ranging_high_vol_SHORT_bag2",
-  "trained_at": "2026-11-07T09:54:28.692355+00:00",
+  "trained_at": "2026-11-10T19:21:35.751749+00:00",
   "feature_columns": [
     "price_vs_ema14",
     "price_vs_ema50",
@@ -42,7 +42,7 @@
   ],
   "num_features": 37,
   "hyperparams": {
-    "n_estimators": 500,
+    "n_estimators": 300,
     "learning_rate": 0.01,
     "max_depth": 4,
     "min_child_weight": 2,
@@ -51,21 +51,20 @@
     "gamma": 0.5,
     "reg_alpha": 1.0,
     "reg_lambda": 5.0,
-    "scale_pos_weight": 0.9722222222222222,
+    "scale_pos_weight": 2.4792899408284024,
     "eval_metric": "logloss",
-    "early_stopping_rounds": 30,
-    "random_state": 42,
-    "n_jobs": -1,
+    "random_state": 2716,
+    "n_jobs": 2,
     "verbosity": 0
   },
   "metrics": {
-    "accuracy": 0.5858585858585859,
-    "log_loss": 0.6760817752534264,
-    "precision": 0.6181818181818182,
-    "best_iteration": 90.0,
-    "train_samples": 710.0,
-    "val_samples": 99.0,
-    "positive_rate": 0.5070422535211268
+    "accuracy": 0.5010183299389002,
+    "log_loss": 0.7049874635938004,
+    "precision": 0.2777777777777778,
+    "best_iteration": 300.0,
+    "train_samples": 3528.0,
+    "val_samples": 491.0,
+    "positive_rate": 0.28741496598639454
   },
   "calibrated": true
 }
