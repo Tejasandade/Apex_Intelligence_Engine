@@ -33,13 +33,14 @@ PROFILES: dict[str, dict[str, Any]] = {
         "daily_safety_buffer_pct": 2.25,  # $112.50 circuit breaker (halt before 3% breach!)
         "max_total_loss_pct": 6.0,        # $300.00 max overall loss (hard floor: $4,700.00)
         "total_safety_buffer_pct": 4.8,   # $240.00 emergency stop (halt before 6% breach!)
-        "base_risk_pct": 0.60,            # 0.60% base risk ($30.00 per trade)
-        "strong_risk_pct": 1.0,           # 1.0% risk ($50.00) on high conviction / swing setups (captures +$70-$110)
-        "min_risk_pct": 0.35,             # 0.35% risk ($17.50) conservative/post-loss
+        "base_risk_pct": 0.75,            # 0.75% base risk (~$39 per trade)
+        "strong_risk_pct": 1.0,           # 1.0% risk (~$52) on Grade A+ setups
+        "min_risk_pct": 0.45,             # 0.45% risk (~$23) post-2L recovery sizing
         "max_concurrent_trades": 1,
         "news_blackout_mins": 10,
         "max_trades_per_day": 3,
-        "daily_profit_lock_usd": 50.0,
+        "trailing_profit_floor_trigger_usd": 130.0,
+        "trailing_profit_floor_ratio": 0.65,
     },
     "sharkfunded_10k_lite_1step": {
         "name": "SharkFunded Lite 10K (1-Step)",
@@ -764,7 +765,7 @@ class PropFirmManager:
         # Only lock trading if profits drop below the trailing floor after banking substantial gains (>= $45).
         day_peak = max(getattr(self, "day_peak_realized_pnl", 0.0), self.daily_realized_pnl)
         self.day_peak_realized_pnl = day_peak
-        min_floor_trigger = float(self.config.get("trailing_profit_floor_trigger_usd", 45.0))
+        min_floor_trigger = float(self.config.get("trailing_profit_floor_trigger_usd", 130.0))
         if day_peak >= min_floor_trigger:
             floor_ratio = float(self.config.get("trailing_profit_floor_ratio", 0.65))
             trailing_floor_usd = day_peak * floor_ratio
@@ -892,21 +893,21 @@ class PropFirmManager:
         if sl_distance <= 0 or price <= 0:
             return 0.01, 25.0
 
-        # Strict verification for High Potential sizing (never balloon risk on generic signals)
+        # Balanced-Fast Prop Firm Sizing: keeps challenge passing speed high while protecting daily/max DD stops
         is_high_potential = (
-            (conviction >= 0.70 and council_score >= 0.72)
-            or (trade_mode.upper() == "SWING" and conviction >= 0.65 and council_score >= 0.72)
+            (conviction >= 0.65 and council_score >= 0.68)
+            or conviction >= 0.70
         )
         is_grade_a = (conviction >= 0.62 and council_score >= 0.68)
 
-        if consecutive_losses >= 1 and not is_high_potential:
-            risk_pct = float(self.config.get("min_risk_pct", 0.35))
+        if consecutive_losses >= 2 and not is_high_potential:
+            risk_pct = max(0.45, min(float(self.config.get("min_risk_pct", 0.45)), 0.50))
         elif is_high_potential:
-            risk_pct = min(float(self.config.get("strong_risk_pct", 0.80)), 0.80)  # Max 0.80% (~$42)
+            risk_pct = min(float(self.config.get("strong_risk_pct", 1.00)), 1.00)  # 1.00% (~$52)
         elif is_grade_a:
-            risk_pct = 0.65                                                       # 0.65% (~$34)
+            risk_pct = 0.85                                                       # 0.85% (~$44)
         else:
-            risk_pct = min(float(self.config.get("base_risk_pct", 0.50)), 0.55)   # 0.50%-0.55% (~$26-$28)
+            risk_pct = max(0.75, min(float(self.config.get("base_risk_pct", 0.75)), 0.80))  # 0.75% (~$39)
 
         risk_usd = self.virtual_balance * (risk_pct / 100.0)
 
@@ -1229,6 +1230,17 @@ class PropFirmManager:
             if "config" in data and isinstance(data["config"], dict):
                 self.config = data["config"]
                 self.initial_balance = float(self.config.get("initial_balance", self.initial_balance))
+                # One-time migration for legacy defensive defaults ($45 profit lock / 0.55-0.60% base risk)
+                if not self.config.get("_fast_pass_v1"):
+                    if float(self.config.get("trailing_profit_floor_trigger_usd", 45.0)) < 130.0:
+                        self.config["trailing_profit_floor_trigger_usd"] = 130.0
+                    if float(self.config.get("base_risk_pct", 0.60)) < 0.75:
+                        self.config["base_risk_pct"] = 0.75
+                    if float(self.config.get("strong_risk_pct", 0.80)) < 1.00:
+                        self.config["strong_risk_pct"] = 1.00
+                    if float(self.config.get("min_risk_pct", 0.35)) < 0.45:
+                        self.config["min_risk_pct"] = 0.45
+                    self.config["_fast_pass_v1"] = True
             elif self.profile_key in PROFILES:
                 self.config = PROFILES[self.profile_key]
                 self.initial_balance = float(self.config["initial_balance"])

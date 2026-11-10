@@ -262,9 +262,9 @@ MIN_RISK_PCT    = 0.005
 MAX_LEVERAGE    = 5.0
 MAX_TRADES_DAY  = int(os.getenv("APEX_MAX_TRADES_DAY", "3"))  # Sniper discipline: 3 quality trades/day max
 MIN_INTERVAL    = 300       # 5min (1 candle) between trades
-LOSS_COOLDOWN_1 = 1800      # 30min cooling pause after 1 loss (allows market chop to settle)
-LOSS_COOLDOWN_2 = 3600      # 60min cooling pause after 2 consecutive losses
-LOSS_COOLDOWN_3 = 7200      # 120min anti-spiral protection after 3 losses
+LOSS_COOLDOWN_1 = 900       # 15min cooling pause after 1 loss (fast chop recovery)
+LOSS_COOLDOWN_2 = 1800      # 30min cooling pause after 2+ consecutive losses
+LOSS_COOLDOWN_3 = 1800      # 30min cooling pause after 3+ consecutive losses (protected by Prop Firm daily buffer)
 SESSION_LOSSES  = 3         # halt after N consecutive losses
 
 # ─── BROKER (Bybit Testnet — only active when DEMO_MODE=true) ─────────────────
@@ -1218,17 +1218,51 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL, bypass_retest: b
             if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
             return False
 
-    # ── 5m V-REVERSAL, EXHAUSTION & EXTREME OBI COUNTER-FLOW GUARD ──
+    lev_snap = liquidity_engine.get_levels(sym) if "liquidity_engine" in globals() else {}
+    has_sweep_or_brk = (
+        (direction == "LONG" and (lev_snap.get("sweep_bullish") or lev_snap.get("breakout_bullish")))
+        or (direction == "SHORT" and (lev_snap.get("sweep_bearish") or lev_snap.get("breakout_bearish")))
+    )
+
+    # ── 5m V-REVERSAL, ANTI-BOUNCE, EXHAUSTION & EXTREME OBI COUNTER-FLOW GUARD ──
     c5_list = list(symbol_candles_5m.get(sym, []))
     if len(c5_list) >= 20:
         last_c = c5_list[-1]
         prev_c = c5_list[-2]
+        c3_bar = c5_list[-3]
         lc_o = float(last_c["open"])
         lc_c = float(last_c["close"])
         pc_h = float(prev_c["high"])
         pc_l = float(prev_c["low"])
         is_last_green = lc_c > lc_o
         is_last_red = lc_c < lc_o
+
+        # 0. Multi-candle 5m momentum anti-bounce/anti-crash guard (unless liquidity sweep/breakout active)
+        if not has_sweep_or_brk:
+            sma10 = sum(float(x["close"]) for x in c5_list[-10:]) / 10.0
+            c2_c, c3_c = float(prev_c["close"]), float(c3_bar["close"])
+            if (
+                direction == "SHORT"
+                and lc_c > c2_c > c3_c
+                and float(last_c["low"]) > float(prev_c["low"]) > float(c3_bar["low"])
+                and lc_c > sma10
+            ):
+                log_msg = f"[{sym}] ANTI-BOUNCE GUARD: Cancelled SHORT into 3-bar higher-low bounce above 5m SMA10"
+                trade_log.append(log_msg)
+                _record_gate_rejection(sym, sig_desc, log_msg)
+                if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
+                return False
+            if (
+                direction == "LONG"
+                and lc_c < c2_c < c3_c
+                and float(last_c["high"]) < float(prev_c["high"]) < float(c3_bar["high"])
+                and lc_c < sma10
+            ):
+                log_msg = f"[{sym}] ANTI-CRASH GUARD: Cancelled LONG into 3-bar lower-high selloff below 5m SMA10"
+                trade_log.append(log_msg)
+                _record_gate_rejection(sym, sig_desc, log_msg)
+                if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
+                return False
 
         # 1. Major opposing 5m V-reversal engulfing check (0.60 ATR for standard, 0.85 ATR for Grade A+)
         rev_mult = 0.85 if is_high_prob else 0.60
@@ -1297,11 +1331,6 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL, bypass_retest: b
     # Grade A+ and Breakout signals execute immediately at market unless extreme chase (>1.50 ATR);
     # standard lower-conviction signals wait for pullback only when stretched (>1.35 ATR or >1.25 ATR candle).
     ext_atr, _, _ = compute_auction_location(sym, direction, entry, max(sym_atr, 1e-6))
-    lev_snap = liquidity_engine.get_levels(sym) if "liquidity_engine" in globals() else {}
-    has_sweep_or_brk = (
-        (direction == "LONG" and (lev_snap.get("sweep_bullish") or lev_snap.get("breakout_bullish")))
-        or (direction == "SHORT" and (lev_snap.get("sweep_bearish") or lev_snap.get("breakout_bearish")))
-    )
     if not bypass_retest and not is_high_prob and not has_sweep_or_brk and sym_atr > 0 and len(c5_list) >= 20:
         lc = c5_list[-1]
         lc_o, lc_c = float(lc["open"]), float(lc["close"])
@@ -1360,58 +1389,29 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL, bypass_retest: b
             if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
             return False
 
-    # ── MARKET-ANCHORED TARGET ARCHITECTURE (Realistic ATR & Liquidity Targets) ──
+    # ── MARKET-ANCHORED TARGET ARCHITECTURE (TP1 Fast Lock + Wide ATR Runner Ceiling) ──
     eff_atr = sym_atr if sym_atr > 0 else sl_dist
     if trade_mode == "SWING":
-        tp1_dist = min(sl_dist * 1.6, eff_atr * 2.8)
-        tp2_dist = min(sl_dist * 3.2, eff_atr * 5.5)
-        tp1_dist = max(tp1_dist, sl_dist * 1.3)
-        tp2_dist = max(tp2_dist, sl_dist * 2.4)
+        tp1_dist = max(sl_dist * 1.3, min(sl_dist * 1.6, eff_atr * 2.8))
+        tp2_dist = max(sl_dist * 5.5, eff_atr * 8.0)
         max_duration_min = 2880.0  # 48h
         adverse_decay_min = 480.0  # 8h adverse hold
     else:
         max_duration_min = 360.0   # 6h
         adverse_decay_min = 240.0  # 4h
         base_tp1_r = 1.25 if is_ranging else 1.4
-        base_tp2_r = 2.2 if is_ranging else 2.5
         tp1_dist = max(sl_dist * 1.15, min(sl_dist * base_tp1_r, eff_atr * 1.8))
-        tp2_dist = max(sl_dist * 1.9, min(sl_dist * base_tp2_r, eff_atr * 3.5))
+        tp2_dist = max(sl_dist * 4.5, eff_atr * 6.5)
 
     tp1 = round(entry + tp1_dist if direction == "LONG" else entry - tp1_dist, 2)
     tp2 = round(entry + tp2_dist if direction == "LONG" else entry - tp2_dist, 2)
-
-    # Snap TP2 to nearest genuine Volume Profile / Liquidity Pool within achievable reach
-    try:
-        from src.features.indicators.volume_profile import compute_volume_profile_snapshot
-        c_buf = symbol_candles_5m.get(sym, candles_5m)
-        vp = compute_volume_profile_snapshot(pd.DataFrame(list(c_buf)[-100:]))
-        candidates = []
-        if vp["profile_ready"]:
-            candidates.extend([vp["poc"], vp["vah"]] + vp["hvn_prices"])
-        for lvl_k in ("pdh", "pdl", "ash", "asl"):
-            lv = float(lev_snap.get(lvl_k, 0.0))
-            if lv > 0:
-                candidates.append(lv)
-
-        min_reach = sl_dist * 1.85
-        max_reach = eff_atr * (5.5 if trade_mode == "SWING" else 3.6)
-        if direction == "LONG":
-            valid_tps = [p for p in candidates if entry + min_reach <= p <= entry + max_reach]
-            if valid_tps:
-                tp2 = round(min(valid_tps), 2)
-        else:
-            valid_tps = [p for p in candidates if entry - max_reach <= p <= entry - min_reach]
-            if valid_tps:
-                tp2 = round(max(valid_tps), 2)
-    except Exception:
-        pass
 
     tp1_rr = round(abs(tp1 - entry) / max(sl_dist, 1e-6), 2)
     tp2_rr = round(abs(tp2 - entry) / max(sl_dist, 1e-6), 2)
 
     entry_lots, risk_usd, notional = size_position(
         sl_dist, prob, entry, council, direction,
-        symbol=sym, trade_mode=trade_mode, potential_rr=tp2_rr
+        symbol=sym, trade_mode=trade_mode, potential_rr=(tp2_rr if trade_mode == "SWING" else tp1_rr * 1.8)
     )
     if entry_lots <= 0 or notional <= 0: return False
 
@@ -1604,14 +1604,10 @@ def _check_exit_for_symbol(sym: str):
             outcome_str = "LOSS"
             if sym_eng and port["signal_id"]:
                 sym_eng.resolve_signal(port["signal_id"], False, total)
-            # Anti-spiral
-            if account["consecutive_losses"] >= SESSION_LOSSES:
+            # Anti-spiral cooling (30m pause; Prop Firm 2.25% daily safety stop enforces hard protection)
+            if account["consecutive_losses"] >= 2:
                 account["halted"]     = True
-                account["halt_reason"] = f"{SESSION_LOSSES} consecutive losses"
-                account["halt_until"] = time.time() + 4*3600
-            elif account["consecutive_losses"] >= 2:
-                account["halted"]     = True
-                account["halt_reason"] = "2 consecutive losses — cooling"
+                account["halt_reason"] = f"{account['consecutive_losses']} consecutive losses — cooling"
                 account["halt_until"] = time.time() + LOSS_COOLDOWN_2
 
         if is_win and sym_eng and port["signal_id"]:
@@ -1827,12 +1823,12 @@ def _check_exit_for_symbol(sym: str):
         except Exception:
             pass
 
-    # ── DYNAMIC TIER 3: Partial TP at TP1 (Horizon Adaptive: 40% Swing / 50% Scalp) ──
+    # ── DYNAMIC TIER 3: Partial TP at TP1 (Bank 40%, move SL to BE, let 60% runner ride ATR trail) ──
     is_swing = (port.get("trade_mode") == "SWING")
     if port["phase"] == 1:
         hit = (direction=="LONG" and cur>=tp1) or (direction=="SHORT" and cur<=tp1)
         if hit:
-            part_frac = 0.40 if is_swing else 0.50
+            part_frac = 0.40
             partial = port["unrealized_pnl"] * part_frac
             port["banked_pnl"] += partial
             account["balance"]      += partial
@@ -1842,6 +1838,7 @@ def _check_exit_for_symbol(sym: str):
             port["sl_price"] = entry + fee_buf if direction=="LONG" else entry - fee_buf
             port["phase"] = 2
             port["risk_tier"] = 3
+            port["peak_fav_r"] = max(float(port.get("peak_fav_r", 0.0)), r_mult)
             if PROP_FIRM_MODE and prop_firm_manager:
                 prop_firm_manager.on_trade_closed(partial, "TP1 PARTIAL")
 
@@ -1853,20 +1850,26 @@ def _check_exit_for_symbol(sym: str):
                 "reason": f"+{port.get('tp1_rr', 2.0):.1f}R TP1 ({port.get('trade_mode','SCALP')})",
             })
 
-            # ── Execute Physical Partial Close on Broker (MT5) ──
+            # ── Execute Physical Partial Close on Broker (MT5) when remaining runner stays >= min step ──
             if DEMO_MODE and _active_broker is not None and t_id:
-                cur_vol = port.get("entry_lots", 0.0)
-                part_vol = round(cur_vol * part_frac, 2)
+                cur_vol = float(port.get("entry_lots", 0.0))
                 min_step = 0.02 if "ETH" in sym else 0.01
-                part_vol = max(min_step, part_vol)
-                _schedule_broker_sync(t_id, port["sl_price"], port["tp2_price"], part_vol=part_vol, err_label="TP1 sync err")
+                part_vol = round(cur_vol * part_frac, 2)
+                if cur_vol - part_vol >= min_step and part_vol >= min_step:
+                    _schedule_broker_sync(t_id, port["sl_price"], port["tp2_price"], part_vol=part_vol, err_label="TP1 sync err")
+                else:
+                    _schedule_broker_sync(t_id, port["sl_price"], port["tp2_price"], part_vol=0.0, err_label="TP1 BE sync err")
 
-    # ── DYNAMIC TIER 4: Dynamic Runner Chandelier Trail + Full TP2 Target Exit ──
+    # ── DYNAMIC TIER 4: Adaptive Runner Chandelier Trail (1.65 ATR tightening to 1.05 ATR past +2.5R) ──
     if port["phase"] == 2:
+        peak_fav_r = max(float(port.get("peak_fav_r", 0.0)), r_mult)
+        port["peak_fav_r"] = peak_fav_r
         if is_swing:
-            trail_buf = max(atr * 3.5, 25.0 if "ETH" in sym else (10.0 if "GOLD" in sym else 400.0))
+            trail_mult = 1.40 if peak_fav_r >= 3.0 else 2.20
+            trail_buf = max(atr * trail_mult, 15.0 if "ETH" in sym else (6.0 if "GOLD" in sym else 220.0))
         else:
-            trail_buf = max(atr * 2.0, 10.0 if "ETH" in sym else (5.0 if "GOLD" in sym else 160.0))
+            trail_mult = 1.05 if peak_fav_r >= 2.5 else 1.65
+            trail_buf = max(atr * trail_mult, 4.0 if "ETH" in sym else (2.5 if "GOLD" in sym else 80.0))
 
         ratchet_step = 2.0 if "ETH" in sym else 25.0
         if direction == "LONG":
