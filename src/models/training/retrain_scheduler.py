@@ -114,6 +114,7 @@ class RetrainScheduler:
         Call this in the main loop (e.g. after each candle).
         Returns True if models were swapped.
         """
+        models = None
         with self._lock:
             if self._pending_models is not None:
                 models = self._pending_models

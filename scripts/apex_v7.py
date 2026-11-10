@@ -515,6 +515,7 @@ symbol_live_probs: dict[str, dict] = {
     sym: {"long": 0.5, "short": 0.5, "updated": False}
     for sym in TRADED_SYMBOLS
 }
+_last_queued_5m_ts: dict[str, int] = {}
 live_probs = symbol_live_probs[PRIMARY_SYMBOL]
 symbol_regime_info: dict[str, dict] = {
     sym: {"current": "UNKNOWN", "adx": 0.0, "chop": 0.0, "atr": 80.0 if "BTC" in sym else (10.0 if "ETH" in sym else 5.0)}
@@ -2691,6 +2692,88 @@ def render():
     print("\n".join(buf), end="", flush=True)
 
 
+def _ingest_closed_5m(sym: str, c5: dict) -> bool:
+    """Thread-safe/idempotent ingestion of a closed 5m candle into symbol buffer and ML queue."""
+    ts = int(c5.get("timestamp", 0))
+    if ts <= 0:
+        return False
+    buf5 = symbol_candles_5m.get(sym)
+    if buf5 is not None:
+        if buf5 and buf5[-1].get("timestamp") == ts:
+            buf5[-1] = dict(c5)
+        elif not buf5 or ts > int(buf5[-1].get("timestamp", 0)):
+            buf5.append(dict(c5))
+    if _last_queued_5m_ts.get(sym, 0) >= ts:
+        return False
+    _last_queued_5m_ts[sym] = ts
+    if _candle_queue is not None:
+        try:
+            _candle_queue.put_nowait((sym, dict(c5)))
+            return True
+        except asyncio.QueueFull:
+            pass
+    return False
+
+async def _rest_kline_sync_loop():
+    """
+    Deterministic 5m/15m/1h REST candle watchdog: runs one immediate catch-up pass 3s after boot
+    and then wakes 2.5s after every 5m close so ML probabilities, ATR, and signals never freeze.
+    """
+    first_pass = True
+    while True:
+        try:
+            if first_pass:
+                first_pass = False
+                await asyncio.sleep(3.0)
+            else:
+                now_s = time.time()
+                next_close_s = ((int(now_s) // 300) + 1) * 300 + 2.5
+                await asyncio.sleep(max(1.0, next_close_s - now_s))
+
+            last_closed_5m_open_ms = (int(time.time()) // 300 - 1) * 300 * 1000
+            for sym in TRADED_SYMBOLS:
+                try:
+                    rows5 = await asyncio.to_thread(fetch_klines, sym, "5m", 6)
+                    for c in rows5:
+                        ts = int(c.get("timestamp", 0))
+                        if 0 < ts <= last_closed_5m_open_ms:
+                            _ingest_closed_5m(sym, c)
+                except Exception:
+                    pass
+
+                # Refresh 15m and 1h closed bars reliably on boundaries when WS @kline_15m/1h stalls
+                now_sec = int(time.time())
+                if (now_sec // 300) % 3 == 0:
+                    try:
+                        last_15_ms = (now_sec // 900 - 1) * 900 * 1000
+                        rows15 = await asyncio.to_thread(fetch_klines, sym, "15m", 4)
+                        buf15 = symbol_candles_15m.get(sym)
+                        if buf15 is not None:
+                            for c15 in rows15:
+                                ts15 = int(c15.get("timestamp", 0))
+                                if 0 < ts15 <= last_15_ms and (not buf15 or ts15 > int(buf15[-1].get("timestamp", 0))):
+                                    buf15.append(dict(c15))
+                    except Exception:
+                        pass
+
+                if (now_sec // 300) % 12 == 0:
+                    try:
+                        last_1h_ms = (now_sec // 3600 - 1) * 3600 * 1000
+                        rows1h = await asyncio.to_thread(fetch_klines, sym, "1h", 4)
+                        buf1h = symbol_candles_1h.get(sym)
+                        if buf1h is not None:
+                            for c1h in rows1h:
+                                ts1h = int(c1h.get("timestamp", 0))
+                                if 0 < ts1h <= last_1h_ms and (not buf1h or ts1h > int(buf1h[-1].get("timestamp", 0))):
+                                    buf1h.append(dict(c1h))
+                        compute_macro_structure(sym)
+                    except Exception:
+                        pass
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            await asyncio.sleep(5)
+
 # ─── WEBSOCKET ────────────────────────────────────────────────────────────────
 async def binance_ws():
     # Construct combined multiplexed stream URL across all TRADED_SYMBOLS
@@ -2700,7 +2783,6 @@ async def binance_ws():
         streams.extend([f"{sl}@trade", f"{sl}@bookTicker", f"{sl}@depth20@500ms", f"{sl}@kline_5m", f"{sl}@kline_15m", f"{sl}@kline_1h"])
     url = f"wss://fstream.binance.com/stream?streams={'/'.join(streams)}"
 
-    _last_queued_5m_ts: dict[str, int] = {}
     while True:
         try:
             # Resilient ping and buffer settings so rapid price spikes never drop connection
@@ -2765,21 +2847,7 @@ async def binance_ws():
                                 "volume":    float(k["v"]),
                                 "timestamp": int(k["t"]),
                             }
-                            if _last_queued_5m_ts.get(sym) == c5["timestamp"]:
-                                continue
-                            _last_queued_5m_ts[sym] = c5["timestamp"]
-                            buf5 = symbol_candles_5m.get(sym)
-                            if buf5 is not None:
-                                if buf5 and buf5[-1].get("timestamp") == c5["timestamp"]:
-                                    buf5[-1] = dict(c5)
-                                else:
-                                    buf5.append(dict(c5))
-
-                            if _candle_queue is not None:
-                                try:
-                                    _candle_queue.put_nowait((sym, c5))
-                                except asyncio.QueueFull:
-                                    pass
+                            _ingest_closed_5m(sym, c5)
                     elif "@kline_15m" in st:
                         k = pay.get("k", {})
                         if k.get("x"):
@@ -3760,7 +3828,7 @@ async def main():
         print("🛑 Exiting to eliminate duplicate Telegram messages and MT5 desync.")
         return
 
-    global _candle_queue
+    global _candle_queue, last_signal
     _candle_queue = asyncio.Queue(maxsize=50)  # Must be created inside running event loop
     prewarm()
     update_health()
@@ -3773,10 +3841,7 @@ async def main():
             print(f"  Replaying {len(sym_buf)} historical candles for {sym} to initialize ML state...")
             for c in sym_buf:
                 try:
-                    sig = await eng.process_candle(c)
-                    if sig is not None and sym == PRIMARY_SYMBOL:
-                        global last_signal
-                        last_signal = sig
+                    await eng.process_candle(c)
                 except Exception:
                     pass
             eng._suppression_counter = 0
@@ -3790,6 +3855,8 @@ async def main():
                 if sym == PRIMARY_SYMBOL:
                     regime_info["current"] = r_val
             _sync_live_probs(sym, eng)
+            if symbol_candles_5m.get(sym):
+                _last_queued_5m_ts[sym] = int(symbol_candles_5m[sym][-1].get("timestamp", 0))
             try:
                 buf = eng.live_store.get_buffer_as_df()
                 if not buf.empty:
@@ -3804,6 +3871,8 @@ async def main():
             except Exception:
                 pass
             print(f"  ✓ [{sym}] Replay complete — Regime: {symbol_regime_info[sym]['current']} | ATR: ${symbol_regime_info[sym]['atr']:,.1f}")
+
+    last_signal = None  # Never display historical startup replay bar as a live pending signal
 
     # ── Broker Connection Validation ──────────────────────────────────────────
     if DEMO_MODE and _active_broker:
@@ -3832,6 +3901,7 @@ async def main():
 
     await asyncio.gather(
         binance_ws(),
+        _rest_kline_sync_loop(),
         delta_gold_feed.run(),
         ui_loop(),
         _candle_worker(),
