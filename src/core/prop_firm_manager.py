@@ -1009,20 +1009,24 @@ class PropFirmManager:
         """Update virtual balance, daily stats, and target progression upon trade close."""
         self.check_day_rollover()
         pnl = float(pnl_usd)
+        is_breakeven = abs(pnl) < 0.50
 
         self.virtual_balance += pnl
         self.daily_realized_pnl += pnl
         self.total_realized_pnl += pnl
         self.daily_unrealized_pnl = 0.0
-        self.total_trades += 1
-        self.daily_trades = getattr(self, "daily_trades", 0) + 1
         self.day_peak_realized_pnl = max(getattr(self, "day_peak_realized_pnl", 0.0), self.daily_realized_pnl)
 
-        if pnl > 0:
-            self.wins += 1
+        if not is_breakeven:
+            self.total_trades += 1
+            self.daily_trades = getattr(self, "daily_trades", 0) + 1
+            if pnl > 0:
+                self.wins += 1
+                self.peak_balance = max(self.peak_balance, self.virtual_balance)
+            else:
+                self.losses += 1
+        elif pnl > 0:
             self.peak_balance = max(self.peak_balance, self.virtual_balance)
-        else:
-            self.losses += 1
 
         # Check if target cleared!
         target_usd = self.initial_balance * (self.config["profit_target_pct"] / 100.0)

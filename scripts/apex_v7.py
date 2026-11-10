@@ -247,7 +247,7 @@ def get_calibrated_threshold(symbol: str, regime: str = "UNKNOWN", loc_delta: fl
     if s_name in ("LONDON", "NEW_YORK"):
         base -= 0.01
     elif s_name == "PACIFIC":
-        base += 0.02
+        base += 0.04
 
     if session.get("is_kill_zone", False):
         base -= 0.01
@@ -568,10 +568,23 @@ last_signal: TradingSignal | None = None
 regime_info = {"current": "UNKNOWN", "adx": 0.0, "chop": 0.0, "atr": 0.0}
 trade_journal: list[dict] = []
 trade_log = deque(maxlen=12)
-# P3: last gate rejection — shown on dashboard when a signal is approved but not executed
+# P3: per-symbol gate rejections (avoids one symbol's skip hiding another's)
 last_gate_rejection = {"reason": "", "signal": "", "ts": 0.0}
+symbol_gate_rejections: dict[str, dict] = {}
 # Institutional Fair-Value Pullback Retest Queue {symbol: {signal, direction, retest_px, inv_px, expires_ts}}
 pending_retest_zones: dict[str, dict] = {}
+
+def _is_grade_a_plus(prob: float, council: float) -> bool:
+    """Unified Grade A+ institutional threshold across worker, gates, and execution."""
+    return (prob >= 0.65 and council >= 0.68) or prob >= 0.70
+
+def _record_gate_rejection(sym: str, signal_desc: str, reason: str):
+    """Store per-symbol gate rejection without letting another asset overwrite it."""
+    now_t = time.time()
+    symbol_gate_rejections[sym] = {"symbol": sym, "signal": signal_desc, "reason": reason, "ts": now_t}
+    last_gate_rejection["reason"] = reason
+    last_gate_rejection["signal"] = signal_desc
+    last_gate_rejection["ts"] = now_t
 
 # ─── PERSISTENCE ──────────────────────────────────────────────────────────────
 def save_journal():
@@ -588,8 +601,15 @@ def load_journal():
             return
         with open(JOURNAL_FILE) as f:
             trade_journal = json.load(f)
-        closed = [t for t in trade_journal if t.get("outcome") in ["WIN","LOSS"]]
+        # Reclassify $0 / sub-$0.50 flat sync closes as BE so they never poison streak or W/L stats
+        for t in trade_journal:
+            if t.get("outcome") in ("WIN", "LOSS") and abs(float(t.get("pnl_usd", 0.0))) < 0.50:
+                t["outcome"] = "BE"
+        closed = [t for t in trade_journal if t.get("outcome") in ["WIN", "LOSS"]]
         if not closed:
+            account["consecutive_losses"] = 0
+            if "consecutive losses" in account.get("halt_reason", "").lower():
+                account["halted"] = False; account["halt_reason"] = ""; account["halt_until"] = 0.0
             return
         wins = [t for t in closed if t["outcome"] == "WIN"]
         losses = [t for t in closed if t["outcome"] == "LOSS"]
@@ -618,6 +638,8 @@ def load_journal():
             if t["outcome"] == "LOSS": streak += 1
             else: break
         account["consecutive_losses"] = streak
+        if streak < 2 and "consecutive losses" in account.get("halt_reason", "").lower():
+            account["halted"] = False; account["halt_reason"] = ""; account["halt_until"] = 0.0
 
         # Max consecutive wins
         win_streak = 0; best_win_streak = 0; cur_win = 0
@@ -806,8 +828,9 @@ def can_trade_symbol(symbol: str = SYMBOL, direction: str = "LONG", is_high_prob
     if account["trades_today"] >= MAX_TRADES_DAY:
         if not is_high_prob:
             return False, f"DYNAMIC TRADE CAP: Trade #{account['trades_today']+1} requires High-Probability Grade A+ setup"
-        if account["trades_today"] >= 6:
-            return False, f"HARD DAILY TRADES LIMIT (6/6 trades reached)"
+        hard_cap = 8 if session.get("name") in ("LONDON", "NEW_YORK") else 6
+        if account["trades_today"] >= hard_cap:
+            return False, f"HARD DAILY TRADES LIMIT ({hard_cap}/{hard_cap} trades reached)"
     # Dynamic, non-rigid loss cooldown based on consecutive losses
     consec = account.get("consecutive_losses", 0)
     cooldown_secs = LOSS_COOLDOWN_1 if consec <= 1 else (LOSS_COOLDOWN_2 if consec == 2 else LOSS_COOLDOWN_3)
@@ -852,9 +875,10 @@ def can_trade_symbol(symbol: str = SYMBOL, direction: str = "LONG", is_high_prob
         except Exception as e:
             logger.debug("gold_structure_check_error", error=str(e))
 
-    # ── Dynamic Multi-Timeframe Alignment + Liquidity Reversal Allowance ──
-    # Blocks sloppy counter-trend entries, while dynamically permitting Sniper Top/Bottom Reversals
-    # when Liquidity Sweeps + Order Flow Imbalance confirm a turn BEFORE the lagging 1H EMA flips!
+    # ── Dynamic Multi-Timeframe Alignment (No rigid 1H EMA lag stranglehold) ──
+    # 1) Never fight an aligned 4H trend unless Grade A+ AND a confirmed Liquidity Sweep Turn fired.
+    # 2) If 4H aligns with the signal (or is NEUTRAL), Grade A+ signals bypass lagging 1H EMA flips;
+    #    standard signals are permitted through 1H lag on Sweep Turn, Flow Turn, or aligned 4H momentum.
     macro = symbol_macro_structure.get(sym)
     if macro:
         trend_4h = str(macro.get("trend_4h", "NEUTRAL")).upper()
@@ -872,18 +896,24 @@ def can_trade_symbol(symbol: str = SYMBOL, direction: str = "LONG", is_high_prob
             (dir_upper == "SHORT" and (cur_obi <= -0.15 or cur_ofi <= -0.25))
             or (dir_upper == "LONG" and (cur_obi >= 0.15 or cur_ofi >= 0.25))
         )
-        allow_counter_1h = (has_sweep_turn and has_flow_turn) or (is_high_prob and has_flow_turn)
-
         if dir_upper == "SHORT":
-            if "BULL" in trend_1h and not allow_counter_1h:
+            four_h_aligned = ("BEAR" in trend_4h)
+            four_h_opposing = ("BULL" in trend_4h)
+            one_h_opposing = ("BULL" in trend_1h)
+            allow_counter_1h = is_high_prob or four_h_aligned or has_sweep_turn or has_flow_turn
+            if four_h_opposing and not (is_high_prob and (has_sweep_turn or has_flow_turn)):
+                return False, f"MACRO SHIELD: {sym} 4H is Bullish ({trend_4h}) — Shorts require Grade A+ sweep/flow turn"
+            if one_h_opposing and not allow_counter_1h:
                 return False, f"MTF SHIELD: {sym} 1H is Bullish ({trend_1h}) without Sweep/OFI turn confirmation — Shorts paused"
-            if "BULL" in trend_4h and not (has_sweep_turn and is_high_prob and has_flow_turn):
-                return False, f"MACRO SHIELD: {sym} 4H is Bullish ({trend_4h}) — Shorts Prohibited without Grade A+ sweep turn"
         elif dir_upper == "LONG":
-            if "BEAR" in trend_1h and not allow_counter_1h:
+            four_h_aligned = ("BULL" in trend_4h)
+            four_h_opposing = ("BEAR" in trend_4h)
+            one_h_opposing = ("BEAR" in trend_1h)
+            allow_counter_1h = is_high_prob or four_h_aligned or has_sweep_turn or has_flow_turn
+            if four_h_opposing and not (is_high_prob and (has_sweep_turn or has_flow_turn)):
+                return False, f"MACRO SHIELD: {sym} 4H is Bearish ({trend_4h}) — Longs require Grade A+ sweep/flow turn"
+            if one_h_opposing and not allow_counter_1h:
                 return False, f"MTF SHIELD: {sym} 1H is Bearish ({trend_1h}) without Sweep/OFI turn confirmation — Longs paused"
-            if "BEAR" in trend_4h and not (has_sweep_turn and is_high_prob and has_flow_turn):
-                return False, f"MACRO SHIELD: {sym} 4H is Bearish ({trend_4h}) — Longs Prohibited without Grade A+ sweep turn"
 
     return True, "CLEAR"
 
@@ -909,8 +939,9 @@ def can_trade(is_high_prob: bool = False) -> tuple[bool, str]:
     if account["trades_today"] >= MAX_TRADES_DAY:
         if not is_high_prob:
             return False, f"DYNAMIC TRADE CAP: Trade #{account['trades_today']+1} requires High-Probability Grade A+ setup"
-        if account["trades_today"] >= 6:
-            return False, f"HARD DAILY TRADES LIMIT (6/6 trades reached)"
+        hard_cap = 8 if session.get("name") in ("LONDON", "NEW_YORK") else 6
+        if account["trades_today"] >= hard_cap:
+            return False, f"HARD DAILY TRADES LIMIT ({hard_cap}/{hard_cap} trades reached)"
 
     consec = account.get("consecutive_losses", 0)
     cooldown_secs = LOSS_COOLDOWN_1 if consec <= 1 else (LOSS_COOLDOWN_2 if consec == 2 else LOSS_COOLDOWN_3)
@@ -1074,7 +1105,7 @@ def check_pending_retests(sym: str, price: float):
     if touched:
         pending_retest_zones.pop(sym, None)
         sig = z["signal"]
-        is_hp = ((sig.conviction >= 0.66 and sig.council_score >= 0.70) or sig.conviction >= 0.70)
+        is_hp = _is_grade_a_plus(sig.conviction, sig.council_score)
         ok, _ = can_trade_symbol(sym, direction, is_high_prob=is_hp)
         if ok and portfolios.get(sym, portfolio)["position"] == "FLAT":
             trade_log.append(f"[{sym}] RETEST FILLED @ ${price:,.2f} (Zone: ${z['retest_px']:,.2f})")
@@ -1112,45 +1143,45 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL, bypass_retest: b
     direction = "LONG" if signal.direction == "BUY" else "SHORT"
     prob      = signal.conviction
     council   = signal.council_score
-    is_high_prob = ((prob >= 0.66 and council >= 0.70) or prob >= 0.70)
+    is_high_prob = _is_grade_a_plus(prob, council)
+    sig_desc = f"[{sym}] {direction} p={prob:.3f}"
 
     ok, reason = can_trade_symbol(sym, direction, is_high_prob=is_high_prob)
-    if not ok: return
+    if not ok:
+        _record_gate_rejection(sym, sig_desc, f"[{sym}] {reason}")
+        return
 
     # ── PROP FIRM DYNAMIC QUALITY GATE ──
-    # For Trades 1-3: Standard institutional setups permitted (prob >= calibrated_min, council approved)
-    # After 3 trades: Strict Grade A+ sniper setups only (prob >= 0.66, council >= 0.68)
     trades_done = account.get("trades_today", 0)
-    if PROP_FIRM_MODE and trades_done >= MAX_TRADES_DAY:
-        if prob < 0.66 or council < 0.68:
-            log_msg = f"[{sym}] SNIPER QUALITY GATE: Signal conviction ({prob:.3f}) or council ({council:.2f}) below Grade A+ threshold (0.66 / 0.68) for Trade #{trades_done+1}"
-            trade_log.append(log_msg)
-            if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
-            return
+    if PROP_FIRM_MODE and trades_done >= MAX_TRADES_DAY and not is_high_prob:
+        log_msg = f"[{sym}] SNIPER QUALITY GATE: Signal ({prob:.3f} / {council:.2f}) below Grade A+ threshold for Trade #{trades_done+1}"
+        trade_log.append(log_msg)
+        _record_gate_rejection(sym, sig_desc, log_msg)
+        if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
+        return
 
     entry = mkt["ask"] if direction == "LONG" else mkt["bid"]
     if entry <= 0: entry = mkt.get("ltp", 0.0)
     if entry <= 0: return
 
-    # ── NO-CHASE GATE (Adapted from xau_c / autonomous.py) ──
-    # Prohibit entering if market price has already slipped > 0.35 ATR away from trigger
+    # ── NO-CHASE GATE ──
+    # Prohibit entering only if market price slipped > 0.50 ATR from trigger (avoids spread/tick noise false-skips)
     sym_atr = symbol_regime_info.get(sym, {}).get("atr", 0.0)
     sig_price = getattr(signal, "entry_price", 0.0) or getattr(signal, "price", 0.0)
     if sym_atr > 0 and sig_price > 0:
         chase_dist = (entry - sig_price) if direction == "LONG" else (sig_price - entry)
-        max_chase = 0.35 * sym_atr
+        max_chase = 0.50 * sym_atr
         if chase_dist > max_chase:
             log_msg = (
                 f"[{sym}] NO-CHASE GATE: Market price ${entry:,.2f} chased +${chase_dist:.2f} "
-                f"(> 0.35 ATR=${max_chase:.2f}) from trigger ${sig_price:,.2f} — Entry cancelled"
+                f"(> 0.50 ATR=${max_chase:.2f}) from trigger ${sig_price:,.2f} — Entry cancelled"
             )
             trade_log.append(log_msg)
+            _record_gate_rejection(sym, sig_desc, log_msg)
             if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
             return
 
-    # ── 5m V-REVERSAL, EXHAUSTION & OBI COUNTER-FLOW GUARD ──
-    # Blocks impulsive opposite bounce/dump candles and extreme >2.8 ATR rubber-band stretches,
-    # without blocking normal small pullback rejection candles.
+    # ── 5m V-REVERSAL, EXHAUSTION & EXTREME OBI COUNTER-FLOW GUARD ──
     c5_list = list(symbol_candles_5m.get(sym, []))
     if len(c5_list) >= 20:
         last_c = c5_list[-1]
@@ -1162,19 +1193,22 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL, bypass_retest: b
         is_last_green = lc_c > lc_o
         is_last_red = lc_c < lc_o
 
-        # 1. Impulsive 5m reversal candle opposition check (only blocks strong engulfing reversal bars)
-        if direction == "SHORT" and is_last_green and (lc_c - lc_o) > 0.40 * max(sym_atr, 1.0) and lc_c > pc_h:
+        # 1. Major opposing 5m V-reversal engulfing check (0.60 ATR for standard, 0.85 ATR for Grade A+)
+        rev_mult = 0.85 if is_high_prob else 0.60
+        if direction == "SHORT" and is_last_green and (lc_c - lc_o) > rev_mult * max(sym_atr, 1.0) and lc_c > pc_h:
             log_msg = f"[{sym}] ANTI-REVERSAL GUARD: Cancelled SHORT into strong impulsive green 5m reversal (O:{lc_o:,.2f} -> C:{lc_c:,.2f})"
             trade_log.append(log_msg)
+            _record_gate_rejection(sym, sig_desc, log_msg)
             if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
             return
-        if direction == "LONG" and is_last_red and (lc_o - lc_c) > 0.40 * max(sym_atr, 1.0) and lc_c < pc_l:
+        if direction == "LONG" and is_last_red and (lc_o - lc_c) > rev_mult * max(sym_atr, 1.0) and lc_c < pc_l:
             log_msg = f"[{sym}] ANTI-REVERSAL GUARD: Cancelled LONG into strong impulsive red 5m selloff (O:{lc_o:,.2f} -> C:{lc_c:,.2f})"
             trade_log.append(log_msg)
+            _record_gate_rejection(sym, sig_desc, log_msg)
             if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
             return
 
-        # 2. Rubber-Band Exhaustion check (> 2.8 ATR stretch away from 5m EMA20)
+        # 2. Extreme Rubber-Band Exhaustion check (> 2.8 ATR stretch away from 5m EMA20)
         closes_20 = [float(x["close"]) for x in c5_list[-20:]]
         ema20 = closes_20[0]
         k = 2.0 / 21.0
@@ -1184,29 +1218,33 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL, bypass_retest: b
             if direction == "SHORT" and (ema20 - entry) > (2.8 * sym_atr):
                 log_msg = f"[{sym}] EXHAUSTION GUARD: Cancelled SHORT {ema20 - entry:.1f} pts (> 2.8 ATR) oversold below 5m EMA20"
                 trade_log.append(log_msg)
+                _record_gate_rejection(sym, sig_desc, log_msg)
                 if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
                 return
             if direction == "LONG" and (entry - ema20) > (2.8 * sym_atr):
                 log_msg = f"[{sym}] EXHAUSTION GUARD: Cancelled LONG {entry - ema20:.1f} pts (> 2.8 ATR) overbought above 5m EMA20"
                 trade_log.append(log_msg)
+                _record_gate_rejection(sym, sig_desc, log_msg)
                 if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
                 return
 
-    # 3. Real-time L2 Order Book Imbalance (OBI) Counter-Flow Guard
+    # 3. Extreme L2 OBI Counter-Flow Guard (only blocks extreme opposing walls > 0.55 on non-A+ setups)
     cur_obi = float(mkt.get("obi", 0.0))
-    if direction == "SHORT" and cur_obi > 0.25:
-        log_msg = f"[{sym}] OBI COUNTER-FLOW GUARD: Cancelled SHORT into strong positive buy pressure (OBI: {cur_obi:+.3f})"
-        trade_log.append(log_msg)
-        if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
-        return
-    if direction == "LONG" and cur_obi < -0.25:
-        log_msg = f"[{sym}] OBI COUNTER-FLOW GUARD: Cancelled LONG into strong negative sell pressure (OBI: {cur_obi:+.3f})"
-        trade_log.append(log_msg)
-        if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
-        return
+    if not is_high_prob:
+        if direction == "SHORT" and cur_obi > 0.55:
+            log_msg = f"[{sym}] OBI COUNTER-FLOW GUARD: Cancelled SHORT into extreme buy wall (OBI: {cur_obi:+.3f})"
+            trade_log.append(log_msg)
+            _record_gate_rejection(sym, sig_desc, log_msg)
+            if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
+            return
+        if direction == "LONG" and cur_obi < -0.55:
+            log_msg = f"[{sym}] OBI COUNTER-FLOW GUARD: Cancelled LONG into extreme sell wall (OBI: {cur_obi:+.3f})"
+            trade_log.append(log_msg)
+            _record_gate_rejection(sym, sig_desc, log_msg)
+            if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
+            return
 
     # ── ANTI-TRAP GUARD: Dual Advisor Veto ──
-    # If both Momentum AND Volume advisors explicitly vote REJECT, abort entry
     v_dict = getattr(signal, "metadata", {}).get("council_votes", {})
     if v_dict:
         mom_vote = v_dict.get("Momentum", {}).get("vote")
@@ -1214,21 +1252,24 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL, bypass_retest: b
         if mom_vote == "REJECT" and vol_vote == "REJECT":
             log_msg = f"[{sym}] ANTI-TRAP VETO: Momentum & Volume both voted REJECT opposing {direction}"
             trade_log.append(log_msg)
+            _record_gate_rejection(sym, sig_desc, log_msg)
             if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
             return
 
-    # ── INSTITUTIONAL FAIR-VALUE RETEST QUEUE (Avoids market-chasing big impulse candles) ──
+    # ── INSTITUTIONAL FAIR-VALUE RETEST QUEUE ──
+    # Grade A+ and Breakout signals execute immediately at market unless extreme chase (>1.50 ATR);
+    # standard lower-conviction signals wait for pullback only when stretched (>1.35 ATR or >1.25 ATR candle).
     ext_atr, _, _ = compute_auction_location(sym, direction, entry, max(sym_atr, 1e-6))
     lev_snap = liquidity_engine.get_levels(sym) if "liquidity_engine" in globals() else {}
-    has_sweep_origin = (
-        (direction == "LONG" and lev_snap.get("sweep_bullish"))
-        or (direction == "SHORT" and lev_snap.get("sweep_bearish"))
+    has_sweep_or_brk = (
+        (direction == "LONG" and (lev_snap.get("sweep_bullish") or lev_snap.get("breakout_bullish")))
+        or (direction == "SHORT" and (lev_snap.get("sweep_bearish") or lev_snap.get("breakout_bearish")))
     )
-    if not bypass_retest and sym_atr > 0 and len(c5_list) >= 20 and not has_sweep_origin:
+    if not bypass_retest and not is_high_prob and not has_sweep_or_brk and sym_atr > 0 and len(c5_list) >= 20:
         lc = c5_list[-1]
         lc_o, lc_c = float(lc["open"]), float(lc["close"])
         bar_move = (lc_c - lc_o) if direction == "LONG" else (lc_o - lc_c)
-        if bar_move > (0.70 * sym_atr) or ext_atr > 0.90:
+        if bar_move > (1.25 * sym_atr) or ext_atr > 1.35:
             mid_bar = (lc_o + lc_c) / 2.0
             if direction == "LONG":
                 retest_px = round(min(mid_bar, entry - 0.25 * sym_atr), 2)
@@ -1242,10 +1283,11 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL, bypass_retest: b
                 "direction": direction,
                 "retest_px": retest_px,
                 "inv_px": inv_px,
-                "expires_ts": time.time() + 600.0,  # 2x 5m bars
+                "expires_ts": time.time() + 600.0,
             }
             log_msg = f"[{sym}] RETEST LIMIT QUEUED ({direction}): Wait pullback to ${retest_px:,.2f} (from ${entry:,.2f}, inv ${inv_px:,.2f})"
             trade_log.append(log_msg)
+            _record_gate_rejection(sym, sig_desc, log_msg)
             if HEADLESS: print(f"  ⏳ {log_msg}", flush=True)
             return
 
@@ -1362,6 +1404,7 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL, bypass_retest: b
 
     account["last_trade_time"] = now_t
     account["trades_today"]   += 1
+    symbol_gate_rejections[sym] = {"symbol": sym, "reason": "", "signal": "", "ts": 0.0}
     last_gate_rejection["reason"] = ""  # clear last rejection on successful entry
     last_signal = signal
 
@@ -1489,21 +1532,27 @@ def _check_exit_for_symbol(sym: str):
             net_usd = (nbps/10000.0) * port["notional"]
 
         total   = round(port["banked_pnl"] + net_usd, 2)
-        is_win  = total > 0
+        is_be   = abs(total) < 0.50
+        is_win  = total >= 0.50
 
         account["balance"] += net_usd
         update_health()
 
         sym_eng = signal_engines.get(sym, signal_engine)
-        if is_win:
+        if is_be:
+            account["trades_today"] = max(0, account.get("trades_today", 0) - 1)
+            outcome_str = "BE"
+        elif is_win:
             account["wins"]             += 1
             account["consecutive_losses"] = 0
             account["total_wins_usd"]   += total
+            outcome_str = "WIN"
         else:
             account["losses"]           += 1
             account["consecutive_losses"] += 1
             account["total_losses_usd"] += abs(total)
             account["last_loss_time"]    = time.time()
+            outcome_str = "LOSS"
             if sym_eng and port["signal_id"]:
                 sym_eng.resolve_signal(port["signal_id"], False, total)
             # Anti-spiral
@@ -1523,13 +1572,14 @@ def _check_exit_for_symbol(sym: str):
         if PROP_FIRM_MODE and prop_firm_manager:
             prop_firm_manager.on_trade_closed(total, reason)
 
-        account["total"]   += 1
-        account["win_rate"] = round(account["wins"]/account["total"]*100, 1) if account["total"] > 0 else 0
-        account["avg_win"]  = round(account["total_wins_usd"]/account["wins"],   2) if account["wins"]   > 0 else 0
-        account["avg_loss"] = round(account["total_losses_usd"]/account["losses"],2) if account["losses"] > 0 else 0
-        account["profit_factor"] = round(account["total_wins_usd"]/account["total_losses_usd"],3) if account["total_losses_usd"] > 0 else 999.0
-        account["best"]  = max(account["best"], total)
-        account["worst"] = min(account["worst"], total)
+        if not is_be:
+            account["total"]   += 1
+            account["win_rate"] = round(account["wins"]/account["total"]*100, 1) if account["total"] > 0 else 0
+            account["avg_win"]  = round(account["total_wins_usd"]/account["wins"],   2) if account["wins"]   > 0 else 0
+            account["avg_loss"] = round(account["total_losses_usd"]/account["losses"],2) if account["losses"] > 0 else 0
+            account["profit_factor"] = round(account["total_wins_usd"]/account["total_losses_usd"],3) if account["total_losses_usd"] > 0 else 999.0
+            account["best"]  = max(account["best"], total)
+            account["worst"] = min(account["worst"], total)
 
         s = "+" if total >= 0 else ""
         trade_log.append(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] "
@@ -1546,7 +1596,7 @@ def _check_exit_for_symbol(sym: str):
             if t.get("outcome") == "OPEN" and t.get("symbol") == sym:
                 t.update({"exit_ts": datetime.datetime.now().isoformat(),
                           "exit_price": price, "pnl_usd": total,
-                          "outcome": "WIN" if is_win else "LOSS",
+                          "outcome": outcome_str,
                           "exit_reason": reason, "dur_min": round(dur_min,1)})
                 break
         save_journal()
@@ -1992,22 +2042,21 @@ async def _candle_worker():
                     if sig.conviction < required_threshold:
                         intel_notes = [n for n in (liq_reason, ll_reason, micro_reason, fund_reason) if n and n != "NEUTRAL"]
                         intel_str = " | ".join(intel_notes) if intel_notes else "Low Intel Delta"
-                        last_gate_rejection["reason"] = f"[{sym}] Intel {sig.conviction:.3f} < {required_threshold:.3f} [{loc_note}] ({intel_str})"
-                        last_gate_rejection["signal"] = f"[{sym}] {direction} raw={sig.conviction - total_intel_delta:.3f} adj={sig.conviction:.3f}"
-                        last_gate_rejection["ts"] = time.time()
+                        _record_gate_rejection(
+                            sym,
+                            f"[{sym}] {direction} raw={sig.conviction - total_intel_delta:.3f} adj={sig.conviction:.3f}",
+                            f"[{sym}] Intel {sig.conviction:.3f} < {required_threshold:.3f} [{loc_note}] ({intel_str})",
+                        )
                         continue
 
-                    is_high_prob = ((sig.conviction >= 0.66 and sig.council_score >= 0.70) or sig.conviction >= 0.70)
+                    is_high_prob = _is_grade_a_plus(sig.conviction, sig.council_score)
                     ok, reason = can_trade_symbol(sym, direction, is_high_prob=is_high_prob)
                     sym_port = portfolios.get(sym, portfolio)
                     if sym_port["position"] == "FLAT" and ok:
                         if sig.council_approved and sig.direction in ("BUY", "SELL"):
                             execute_signal(sig, symbol=sym)
                     elif sym_port["position"] == "FLAT" and sig.council_approved and sig.direction in ("BUY", "SELL"):
-                        # P3: Approved but gated — track for dashboard
-                        last_gate_rejection["reason"] = f"[{sym}] {reason}"
-                        last_gate_rejection["signal"] = f"[{sym}] {direction} p={sig.conviction:.3f}"
-                        last_gate_rejection["ts"] = time.time()
+                        _record_gate_rejection(sym, f"[{sym}] {direction} p={sig.conviction:.3f}", f"[{sym}] {reason}")
             except Exception:
                 pass
             finally:
@@ -2310,8 +2359,8 @@ def prewarm():
     regime_info["atr"] = 200.0  # Default until first signal
 
     update_session()
-    load_journal()
     state_manager.load_state(portfolio, account)
+    load_journal()
 
     # Reconcile active session's trades directly from trade journal to prevent restart amnesia
     today_str = datetime.datetime.now().strftime("%Y-%m-%d")
@@ -2322,13 +2371,17 @@ def prewarm():
 
     session_trades = [
         t for t in trade_journal
-        if str(t.get("open_ts", "")).startswith(today_str) and str(t.get("open_ts", "")) >= session_start_iso
+        if str(t.get("open_ts", "")).startswith(today_str)
+        and str(t.get("open_ts", "")) >= session_start_iso
+        and t.get("outcome") not in ("CANCELLED", "BE")
+        and (t.get("outcome") == "OPEN" or abs(float(t.get("pnl_usd", 0.0))) >= 0.50)
     ]
     account["trades_today"] = len(session_trades)
     account["today_date"] = today_str
     if PROP_FIRM_MODE and prop_firm_manager:
         prop_firm_manager.daily_trades = len(session_trades)
         prop_firm_manager.save_state()
+    state_manager.save_state(portfolio, account)
 
     # Reset stale consecutive loss streak if last loss was more than cooldown period ago (> 2 hours)
     if account.get("last_loss_time", 0) > 0 and (time.time() - account["last_loss_time"]) > LOSS_COOLDOWN_3:
@@ -2603,11 +2656,19 @@ def render():
         ls_c = GRN if ls.direction == "BUY" else RED
         council_c = GRN if ls.council_approved else RED
         buf.append(row(f"{BOLD}{CYN}LATEST SIGNAL:{R} {BOLD}{ls_sym}{R} {ls_c}{ls_dir}{R} p={ls.conviction:.3f} │ Council: {council_c}{'APPROVED' if ls.council_approved else 'BLOCKED'}{R} score={ls.council_score:.2f} [{ls.council_summary}]"))
-    gr = last_gate_rejection
-    if gr.get("reason") and gr.get("signal") and (time.time() - gr.get("ts", 0)) < 600:
-        age = int(time.time() - gr["ts"])
-        buf.append(row(f" {YLW}⚠  Approved {gr['signal']} NOT executed — {gr['reason']} ({age}s ago){R}"))
-    if ls or (gr.get("reason") and gr.get("signal")):
+    active_rej = [
+        gr for gr in symbol_gate_rejections.values()
+        if gr.get("reason") and gr.get("signal") and (time.time() - gr.get("ts", 0)) < 600
+    ]
+    active_rej.sort(key=lambda x: x.get("ts", 0), reverse=True)
+    if active_rej:
+        for gr in active_rej[:3]:
+            age = int(time.time() - gr["ts"])
+            buf.append(row(f" {YLW}⚠  Approved {gr['signal']} NOT executed — {gr['reason']} ({age}s ago){R}"))
+    elif last_gate_rejection.get("reason") and last_gate_rejection.get("signal") and (time.time() - last_gate_rejection.get("ts", 0)) < 600:
+        age = int(time.time() - last_gate_rejection["ts"])
+        buf.append(row(f" {YLW}⚠  Approved {last_gate_rejection['signal']} NOT executed — {last_gate_rejection['reason']} ({age}s ago){R}"))
+    if ls or active_rej or (last_gate_rejection.get("reason") and last_gate_rejection.get("signal")):
         buf.append(DIV)
 
     # 5. MARKET INTELLIGENCE
@@ -3283,31 +3344,38 @@ def _do_close_symbol(sym: str, exit_profit: float, exit_price: float, reason: st
     if sym_port.get("position") != "OPEN":
         return
     cur_dir = sym_port.get("direction", "LONG")
-    is_win = exit_profit > 0
+    is_be = abs(exit_profit) < 0.50
+    is_win = exit_profit >= 0.50
     account["balance"] += exit_profit
     update_health()
     if PROP_FIRM_MODE and prop_firm_manager:
         prop_firm_manager.on_trade_closed(exit_profit, reason)
-    if is_win:
+    if is_be:
+        account["trades_today"] = max(0, account.get("trades_today", 0) - 1)
+        outcome_str = "BE"
+    elif is_win:
         account["wins"] += 1
         account["consecutive_losses"] = 0
         account["total_wins_usd"] += exit_profit
+        outcome_str = "WIN"
     else:
         account["losses"] += 1
         account["consecutive_losses"] += 1
         account["total_losses_usd"] += abs(exit_profit)
         account["last_loss_time"] = time.time()
+        outcome_str = "LOSS"
         if account["consecutive_losses"] >= 2:
             account["halted"] = True
             account["halt_reason"] = "2 consecutive losses — cooling"
             account["halt_until"] = time.time() + LOSS_COOLDOWN_2
-    account["total"] += 1
-    account["win_rate"] = round(account["wins"]/account["total"]*100, 1) if account["total"] > 0 else 0
-    account["avg_win"]  = round(account["total_wins_usd"]/account["wins"], 2) if account["wins"] > 0 else 0
-    account["avg_loss"] = round(account["total_losses_usd"]/account["losses"], 2) if account["losses"] > 0 else 0
-    account["profit_factor"] = round(account["total_wins_usd"]/account["total_losses_usd"], 3) if account["total_losses_usd"] > 0 else 999.0
-    account["best"]  = max(account["best"], exit_profit)
-    account["worst"] = min(account["worst"], exit_profit)
+    if not is_be:
+        account["total"] += 1
+        account["win_rate"] = round(account["wins"]/account["total"]*100, 1) if account["total"] > 0 else 0
+        account["avg_win"]  = round(account["total_wins_usd"]/account["wins"], 2) if account["wins"] > 0 else 0
+        account["avg_loss"] = round(account["total_losses_usd"]/account["losses"], 2) if account["losses"] > 0 else 0
+        account["profit_factor"] = round(account["total_wins_usd"]/account["total_losses_usd"], 3) if account["total_losses_usd"] > 0 else 999.0
+        account["best"]  = max(account["best"], exit_profit)
+        account["worst"] = min(account["worst"], exit_profit)
 
     s = "+" if exit_profit >= 0 else ""
     trade_log.append(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] "
@@ -3323,7 +3391,7 @@ def _do_close_symbol(sym: str, exit_profit: float, exit_price: float, reason: st
         if t.get("symbol") == sym and t.get("outcome") == "OPEN":
             t.update({"exit_ts": datetime.datetime.now().isoformat(),
                       "exit_price": exit_price, "pnl_usd": exit_profit,
-                      "outcome": "WIN" if is_win else "LOSS",
+                      "outcome": outcome_str,
                       "exit_reason": reason})
             break
     save_journal()
@@ -3367,6 +3435,10 @@ async def _broker_sync_loop():
                             deal = None
                             if hasattr(_active_broker, "get_closed_deal"):
                                 deal = await _active_broker.get_closed_deal(ticket=ticket)
+                                if not deal:
+                                    # Wait briefly for MT5 deal history to commit right after SL/TP execution
+                                    await asyncio.sleep(1.0)
+                                    deal = await _active_broker.get_closed_deal(ticket=ticket)
 
                             sym_mkt = symbol_markets.get(sym, market)
                             exit_price = float(deal.get("price", sym_mkt.get("ltp", 0.0))) if deal else sym_mkt.get("ltp", 0.0)
