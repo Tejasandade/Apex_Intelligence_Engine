@@ -657,6 +657,8 @@ class PropFirmManager:
         self.daily_unrealized_pnl: float = 0.0
         self.total_realized_pnl: float = 0.0
         self.daily_trades: int = 0
+        self.window_key: str = ""
+        self.window_trades: int = 0
         self.day_peak_realized_pnl: float = 0.0
 
         self.wins: int = 0
@@ -674,8 +676,11 @@ class PropFirmManager:
         return self.virtual_balance - self.initial_balance
 
     def check_day_rollover(self) -> None:
-        """Check for 00:00 UTC day rollover to reset daily loss tracker."""
-        current_utc_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        """Check for 00:00 UTC day rollover and 12h half-day session rollover (00:00 / 12:00 UTC)."""
+        now_utc = datetime.now(timezone.utc)
+        current_utc_date = now_utc.strftime("%Y-%m-%d")
+        current_win_key = f"{current_utc_date}_{'H2' if now_utc.hour >= 12 else 'H1'}"
+        changed = False
         if current_utc_date != self.today_date:
             logger.info(
                 "prop_firm_day_rollover",
@@ -700,6 +705,12 @@ class PropFirmManager:
             if self.status == "DAILY_HALT":
                 self.status = "IN_PROGRESS"
                 self.halt_reason = ""
+            changed = True
+        if current_win_key != getattr(self, "window_key", ""):
+            self.window_key = current_win_key
+            self.window_trades = 0
+            changed = True
+        if changed:
             self.save_state()
 
     def update_floating_pnl(self, unrealized_usd: float) -> None:
@@ -763,19 +774,17 @@ class PropFirmManager:
                     f"Session profit secured."
                 )
 
-        # 5. Dynamic Daily Trades Cap (Sniper Discipline)
-        # Trades 1 to base_max_trades (default 3) allow standard setups.
-        # Above 3 trades, only permit High-Probability / High-Potential (Grade A+) setups.
-        # Hard safety ceiling at 6 trades to prevent endless overtrading/chop.
+        # 5. Dynamic 12h Session Trades Cap (Sniper Discipline without starving NY Open)
+        # Trades 1..3 per 12h window allow standard calibrated setups; up to 8 allowed with Grade A+.
         base_max_trades = int(self.config.get("max_trades_per_day", 3))
-        daily_done = getattr(self, "daily_trades", 0)
-        if daily_done >= base_max_trades and not is_grade_a_plus:
+        win_done = getattr(self, "window_trades", getattr(self, "daily_trades", 0))
+        if win_done >= base_max_trades and not is_grade_a_plus:
             return False, (
-                f"DYNAMIC TRADE CAP: Trade #{daily_done + 1} requires High-Probability Grade A+ setup "
-                f"(conviction >= 0.66, council >= 0.70). Standing down to protect gains."
+                f"DYNAMIC TRADE CAP: Session Trade #{win_done + 1} requires High-Probability Grade A+ setup "
+                f"(conviction >= 0.65, council >= 0.68). Standing down to protect gains."
             )
-        if daily_done >= 6:
-            return False, f"HARD DAILY TRADES LIMIT (6/6 trades reached today). Standing down to protect challenge capital."
+        if win_done >= 8:
+            return False, f"HARD SESSION TRADES LIMIT (8/8 trades reached in current 12h window). Standing down."
 
         return True, "CLEAR"
 
@@ -1020,6 +1029,7 @@ class PropFirmManager:
         if not is_breakeven:
             self.total_trades += 1
             self.daily_trades = getattr(self, "daily_trades", 0) + 1
+            self.window_trades = getattr(self, "window_trades", 0) + 1
             if pnl > 0:
                 self.wins += 1
                 self.peak_balance = max(self.peak_balance, self.virtual_balance)
@@ -1115,6 +1125,8 @@ class PropFirmManager:
             "daily_realized_pnl": self.daily_realized_pnl,
             "day_peak_realized_pnl": getattr(self, "day_peak_realized_pnl", 0.0),
             "daily_trades": getattr(self, "daily_trades", 0),
+            "window_key": getattr(self, "window_key", ""),
+            "window_trades": getattr(self, "window_trades", 0),
             "total_realized_pnl": self.total_realized_pnl,
             "wins": self.wins,
             "losses": self.losses,
@@ -1227,6 +1239,8 @@ class PropFirmManager:
             self.daily_realized_pnl = float(data.get("daily_realized_pnl", 0.0))
             self.day_peak_realized_pnl = float(data.get("day_peak_realized_pnl", self.daily_realized_pnl))
             self.daily_trades = int(data.get("daily_trades", 0))
+            self.window_key = data.get("window_key", "")
+            self.window_trades = int(data.get("window_trades", 0))
             self.total_realized_pnl = float(data.get("total_realized_pnl", 0.0))
             self.wins = int(data.get("wins", 0))
             self.losses = int(data.get("losses", 0))
