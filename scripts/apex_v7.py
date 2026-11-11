@@ -729,9 +729,45 @@ def load_journal():
                              f"@{t.get('entry_price',0):,.0f}→{t.get('exit_price',0):,.0f} "
                              f"PnL:{s}${pnl:.2f} ({t.get('exit_reason','?')})")
 
+        # Reconcile open trades with MT5 broker deals to prevent restart amnesia
         for t in trade_journal:
             if t.get("outcome") == "OPEN":
-                t["outcome"] = "CANCELLED"; t["exit_reason"] = "STALE"; t["pnl_usd"] = 0.0
+                ticket_val = t.get("broker_ticket")
+                deal_found = False
+                if DEMO_MODE and ticket_val:
+                    try:
+                        import MetaTrader5 as mt5
+                        if mt5.initialize():
+                            deals = mt5.history_deals_get(position=int(ticket_val))
+                            if deals and len(deals) >= 2:
+                                exit_deals = [d for d in deals if d.entry == 1]
+                                if exit_deals:
+                                    tot_pnl = sum(d.profit for d in exit_deals)
+                                    tot_vol = sum(d.volume for d in exit_deals)
+                                    avg_exit_px = (sum(d.price * d.volume for d in exit_deals) / tot_vol) if tot_vol > 0 else exit_deals[-1].price
+                                    last_deal = exit_deals[-1]
+                                    t["outcome"] = "WIN" if tot_pnl >= 0.50 else ("BE" if abs(tot_pnl) < 0.50 else "LOSS")
+                                    t["exit_price"] = round(avg_exit_px, 2)
+                                    t["pnl_usd"] = round(tot_pnl, 2)
+                                    t["exit_reason"] = f"MT5 {last_deal.comment}" if last_deal.comment else "MT5 Apex Exit"
+                                    t["exit_ts"] = datetime.datetime.fromtimestamp(last_deal.time, datetime.timezone.utc).isoformat()
+                                    deal_found = True
+                    except Exception:
+                        pass
+                if not deal_found:
+                    open_ts = str(t.get("open_ts", ""))
+                    is_ancient = False
+                    if open_ts:
+                        try:
+                            ot = datetime.datetime.fromisoformat(open_ts.replace("Z", "+00:00"))
+                            if (datetime.datetime.now(datetime.timezone.utc) - ot).total_seconds() > 86400:
+                                is_ancient = True
+                        except Exception:
+                            pass
+                    if is_ancient:
+                        t["outcome"] = "CANCELLED"
+                        t["exit_reason"] = "EXPIRED"
+                        t["pnl_usd"] = 0.0
         save_journal()
         update_health()
     except Exception as e:
@@ -1658,6 +1694,11 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL, bypass_retest: b
                 )
                 if oid:
                     port["broker_ticket"] = str(oid)
+                    if trade_journal:
+                        for tj in reversed(trade_journal):
+                            if tj.get("symbol") == sym and tj.get("outcome") == "OPEN":
+                                tj["broker_ticket"] = str(oid)
+                                break
                     try:
                         if hasattr(_active_broker, "get_open_position"):
                             pos_info = await _active_broker.get_open_position(ticket=int(oid))
@@ -3648,7 +3689,7 @@ def _do_close_symbol(sym: str, exit_profit: float, exit_price: float, reason: st
         "reason": reason,
     })
     for t in reversed(trade_journal):
-        if t.get("symbol") == sym and t.get("outcome") == "OPEN":
+        if t.get("symbol") == sym and t.get("outcome") in ("OPEN", "CANCELLED"):
             t.update({"exit_ts": datetime.datetime.now().isoformat(),
                       "exit_price": exit_price, "pnl_usd": total_profit,
                       "outcome": outcome_str,

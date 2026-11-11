@@ -1686,5 +1686,624 @@
     "outcome": "LOSS",
     "exit_reason": "Apex Exit",
     "dur_min": 177.8
+  },
+  {
+    "id": 36,
+    "open_ts": "2026-11-10T17:36:03.548165",
+    "symbol": "BTCUSDT",
+    "action": "SELL",
+    "trade_mode": "SCALP",
+    "entry_price": 74331.8,
+    "sl_price": 74591.8,
+    "tp1_price": 74032.8,
+    "tp2_price": 73789.0,
+    "sl_dist": 260.0,
+    "notional": 8176.5,
+    "risk_usd": 28.6,
+    "lots": 0.11,
+    "leverage": 6.52,
+    "prob": 0.7223,
+    "council_score": 0.6271653543307086,
+    "regime": "TRENDING_LOW_VOL",
+    "signal_id": "sig_BTCUSDT_79cef407",
+    "council_votes": {
+      "Momentum": {
+        "vote": "REJECT",
+        "conviction": 0.7,
+        "weight": 1.0
+      },
+      "Structure": {
+        "vote": "APPROVE",
+        "conviction": 0.5,
+        "weight": 2.5
+      },
+      "Volume": {
+        "vote": "REJECT",
+        "conviction": 0.6,
+        "weight": 1.0
+      },
+      "Regime": {
+        "vote": "APPROVE",
+        "conviction": 0.9,
+        "weight": 2.0
+      },
+      "Session": {
+        "vote": "APPROVE",
+        "conviction": 0.7,
+        "weight": 1.0
+      },
+      "Exhaustion": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.6
+      },
+      "Velocity": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.4
+      },
+      "CrossMarket": {
+        "vote": "APPROVE",
+        "conviction": 0.65,
+        "weight": 1.2
+      },
+      "Sentiment": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.0
+      },
+      "Risk": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 0.0
+      }
+    },
+    "outcome": "LOSS",
+    "exit_price": 74384.05,
+    "pnl_usd": -2.82,
+    "exit_reason": "MT5 [sl 74383.80]",
+    "exit_ts": "2026-11-10T18:20:21.237744"
+  },
+  {
+    "id": 37,
+    "open_ts": "2026-11-11T01:25:05.640892",
+    "symbol": "BTCUSDT",
+    "action": "SELL",
+    "trade_mode": "SCALP",
+    "entry_price": 73441.3,
+    "sl_price": 73674.64,
+    "tp1_price": 73172.96,
+    "tp2_price": 72997.95,
+    "sl_dist": 233.34,
+    "notional": 8812.96,
+    "risk_usd": 28.0,
+    "lots": 0.12,
+    "leverage": 7.05,
+    "prob": 0.6901,
+    "council_score": 0.6364829396325459,
+    "regime": "RANGING_LOW_VOL",
+    "signal_id": "sig_BTCUSDT_bc535125",
+    "council_votes": {
+      "Momentum": {
+        "vote": "APPROVE",
+        "conviction": 0.6666666666666666,
+        "weight": 1.0
+      },
+      "Structure": {
+        "vote": "APPROVE",
+        "conviction": 0.5,
+        "weight": 2.5
+      },
+      "Volume": {
+        "vote": "APPROVE",
+        "conviction": 0.75,
+        "weight": 1.0
+      },
+      "Regime": {
+        "vote": "ABSTAIN",
+        "conviction": 0.4,
+        "weight": 2.0
+      },
+      "Session": {
+        "vote": "APPROVE",
+        "conviction": 0.8,
+        "weight": 1.0
+      },
+      "Exhaustion": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.6
+      },
+      "Velocity": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.4
+      },
+      "CrossMarket": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.2
+      },
+      "Sentiment": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.0
+      },
+      "Risk": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 0.0
+      }
+    },
+    "outcome": "LOSS",
+    "exit_price": 73709.0,
+    "pnl_usd": -28.36,
+    "exit_reason": "MT5 [sl 73705.99]",
+    "exit_ts": "2026-11-11T01:50:15.182028"
+  },
+  {
+    "id": 38,
+    "open_ts": "2026-11-11T07:25:05.256580",
+    "symbol": "BTCUSDT",
+    "action": "SELL",
+    "trade_mode": "SCALP",
+    "entry_price": 73665.6,
+    "sl_price": 73925.6,
+    "tp1_price": 73366.6,
+    "tp2_price": 73171.6,
+    "sl_dist": 260.0,
+    "notional": 5156.59,
+    "risk_usd": 18.2,
+    "lots": 0.07,
+    "leverage": 4.22,
+    "prob": 0.5423,
+    "council_score": 0.6979986876640419,
+    "regime": "TRENDING_HIGH_VOL",
+    "signal_id": "sig_BTCUSDT_749e7a2a",
+    "council_votes": {
+      "Momentum": {
+        "vote": "APPROVE",
+        "conviction": 0.6666666666666666,
+        "weight": 1.0
+      },
+      "Structure": {
+        "vote": "APPROVE",
+        "conviction": 0.625,
+        "weight": 2.5
+      },
+      "Volume": {
+        "vote": "APPROVE",
+        "conviction": 1.0,
+        "weight": 1.0
+      },
+      "Regime": {
+        "vote": "APPROVE",
+        "conviction": 0.9,
+        "weight": 2.0
+      },
+      "Session": {
+        "vote": "ABSTAIN",
+        "conviction": 0.5,
+        "weight": 1.0
+      },
+      "Exhaustion": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.6
+      },
+      "Velocity": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.4
+      },
+      "CrossMarket": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.2
+      },
+      "Sentiment": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.0
+      },
+      "Risk": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 0.0
+      }
+    },
+    "outcome": "WIN",
+    "exit_price": 73535.85,
+    "pnl_usd": 5.88,
+    "exit_reason": "MT5 [sl 73528.05]",
+    "exit_ts": "2026-11-11T08:08:59.659941"
+  },
+  {
+    "id": 39,
+    "open_ts": "2026-11-11T10:15:04.882340",
+    "symbol": "BTCUSDT",
+    "action": "SELL",
+    "trade_mode": "SCALP",
+    "entry_price": 73754.2,
+    "sl_price": 73987.68,
+    "tp1_price": 73485.7,
+    "tp2_price": 72703.54,
+    "sl_dist": 233.48,
+    "notional": 12538.21,
+    "risk_usd": 39.69,
+    "lots": 0.17,
+    "leverage": 10.21,
+    "prob": 0.6181,
+    "council_score": 0.60498687664042,
+    "regime": "RANGING_HIGH_VOL",
+    "signal_id": "sig_BTCUSDT_8876df13",
+    "council_votes": {
+      "Momentum": {
+        "vote": "APPROVE",
+        "conviction": 0.6666666666666666,
+        "weight": 1.0
+      },
+      "Structure": {
+        "vote": "ABSTAIN",
+        "conviction": 0.25,
+        "weight": 2.5
+      },
+      "Volume": {
+        "vote": "APPROVE",
+        "conviction": 1.0,
+        "weight": 1.0
+      },
+      "Regime": {
+        "vote": "APPROVE",
+        "conviction": 0.5,
+        "weight": 2.0
+      },
+      "Session": {
+        "vote": "ABSTAIN",
+        "conviction": 0.5,
+        "weight": 1.0
+      },
+      "Exhaustion": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.6
+      },
+      "Velocity": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.4
+      },
+      "CrossMarket": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.2
+      },
+      "Sentiment": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.0
+      },
+      "Risk": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 0.0
+      }
+    },
+    "outcome": "LOSS",
+    "exit_price": 73934.5,
+    "pnl_usd": -32.54,
+    "exit_reason": "STRUCTURAL INVALIDATION (1H=BULLISH, OFI=+0.34 at -0.77R)",
+    "exit_ts": "2026-11-11T11:25:40.014790",
+    "dur_min": 70.6
+  },
+  {
+    "id": 40,
+    "open_ts": "2026-11-11T12:05:05.320678",
+    "symbol": "BTCUSDT",
+    "action": "SELL",
+    "trade_mode": "SCALP",
+    "entry_price": 73802.0,
+    "sl_price": 73974.8,
+    "tp1_price": 73603.28,
+    "tp2_price": 73024.4,
+    "sl_dist": 172.8,
+    "notional": 16974.46,
+    "risk_usd": 39.74,
+    "lots": 0.23,
+    "leverage": 14.2,
+    "prob": 0.6682,
+    "council_score": 0.6148293963254593,
+    "regime": "RANGING_LOW_VOL",
+    "signal_id": "sig_BTCUSDT_8632493e",
+    "council_votes": {
+      "Momentum": {
+        "vote": "APPROVE",
+        "conviction": 0.6666666666666666,
+        "weight": 1.0
+      },
+      "Structure": {
+        "vote": "APPROVE",
+        "conviction": 0.5,
+        "weight": 2.5
+      },
+      "Volume": {
+        "vote": "APPROVE",
+        "conviction": 1.0,
+        "weight": 1.0
+      },
+      "Regime": {
+        "vote": "ABSTAIN",
+        "conviction": 0.4,
+        "weight": 2.0
+      },
+      "Session": {
+        "vote": "ABSTAIN",
+        "conviction": 0.5,
+        "weight": 1.0
+      },
+      "Exhaustion": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.6
+      },
+      "Velocity": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.4
+      },
+      "CrossMarket": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.2
+      },
+      "Sentiment": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.0
+      },
+      "Risk": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 0.0
+      }
+    },
+    "outcome": "WIN",
+    "exit_price": 73711.15,
+    "pnl_usd": 17.64,
+    "exit_reason": "MT5 [sl 73682.17]",
+    "exit_ts": "2026-11-11T12:15:13.419253"
+  },
+  {
+    "id": 41,
+    "open_ts": "2026-11-11T15:45:04.705747",
+    "symbol": "BTCUSDT",
+    "action": "SELL",
+    "trade_mode": "SCALP",
+    "entry_price": 73687.2,
+    "sl_price": 73860.64,
+    "tp1_price": 73464.65,
+    "tp2_price": 72906.72,
+    "sl_dist": 173.44,
+    "notional": 22106.16,
+    "risk_usd": 52.03,
+    "lots": 0.3,
+    "leverage": 18.22,
+    "prob": 0.7252,
+    "council_score": 0.6817585301837271,
+    "regime": "RANGING_HIGH_VOL",
+    "signal_id": "sig_BTCUSDT_f744b60b",
+    "council_votes": {
+      "Momentum": {
+        "vote": "APPROVE",
+        "conviction": 0.6666666666666666,
+        "weight": 1.0
+      },
+      "Structure": {
+        "vote": "APPROVE",
+        "conviction": 0.5,
+        "weight": 2.5
+      },
+      "Volume": {
+        "vote": "APPROVE",
+        "conviction": 1.0,
+        "weight": 1.0
+      },
+      "Regime": {
+        "vote": "APPROVE",
+        "conviction": 0.5,
+        "weight": 2.0
+      },
+      "Session": {
+        "vote": "APPROVE",
+        "conviction": 0.7,
+        "weight": 1.0
+      },
+      "Exhaustion": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.6
+      },
+      "Velocity": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.4
+      },
+      "CrossMarket": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.2
+      },
+      "Sentiment": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.0
+      },
+      "Risk": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 0.0
+      }
+    },
+    "outcome": "LOSS",
+    "exit_price": 73881.05,
+    "pnl_usd": -52.47,
+    "exit_reason": "MT5 [sl 73879.59]",
+    "exit_ts": "2026-11-11T15:52:07.758591"
+  },
+  {
+    "id": 42,
+    "open_ts": "2026-11-11T16:30:07.411800",
+    "symbol": "BTCUSDT",
+    "action": "SELL",
+    "trade_mode": "SCALP",
+    "entry_price": 74017.2,
+    "sl_price": 74161.74,
+    "tp1_price": 73793.16,
+    "tp2_price": 73234.27,
+    "sl_dist": 144.54,
+    "notional": 23685.5,
+    "risk_usd": 46.25,
+    "lots": 0.32,
+    "leverage": 20.41,
+    "prob": 0.7052,
+    "council_score": 0.6783464566929135,
+    "regime": "TRENDING_HIGH_VOL",
+    "signal_id": "sig_BTCUSDT_c0849a2b",
+    "council_votes": {
+      "Momentum": {
+        "vote": "ABSTAIN",
+        "conviction": 0.3333333333333333,
+        "weight": 1.0
+      },
+      "Structure": {
+        "vote": "APPROVE",
+        "conviction": 0.5,
+        "weight": 2.5
+      },
+      "Volume": {
+        "vote": "ABSTAIN",
+        "conviction": 0.4,
+        "weight": 1.0
+      },
+      "Regime": {
+        "vote": "APPROVE",
+        "conviction": 0.9,
+        "weight": 2.0
+      },
+      "Session": {
+        "vote": "APPROVE",
+        "conviction": 0.7,
+        "weight": 1.0
+      },
+      "Exhaustion": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.6
+      },
+      "Velocity": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.4
+      },
+      "CrossMarket": {
+        "vote": "APPROVE",
+        "conviction": 0.65,
+        "weight": 1.2
+      },
+      "Sentiment": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.0
+      },
+      "Risk": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 0.0
+      }
+    },
+    "outcome": "BE",
+    "exit_price": 73979.8,
+    "pnl_usd": 0.0,
+    "exit_reason": "MT5 SL/TP EXIT",
+    "exit_ts": "2026-11-11T17:21:10.356076"
+  },
+  {
+    "id": 43,
+    "open_ts": "2026-11-11T18:40:06.116189",
+    "symbol": "PAXGUSDT",
+    "action": "SELL",
+    "trade_mode": "SWING",
+    "entry_price": 4030.98,
+    "sl_price": 4040.77,
+    "tp1_price": 4016.78,
+    "tp2_price": 3977.14,
+    "sl_dist": 9.79,
+    "notional": 161.24,
+    "risk_usd": 39.16,
+    "lots": 0.04,
+    "leverage": 0.14,
+    "prob": 0.6729,
+    "council_score": 0.7736876640419948,
+    "regime": "TRENDING_HIGH_VOL",
+    "signal_id": "sig_PAXGUSDT_6df91bf0",
+    "council_votes": {
+      "Momentum": {
+        "vote": "APPROVE",
+        "conviction": 0.6666666666666666,
+        "weight": 1.0
+      },
+      "Structure": {
+        "vote": "APPROVE",
+        "conviction": 0.75,
+        "weight": 2.5
+      },
+      "Volume": {
+        "vote": "APPROVE",
+        "conviction": 0.75,
+        "weight": 1.0
+      },
+      "Regime": {
+        "vote": "APPROVE",
+        "conviction": 0.9,
+        "weight": 2.0
+      },
+      "Session": {
+        "vote": "APPROVE",
+        "conviction": 0.9,
+        "weight": 1.0
+      },
+      "Exhaustion": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.6
+      },
+      "Velocity": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.4
+      },
+      "CrossMarket": {
+        "vote": "APPROVE",
+        "conviction": 0.8,
+        "weight": 1.2
+      },
+      "Sentiment": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 1.0
+      },
+      "Risk": {
+        "vote": "ABSTAIN",
+        "conviction": 0.0,
+        "weight": 0.0
+      }
+    },
+    "outcome": "WIN",
+    "exit_price": 4014.8,
+    "pnl_usd": 110.94,
+    "exit_reason": "MT5 Apex Exit (+2.8R Runner Harvest)",
+    "exit_ts": "2026-11-11T21:00:19.928000",
+    "broker_ticket": "1121536648",
+    "dur_min": 140.2
   }
 ]
