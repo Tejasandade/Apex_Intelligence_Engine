@@ -61,16 +61,23 @@ class IndianWebSocketStreamer:
         # Registered Option Tokens: token -> symbol
         self._option_tokens: dict[str, str] = {}
 
-        # Latest Prices
+        # Latest Prices & Tick Timestamps
         self.latest_prices: dict[str, float] = {
             "NIFTY": 0.0,
             "BANKNIFTY": 0.0,
             "INDIAVIX": 14.0,  # Default safe baseline
         }
+        self.last_tick_ts: dict[str, float] = {}
 
-        # Candle Aggregation: symbol -> candle_state
+        # Candle Aggregation & Cumulative Session VWAP: symbol -> state
         self._candles_5m: dict[str, dict[str, Any]] = {}
         self._candle_start_ts: dict[str, float] = {}
+        self._session_date: dict[str, str] = {}
+        self._session_tp_sum: dict[str, float] = {}
+        self._session_bar_count: dict[str, int] = {}
+        self._session_pv_sum: dict[str, float] = {}
+        self._session_vol_sum: dict[str, float] = {}
+        self._prev_cum_vol: dict[str, float] = {}
 
         # Callbacks
         self.on_tick: Optional[TickCallback] = None
@@ -180,6 +187,7 @@ class IndianWebSocketStreamer:
                 return
 
             self.latest_prices[symbol] = price
+            self.last_tick_ts[symbol] = time.time()
 
             if symbol == "INDIAVIX":
                 if self.on_vix_updated and self._loop and not self._loop.is_closed():
@@ -196,15 +204,67 @@ class IndianWebSocketStreamer:
         except Exception as e:
             logger.debug(f"Tick processing error: {e}")
 
+    def seed_session_vwap(self, symbol: str, candles_today: list[dict[str, Any]]) -> None:
+        """Seed daily cumulative session VWAP/TWAP anchor from warmup intraday bars."""
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        today_bars = [c for c in candles_today if str(c.get("timestamp", "")).startswith(today_str)]
+        self._session_date[symbol] = today_str
+        tp_sum = 0.0
+        pv_sum = 0.0
+        vol_sum = 0.0
+        for c in today_bars:
+            tp = (float(c["high"]) + float(c["low"]) + float(c["close"])) / 3.0
+            v = float(c.get("volume", 0.0))
+            tp_sum += tp
+            if v > 0:
+                pv_sum += tp * v
+                vol_sum += v
+        self._session_tp_sum[symbol] = tp_sum
+        self._session_bar_count[symbol] = len(today_bars)
+        self._session_pv_sum[symbol] = pv_sum
+        self._session_vol_sum[symbol] = vol_sum
+
+    def _compute_live_session_vwap(self, symbol: str, candle: dict[str, Any], price: float, volume: float) -> float:
+        """
+        Compute cumulative intraday session VWAP (or Typical-Price TWAP anchor when index volume == 0).
+        Resets only at the start of a new NSE trading day, never every 5 minutes.
+        """
+        cur_tp = (float(candle["high"]) + float(candle["low"]) + float(candle["close"])) / 3.0
+        if volume > 0:
+            prev_v = self._prev_cum_vol.get(symbol, volume)
+            delta_v = max(volume - prev_v, 0.0) if volume >= prev_v else volume
+            self._prev_cum_vol[symbol] = volume
+            self._session_pv_sum[symbol] = self._session_pv_sum.get(symbol, 0.0) + (price * delta_v)
+            self._session_vol_sum[symbol] = self._session_vol_sum.get(symbol, 0.0) + delta_v
+            if self._session_vol_sum[symbol] > 0:
+                return round(self._session_pv_sum[symbol] / self._session_vol_sum[symbol], 2)
+
+        completed_tp_sum = self._session_tp_sum.get(symbol, 0.0)
+        completed_bars = self._session_bar_count.get(symbol, 0)
+        return round((completed_tp_sum + cur_tp) / max(completed_bars + 1, 1), 2)
+
     def _aggregate_candle(self, symbol: str, price: float, volume: float) -> None:
-        """Aggregates ticks into 5-minute wall-clock aligned candles (:00, :05, :10, :15, etc.) with VWAP."""
+        """Aggregates ticks into 5-minute wall-clock aligned candles (:00, :05, :10, :15, etc.) with cumulative session VWAP."""
         now = time.time()
         slot_start = int(now // 300) * 300
+        today_str = datetime.fromtimestamp(slot_start).strftime("%Y-%m-%d")
+
+        if self._session_date.get(symbol) != today_str:
+            self._session_date[symbol] = today_str
+            self._session_tp_sum[symbol] = 0.0
+            self._session_bar_count[symbol] = 0
+            self._session_pv_sum[symbol] = 0.0
+            self._session_vol_sum[symbol] = 0.0
+            self._prev_cum_vol[symbol] = volume
 
         if symbol not in self._candle_start_ts or self._candle_start_ts[symbol] != slot_start:
             if symbol in self._candles_5m:
-                # Close previous candle
+                # Close previous candle & fold its typical price into cumulative session anchor
                 closed_c = self._candles_5m[symbol].copy()
+                prev_tp = (float(closed_c["high"]) + float(closed_c["low"]) + float(closed_c["close"])) / 3.0
+                self._session_tp_sum[symbol] = self._session_tp_sum.get(symbol, 0.0) + prev_tp
+                self._session_bar_count[symbol] = self._session_bar_count.get(symbol, 0) + 1
+                closed_c["vwap"] = self._compute_live_session_vwap(symbol, closed_c, float(closed_c["close"]), 0.0)
                 closed_c["is_closed"] = True
                 if self.on_candle_closed and self._loop and not self._loop.is_closed():
                     asyncio.run_coroutine_threadsafe(self.on_candle_closed(symbol, closed_c), self._loop)
@@ -212,7 +272,7 @@ class IndianWebSocketStreamer:
             # Start new candle aligned to NSE 5-minute interval
             now_iso = datetime.fromtimestamp(slot_start).strftime("%Y-%m-%dT%H:%M:%S+05:30")
             self._candle_start_ts[symbol] = slot_start
-            self._candles_5m[symbol] = {
+            new_c = {
                 "timestamp": now_iso,
                 "symbol": symbol,
                 "open": price,
@@ -222,9 +282,9 @@ class IndianWebSocketStreamer:
                 "volume": volume,
                 "vwap": price,
                 "ticks": 1,
-                "pv_sum": price * max(volume, 1.0),
-                "vol_sum": max(volume, 1.0),
             }
+            new_c["vwap"] = self._compute_live_session_vwap(symbol, new_c, price, volume)
+            self._candles_5m[symbol] = new_c
         else:
             # Update current candle
             c = self._candles_5m[symbol]
@@ -233,10 +293,7 @@ class IndianWebSocketStreamer:
             c["close"] = price
             c["volume"] = max(c["volume"], volume)
             c["ticks"] += 1
-            delta_vol = max(volume - c["volume"], 1.0)
-            c["pv_sum"] += price * delta_vol
-            c["vol_sum"] += delta_vol
-            c["vwap"] = round(c["pv_sum"] / max(c["vol_sum"], 1.0), 2)
+            c["vwap"] = self._compute_live_session_vwap(symbol, c, price, volume)
 
     def update_external_tick(self, symbol: str, price: float, volume: float = 0.0) -> None:
         """Allows engine fallback pollers to update latest prices and candle states."""

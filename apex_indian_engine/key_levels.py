@@ -123,15 +123,26 @@ class InstitutionalLevelsTracker:
         r2 = round(p + (pdh - pdl), 2)
         s2 = round(p - (pdh - pdl), 2)
 
-        # 3. Opening Range Breakout (09:15 - 09:30 AM IST = first 3 5m candles)
+        # 3. Opening Range Breakout (09:15 - 09:30 AM IST = 09:15, 09:20, 09:25 5m candles)
         orh = 0.0
         orl = 0.0
         orb_formed = False
-        if len(today_candles) >= 3:
-            first_three = today_candles[:3]
-            orh = max(float(c["high"]) for c in first_three)
-            orl = min(float(c["low"]) for c in first_three)
-            orb_formed = True
+        if today_candles:
+            has_clock_ts = any("T" in str(c.get("timestamp", "")) or " " in str(c.get("timestamp", "")) for c in today_candles)
+            if has_clock_ts:
+                orb_candles = [
+                    c for c in today_candles
+                    if any(t in str(c.get("timestamp", "")) for t in ("09:15:", "09:20:", "09:25:"))
+                ]
+                if len(orb_candles) >= 2:
+                    orh = max(float(c["high"]) for c in orb_candles)
+                    orl = min(float(c["low"]) for c in orb_candles)
+                    orb_formed = True
+            elif len(today_candles) >= 3:
+                first_three = today_candles[:3]
+                orh = max(float(c["high"]) for c in first_three)
+                orl = min(float(c["low"]) for c in first_three)
+                orb_formed = True
 
         # 4. Detect Real-time Sweeps, Breakouts & Benchmarks
         active_sweep = "None"

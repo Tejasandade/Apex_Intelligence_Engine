@@ -12,6 +12,7 @@ Generates directional option signals on NIFTY & BANKNIFTY using:
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Optional
@@ -65,6 +66,13 @@ class IndianSignalEngine:
         wall_buf = 60.0 if "BANK" in self.index_name else 30.0
         self.oi_shield = OIShield(wall_buffer_points=wall_buf)
         self._last_veto_log: dict[str, float] = {}
+        self.last_diagnostics: dict[str, Any] = {
+            "net_score": 0.0,
+            "threshold": self.min_consensus_threshold,
+            "veto": "",
+            "candidate": "NEUTRAL",
+            "ml_reliable": self.ml_predictor.is_reliable,
+        }
 
     def add_candle(self, c: dict[str, Any]) -> None:
         """
@@ -123,110 +131,139 @@ class IndianSignalEngine:
 
         closes = [float(c["close"]) for c in self.candles_5m]
         volumes = [float(c.get("volume", 1.0)) for c in self.candles_5m]
-        cur_close = closes[-1]
+        cur_close = float(current_spot) if (is_preview and current_spot > 0) else closes[-1]
+        eval_closes = closes[:-1] + [cur_close] if (is_preview and current_spot > 0) else closes
         vwap = current_vwap or float(self.candles_5m[-1].get("vwap", cur_close))
 
         # ── 1. Technical Calculations ──
-        ema9 = self._calc_ema(closes, 9)
-        ema21 = self._calc_ema(closes, 21)
-        ema50 = self._calc_ema(closes, 50)
+        ema9 = self._calc_ema(eval_closes, 9)
+        ema21 = self._calc_ema(eval_closes, 21)
+        ema50 = self._calc_ema(eval_closes, 50)
         atr = self._calc_atr(14)
 
         avg_vol = sum(volumes[-11:-1]) / max(len(volumes[-11:-1]), 1)
         vol_ratio = volumes[-1] / max(avg_vol, 1.0)
         c_open = float(self.candles_5m[-1]["open"])
+        c_high = max(float(self.candles_5m[-1]["high"]), cur_close)
+        c_low = min(float(self.candles_5m[-1]["low"]), cur_close)
         body = abs(cur_close - c_open)
 
-        # ── 2. Advisor 1: Institutional ML Model (Weight: 0.30) ──
+        # Dynamically rebalance council weights when ML weights are uncalibrated/out-of-scale
+        ml_active = self.ml_predictor.is_reliable
+        if ml_active:
+            w_ml, w_ema, w_vwap, w_disp, w_lvl = 0.30, 0.20, 0.15, 0.15, 0.20
+        else:
+            w_ml, w_ema, w_vwap, w_disp, w_lvl = 0.00, 0.30, 0.25, 0.20, 0.25
+
+        # ── 2. Advisor 1: Institutional ML Model ──
         adv1_score = 0.0
-        ml_log = "ML: Inactive / Insufficient Data"
-        try:
-            df = pd.DataFrame(self.candles_5m)
-            # Ensure proper column names
-            req_cols = ["timestamp", "open", "high", "low", "close", "volume"]
-            for col in req_cols:
-                if col not in df.columns:
-                    if col == "timestamp":
-                        df["timestamp"] = range(len(df))
-                    else:
-                        df[col] = cur_close
+        ml_log = "ML: Structural Bypass (Uncalibrated/Out-of-Scale weights)"
+        if ml_active:
+            ml_log = "ML: Inactive / Insufficient Data"
+            try:
+                df = pd.DataFrame(self.candles_5m)
+                req_cols = ["timestamp", "open", "high", "low", "close", "volume"]
+                for col in req_cols:
+                    if col not in df.columns:
+                        if col == "timestamp":
+                            df["timestamp"] = range(len(df))
+                        else:
+                            df[col] = cur_close
 
-            p_bull, regime, ml_conv = self.ml_predictor.predict(df)
-            if p_bull >= 0.52:
-                # Bullish Call Bias
-                adv1_score = 0.30 * min(1.0, (p_bull - 0.50) / 0.30)
-                ml_log = f"ML (Weight: 30%): Bull P(CE)={p_bull*100:.1f}% | Regime={regime} (Score: {adv1_score:+.2f})"
-            elif p_bull <= 0.48:
-                # Bearish Put Bias
-                adv1_score = -0.30 * min(1.0, (0.50 - p_bull) / 0.30)
-                ml_log = f"ML (Weight: 30%): Bear P(PE)={(1-p_bull)*100:.1f}% | Regime={regime} (Score: {adv1_score:+.2f})"
-            else:
-                ml_log = f"ML (Weight: 30%): Neutral P(CE)={p_bull*100:.1f}% (Score: +0.00)"
-        except Exception as e:
-            logger.debug(f"ML advisor error: {e}")
+                p_bull, regime, ml_conv = self.ml_predictor.predict(df)
+                if p_bull >= 0.52:
+                    adv1_score = w_ml * min(1.0, (p_bull - 0.50) / 0.30)
+                    ml_log = f"ML (Weight: {int(w_ml*100)}%): Bull P(CE)={p_bull*100:.1f}% | Regime={regime} (Score: {adv1_score:+.2f})"
+                elif p_bull <= 0.48:
+                    adv1_score = -w_ml * min(1.0, (0.50 - p_bull) / 0.30)
+                    ml_log = f"ML (Weight: {int(w_ml*100)}%): Bear P(PE)={(1-p_bull)*100:.1f}% | Regime={regime} (Score: {adv1_score:+.2f})"
+                else:
+                    ml_log = f"ML (Weight: {int(w_ml*100)}%): Neutral P(CE)={p_bull*100:.1f}% (Score: +0.00)"
+            except Exception as e:
+                logger.debug(f"ML advisor error: {e}")
 
-        # ── 3. Advisor 2: Multi-Timeframe Trend & EMA Alignment (Weight: 0.20) ──
+        # ── 3. Advisor 2: Multi-Timeframe Trend & EMA Alignment ──
         adv2_score = 0.0
         if ema9 > ema21 > ema50:
-            # Full Bullish Alignment
-            adv2_score = 0.20
+            adv2_score = w_ema
         elif ema9 < ema21 < ema50:
-            # Full Bearish Alignment
-            adv2_score = -0.20
+            adv2_score = -w_ema
         elif ema9 > ema21:
-            adv2_score = 0.10
+            adv2_score = round(w_ema * 0.5, 2)
         elif ema9 < ema21:
-            adv2_score = -0.10
-        adv2_log = f"Trend EMA (Weight: 20%): 9={ema9:.0f}, 21={ema21:.0f}, 50={ema50:.0f} (Score: {adv2_score:+.2f})"
+            adv2_score = -round(w_ema * 0.5, 2)
+        adv2_log = f"Trend EMA (Weight: {int(w_ema*100)}%): 9={ema9:.0f}, 21={ema21:.0f}, 50={ema50:.0f} (Score: {adv2_score:+.2f})"
 
-        # ── 4. Advisor 3: VWAP Positioning & Breakout (Weight: 0.15) ──
+        # ── 4. Advisor 3: Session VWAP Positioning & Breakout ──
         adv3_score = 0.0
         vwap_diff = cur_close - vwap
-        # Check for overextended rubber-band stretch (> 2.5 ATR)
-        if abs(vwap_diff) > atr * 2.5:
-            adv3_score = -0.05 if vwap_diff > 0 else 0.05  # Mean-reverting warning
-            adv3_log = f"VWAP (Weight: 15%): Spot={cur_close:.0f} vs VWAP={vwap:.0f} [OVEREXTENDED: {vwap_diff:+.1f} pts > 2.5 ATR] (Score: {adv3_score:+.2f})"
-        elif vwap_diff >= atr * 0.1:
-            adv3_score = 0.15
-            adv3_log = f"VWAP (Weight: 15%): Spot={cur_close:.0f} vs VWAP={vwap:.0f} [Diff: {vwap_diff:+.1f}] (Score: {adv3_score:+.2f})"
-        elif vwap_diff <= -atr * 0.1:
-            adv3_score = -0.15
-            adv3_log = f"VWAP (Weight: 15%): Spot={cur_close:.0f} vs VWAP={vwap:.0f} [Diff: {vwap_diff:+.1f}] (Score: {adv3_score:+.2f})"
+        if abs(vwap_diff) > atr * 3.5:
+            # Overextended trend: keep same-side bias at reduced weight instead of flipping counter-trend
+            adv3_score = round(w_vwap * 0.35, 2) * (1.0 if vwap_diff > 0 else -1.0)
+            adv3_log = f"VWAP (Weight: {int(w_vwap*100)}%): Spot={cur_close:.0f} vs VWAP={vwap:.0f} [EXTENDED: {vwap_diff:+.1f} pts] (Score: {adv3_score:+.2f})"
+        elif vwap_diff >= atr * 0.08:
+            adv3_score = w_vwap
+            adv3_log = f"VWAP (Weight: {int(w_vwap*100)}%): Spot={cur_close:.0f} vs VWAP={vwap:.0f} [Diff: {vwap_diff:+.1f}] (Score: {adv3_score:+.2f})"
+        elif vwap_diff <= -atr * 0.08:
+            adv3_score = -w_vwap
+            adv3_log = f"VWAP (Weight: {int(w_vwap*100)}%): Spot={cur_close:.0f} vs VWAP={vwap:.0f} [Diff: {vwap_diff:+.1f}] (Score: {adv3_score:+.2f})"
         else:
-            adv3_log = f"VWAP (Weight: 15%): Spot={cur_close:.0f} vs VWAP={vwap:.0f} [At Equilibrium] (Score: +0.00)"
+            adv3_log = f"VWAP (Weight: {int(w_vwap*100)}%): Spot={cur_close:.0f} vs VWAP={vwap:.0f} [At Equilibrium] (Score: +0.00)"
 
-        # ── 5. Advisor 4: Volume Expansion & Candle Convexity (Weight: 0.15) ──
+        # ── 5. Advisor 4: Volume Surge / Spot Index Displacement Expansion ──
         adv4_score = 0.0
         is_bull_candle = cur_close > c_open
-        if vol_ratio >= 1.25 and body >= atr * 0.5:
-            adv4_score = 0.15 if is_bull_candle else -0.15
-        elif vol_ratio >= 1.10:
-            adv4_score = 0.08 if is_bull_candle else -0.08
-        adv4_log = f"Vol Surge (Weight: 15%): {vol_ratio:.1f}x vol, Body={body:.1f} pts (Score: {adv4_score:+.2f})"
+        if avg_vol > 10.0:
+            if vol_ratio >= 1.25 and body >= atr * 0.45:
+                adv4_score = w_disp if is_bull_candle else -w_disp
+            elif vol_ratio >= 1.10:
+                half_d = round(w_disp * 0.5, 2)
+                adv4_score = half_d if is_bull_candle else -half_d
+            adv4_log = f"Vol Surge (Weight: {int(w_disp*100)}%): {vol_ratio:.1f}x vol, Body={body:.1f} pts (Score: {adv4_score:+.2f})"
+        else:
+            # NSE cash index tokens report volume=0.0; measure institutional candle displacement & follow-through
+            c_range = max(c_high - c_low, 0.01)
+            close_pos = (cur_close - c_low) / c_range
+            prev_c = self.candles_5m[-2] if len(self.candles_5m) >= 2 else self.candles_5m[-1]
+            prev_bull = float(prev_c["close"]) >= float(prev_c["open"])
+            prev_bear = float(prev_c["close"]) <= float(prev_c["open"])
+            if is_bull_candle and close_pos >= 0.65 and ((body >= atr * 0.50 and prev_bull) or body >= atr * 0.75):
+                adv4_score = w_disp
+            elif (not is_bull_candle) and close_pos <= 0.35 and ((body >= atr * 0.50 and prev_bear) or body >= atr * 0.75):
+                adv4_score = -w_disp
+            elif is_bull_candle and close_pos >= 0.60 and body >= atr * 0.30:
+                adv4_score = round(w_disp * 0.5, 2)
+            elif (not is_bull_candle) and close_pos <= 0.40 and body >= atr * 0.30:
+                adv4_score = -round(w_disp * 0.5, 2)
+            adv4_log = f"Displacement (Weight: {int(w_disp*100)}%): Body={body:.1f} ({body/max(atr,1):.2f} ATR), Pos={close_pos:.2f} (Score: {adv4_score:+.2f})"
 
-        # ── 6. Advisor 5: Institutional CPR & ORB Confluence (Weight: 0.20) ──
+        # ── 6. Advisor 5: Institutional CPR, ORB & PDH/PDL Confluence ──
         adv5_score = 0.0
         adv5_log = "Levels: Inactive"
         if key_levels:
             cpr_top = max(key_levels.tc, key_levels.bc)
             cpr_bot = min(key_levels.tc, key_levels.bc)
+            half_l = w_lvl * 0.5
             cpr_bias = 0.0
             if cur_close > cpr_top:
-                cpr_bias = 0.10
+                cpr_bias = half_l
             elif cur_close < cpr_bot:
-                cpr_bias = -0.10
-            else:
-                cpr_bias = 0.0  # Inside CPR: Neutral/Chop zone
+                cpr_bias = -half_l
 
             orb_bias = 0.0
             if key_levels.orb_formed and key_levels.orh > 0 and key_levels.orl > 0:
                 if cur_close > key_levels.orh:
-                    orb_bias = 0.10
+                    orb_bias = half_l
                 elif cur_close < key_levels.orl:
-                    orb_bias = -0.10
+                    orb_bias = -half_l
+            if orb_bias == 0.0 and key_levels.pdh > 0 and key_levels.pdl > 0:
+                if cur_close > key_levels.pdh:
+                    orb_bias = half_l
+                elif cur_close < key_levels.pdl:
+                    orb_bias = -half_l
 
-            adv5_score = round(cpr_bias + orb_bias, 2)
-            adv5_log = f"CPR/ORB (Weight: 20%): Spot={cur_close:.0f} vs CPR=[{cpr_bot:.0f}-{cpr_top:.0f}] | ORB=[{key_levels.orl:.0f}-{key_levels.orh:.0f}] (Score: {adv5_score:+.2f})"
+            adv5_score = round(max(-w_lvl, min(w_lvl, cpr_bias + orb_bias)), 2)
+            adv5_log = f"CPR/ORB (Weight: {int(w_lvl*100)}%): Spot={cur_close:.0f} vs CPR=[{cpr_bot:.0f}-{cpr_top:.0f}] | ORB=[{key_levels.orl:.0f}-{key_levels.orh:.0f}] (Score: {adv5_score:+.2f})"
 
         # ── 7. Council Aggregation ──
         net_score = round(adv1_score + adv2_score + adv3_score + adv4_score + adv5_score, 2)
@@ -245,7 +282,20 @@ class IndianSignalEngine:
                 logger.debug(f"OI shield calculation error: {e}")
 
         # ── 9. Higher-Timeframe Trend Structure ──
-        htf_bias = self._compute_htf_bias(closes)
+        htf_bias = self._compute_htf_bias(eval_closes)
+        self.last_diagnostics = {
+            "net_score": net_score,
+            "threshold": self.min_consensus_threshold,
+            "veto": "",
+            "candidate": "LONG (CE)" if net_score >= self.min_consensus_threshold else ("SHORT (PE)" if net_score <= -self.min_consensus_threshold else "NEUTRAL"),
+            "ml_reliable": ml_active,
+            "htf_bias": htf_bias,
+        }
+
+        def _veto(msg: str) -> None:
+            self.last_diagnostics["veto"] = msg
+            notes.append(f"VETO: {msg}")
+            return None
 
         # ── 10. Institutional Council Gate & Veto Protocol ──
         if net_score >= self.min_consensus_threshold:
@@ -260,8 +310,7 @@ class IndianSignalEngine:
                     if (now_t - self._last_veto_log.get("VWAP_CE_VETO", 0.0)) >= 60.0:
                         logger.warning(f"CE Entry VETOED on {self.index_name}: Spot (₹{cur_close:,.1f}) below VWAP (₹{vwap:,.1f})")
                         self._last_veto_log["VWAP_CE_VETO"] = now_t
-                notes.append("VETO: Bearish VWAP alignment (Spot < VWAP)")
-                return None
+                return _veto("Bearish VWAP alignment (Spot < VWAP)")
 
             # VETO 2: Central Pivot Range (CPR) Chop Zone
             if key_levels:
@@ -273,8 +322,7 @@ class IndianSignalEngine:
                         if (now_t - self._last_veto_log.get("CPR_CHOP_VETO", 0.0)) >= 60.0:
                             logger.warning(f"CE Entry VETOED on {self.index_name}: Trapped inside CPR chop zone ({cpr_bot:.0f}-{cpr_top:.0f})")
                             self._last_veto_log["CPR_CHOP_VETO"] = now_t
-                    notes.append("VETO: Trapped inside CPR (Theta chop zone)")
-                    return None
+                    return _veto("Trapped inside CPR (Theta chop zone)")
 
             # VETO 3: Higher-Timeframe Trend (15m) Bearish Opposing (permits breakouts & PDL Sweep Reclaim turns)
             if htf_bias == "BEARISH":
@@ -289,16 +337,14 @@ class IndianSignalEngine:
                         if (now_t - self._last_veto_log.get("HTF_CE_VETO", 0.0)) >= 60.0:
                             logger.warning(f"CE Entry VETOED on {self.index_name}: 15m Trend is BEARISH")
                             self._last_veto_log["HTF_CE_VETO"] = now_t
-                    notes.append("VETO: Macro 15m Trend is Bearish")
-                    return None
+                    return _veto("Macro 15m Trend is Bearish")
 
             # VETO 4: Banking Heavyweight Opposing (BankNifty)
             if heavyweights and "BANK" in self.index_name:
                 if heavyweights.get("BANKING_FLOW") == "BEARISH":
                     if not is_preview:
                         logger.warning(f"CE Entry VETOED on {self.index_name}: Heavyweights HDFC/ICICI are BEARISH")
-                    notes.append("VETO: Heavyweights HDFC/ICICI opposing")
-                    return None
+                    return _veto("Heavyweights HDFC/ICICI opposing")
 
             # VETO 5: Institutional PDH Sweep Trap
             if key_levels and "PDH Sweep Rejection" in key_levels.active_sweep:
@@ -309,8 +355,7 @@ class IndianSignalEngine:
                         if (now_t - self._last_veto_log.get("PDH_TRAP", 0.0)) >= 60.0:
                             logger.warning(f"CE Entry VETOED on {self.index_name}: Institutional PDH Sweep Trap detected!")
                             self._last_veto_log["PDH_TRAP"] = now_t
-                    notes.append("VETO: PDH Sweep Rejection Trap (Liquidity swept, sellers active)")
-                    return None
+                    return _veto("PDH Sweep Rejection Trap (Liquidity swept, sellers active)")
 
             # VETO 6: OI Wall Shield (Call Wall / PCR ceiling)
             if oi_metrics:
@@ -321,8 +366,7 @@ class IndianSignalEngine:
                         if (now_t - self._last_veto_log.get(f"OI_{reason}", 0.0)) >= 60.0:
                             logger.warning(f"Signal Vetoed by OI Shield: {reason}")
                             self._last_veto_log[f"OI_{reason}"] = now_t
-                    notes.append(f"VETO: {reason}")
-                    return None
+                    return _veto(reason)
 
             # VETO 7: Fair Value Gap (FVG) Bearish Supply Veto
             if key_levels and key_levels.fvg_supply:
@@ -331,8 +375,7 @@ class IndianSignalEngine:
                     if (now_t - self._last_veto_log.get("FVG_SUPPLY_VETO", 0.0)) >= 60.0:
                         logger.warning(f"CE Entry VETOED on {self.index_name}: Inside Bearish FVG Supply Zone ({key_levels.fvg_zone_bottom:.0f}-{key_levels.fvg_zone_top:.0f})")
                         self._last_veto_log["FVG_SUPPLY_VETO"] = now_t
-                notes.append(f"VETO: Inside Bearish FVG Supply Zone ({key_levels.fvg_zone_bottom:.0f}-{key_levels.fvg_zone_top:.0f})")
-                return None
+                return _veto(f"Inside Bearish FVG Supply Zone ({key_levels.fvg_zone_bottom:.0f}-{key_levels.fvg_zone_top:.0f})")
 
             return direction, opt_type, conviction, net_score, notes, oi_metrics
 
@@ -348,8 +391,7 @@ class IndianSignalEngine:
                     if (now_t - self._last_veto_log.get("VWAP_PE_VETO", 0.0)) >= 60.0:
                         logger.warning(f"PE Entry VETOED on {self.index_name}: Spot (₹{cur_close:,.1f}) above VWAP (₹{vwap:,.1f})")
                         self._last_veto_log["VWAP_PE_VETO"] = now_t
-                notes.append("VETO: Bullish VWAP alignment (Spot > VWAP)")
-                return None
+                return _veto("Bullish VWAP alignment (Spot > VWAP)")
 
             # VETO 2: Central Pivot Range (CPR) Chop Zone
             if key_levels:
@@ -361,8 +403,7 @@ class IndianSignalEngine:
                         if (now_t - self._last_veto_log.get("CPR_CHOP_VETO", 0.0)) >= 60.0:
                             logger.warning(f"PE Entry VETOED on {self.index_name}: Trapped inside CPR chop zone ({cpr_bot:.0f}-{cpr_top:.0f})")
                             self._last_veto_log["CPR_CHOP_VETO"] = now_t
-                    notes.append("VETO: Trapped inside CPR (Theta chop zone)")
-                    return None
+                    return _veto("Trapped inside CPR (Theta chop zone)")
 
             # VETO 3: Higher-Timeframe Trend (15m) Bullish Opposing (permits breakdowns & PDH Sweep Rejection turns)
             if htf_bias == "BULLISH":
@@ -377,16 +418,14 @@ class IndianSignalEngine:
                         if (now_t - self._last_veto_log.get("HTF_PE_VETO", 0.0)) >= 60.0:
                             logger.warning(f"PE Entry VETOED on {self.index_name}: 15m Trend is BULLISH")
                             self._last_veto_log["HTF_PE_VETO"] = now_t
-                    notes.append("VETO: Macro 15m Trend is Bullish")
-                    return None
+                    return _veto("Macro 15m Trend is Bullish")
 
             # VETO 4: Banking Heavyweight Opposing (BankNifty)
             if heavyweights and "BANK" in self.index_name:
                 if heavyweights.get("BANKING_FLOW") == "BULLISH":
                     if not is_preview:
                         logger.warning(f"PE Entry VETOED on {self.index_name}: Heavyweights HDFC/ICICI are BULLISH")
-                    notes.append("VETO: Heavyweights HDFC/ICICI opposing")
-                    return None
+                    return _veto("Heavyweights HDFC/ICICI opposing")
 
             # VETO 5: Institutional PDL Sweep Trap
             if key_levels and "PDL Sweep Reclaim" in key_levels.active_sweep:
@@ -397,8 +436,7 @@ class IndianSignalEngine:
                         if (now_t - self._last_veto_log.get("PDL_TRAP", 0.0)) >= 60.0:
                             logger.warning(f"PE Entry VETOED on {self.index_name}: Institutional PDL Sweep Trap detected!")
                             self._last_veto_log["PDL_TRAP"] = now_t
-                    notes.append("VETO: PDL Sweep Reclaim Trap (Liquidity swept, buyers active)")
-                    return None
+                    return _veto("PDL Sweep Reclaim Trap (Liquidity swept, buyers active)")
 
             # VETO 6: OI Wall Shield (Put Wall / PCR floor)
             if oi_metrics:
@@ -409,8 +447,7 @@ class IndianSignalEngine:
                         if (now_t - self._last_veto_log.get(f"OI_{reason}", 0.0)) >= 60.0:
                             logger.warning(f"Signal Vetoed by OI Shield: {reason}")
                             self._last_veto_log[f"OI_{reason}"] = now_t
-                    notes.append(f"VETO: {reason}")
-                    return None
+                    return _veto(reason)
 
             # VETO 7: Fair Value Gap (FVG) Bullish Demand Veto
             if key_levels and key_levels.fvg_demand:
@@ -419,8 +456,7 @@ class IndianSignalEngine:
                     if (now_t - self._last_veto_log.get("FVG_DEMAND_VETO", 0.0)) >= 60.0:
                         logger.warning(f"PE Entry VETOED on {self.index_name}: Inside Bullish FVG Demand Zone ({key_levels.fvg_zone_bottom:.0f}-{key_levels.fvg_zone_top:.0f})")
                         self._last_veto_log["FVG_DEMAND_VETO"] = now_t
-                notes.append(f"VETO: Inside Bullish FVG Demand Zone ({key_levels.fvg_zone_bottom:.0f}-{key_levels.fvg_zone_top:.0f})")
-                return None
+                return _veto(f"Inside Bullish FVG Demand Zone ({key_levels.fvg_zone_bottom:.0f}-{key_levels.fvg_zone_top:.0f})")
 
             return direction, opt_type, conviction, net_score, notes, oi_metrics
 

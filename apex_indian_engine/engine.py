@@ -100,8 +100,42 @@ class ApexIndianEngine:
         self.is_paused = False
 
         self._prev_oi_map: dict[str, dict[Any, int]] = {"NIFTY": {}, "BANKNIFTY": {}}
+        self._latest_oi_chains: dict[str, list[dict[str, Any]]] = {"NIFTY": [], "BANKNIFTY": []}
         self.heavyweight_prices: dict[str, float] = {"1333": 0.0, "4963": 0.0, "2885": 0.0}
+        self.heavyweight_baselines: dict[str, float] = {}
         self.candle_cache_file = Path("data/indian_candles_cache.json")
+
+    def _get_heavyweights_info(self) -> dict[str, Any]:
+        """Compute live Banking Heavyweight flow direction from session baselines."""
+        hdfc = self.heavyweight_prices.get("1333", 0.0)
+        icici = self.heavyweight_prices.get("4963", 0.0)
+        rel = self.heavyweight_prices.get("2885", 0.0)
+        flow = "NEUTRAL"
+
+        changes: list[float] = []
+        for tok in ("1333", "4963"):
+            px = self.heavyweight_prices.get(tok, 0.0)
+            base = self.heavyweight_baselines.get(tok, 0.0)
+            if px > 0 and base > 0:
+                changes.append(((px - base) / base) * 100.0)
+
+        if len(changes) == 2:
+            if changes[0] >= 0.25 and changes[1] >= 0.25:
+                flow = "BULLISH"
+            elif changes[0] <= -0.25 and changes[1] <= -0.25:
+                flow = "BEARISH"
+        elif changes:
+            if changes[0] >= 0.35:
+                flow = "BULLISH"
+            elif changes[0] <= -0.35:
+                flow = "BEARISH"
+
+        return {
+            "HDFCBANK": hdfc,
+            "ICICIBANK": icici,
+            "RELIANCE": rel,
+            "BANKING_FLOW": flow,
+        }
 
     def authenticate_angel_one(self) -> bool:
         """Fully automated, headless login via TOTP."""
@@ -189,9 +223,9 @@ class ApexIndianEngine:
 
         for idx, token in configs:
             sig_engine = self.signal_engines[idx]
-            for attempt in range(2):
+            for attempt in range(3):
                 try:
-                    time.sleep(1.2)  # Respect rate limit
+                    time.sleep(1.8 if attempt == 0 else 2.5)  # Respect Angel historical rate limit
                     params = {
                         "exchange": "NSE",
                         "symboltoken": token,
@@ -200,25 +234,52 @@ class ApexIndianEngine:
                         "todate": to_date,
                     }
                     res = self.smart_api.getCandleData(params)
-                    data = res.get("data", [])
+                    data = res.get("data", []) if isinstance(res, dict) else []
                     if data:
                         sig_engine.candles_5m.clear()
+                        # Compute cumulative intraday Typical-Price VWAP per NSE date
+                        cur_day = ""
+                        tp_sum = 0.0
+                        pv_sum = 0.0
+                        vol_sum = 0.0
+                        bar_cnt = 0
                         for row in data:
+                            ts_str = str(row[0])
+                            day_str = ts_str[:10]
+                            if day_str != cur_day:
+                                cur_day = day_str
+                                tp_sum = 0.0
+                                pv_sum = 0.0
+                                vol_sum = 0.0
+                                bar_cnt = 0
+                            h, l, c = float(row[2]), float(row[3]), float(row[4])
+                            v = float(row[5])
+                            tp = (h + l + c) / 3.0
+                            bar_cnt += 1
+                            tp_sum += tp
+                            if v > 0:
+                                pv_sum += tp * v
+                                vol_sum += v
+                                bar_vwap = round(pv_sum / vol_sum, 2)
+                            else:
+                                bar_vwap = round(tp_sum / bar_cnt, 2)
                             candle_dict = {
                                 "timestamp": row[0],
                                 "open": float(row[1]),
-                                "high": float(row[2]),
-                                "low": float(row[3]),
-                                "close": float(row[4]),
-                                "volume": float(row[5]),
-                                "vwap": float(row[4]),
+                                "high": h,
+                                "low": l,
+                                "close": c,
+                                "volume": v,
+                                "vwap": bar_vwap,
                             }
                             sig_engine.add_candle(candle_dict)
                         print(f"  ✓ Synchronized {len(data)} candles for {idx} (LTP: ₹{data[-1][4]:,.2f})")
                         break
+                    else:
+                        logger.warning(f"Candle sync returned empty for {idx} (attempt {attempt+1}): {res.get('message') if isinstance(res, dict) else res}")
                 except Exception as e:
-                    logger.debug(f"Candle sync attempt {attempt+1} for {idx}: {e}")
-                    time.sleep(2.0)
+                    logger.warning(f"Candle sync attempt {attempt+1} for {idx}: {e}")
+                    time.sleep(2.5)
 
             # If still fewer than 20 candles (e.g. rate limit), synthesize warm-up baseline
             if len(sig_engine.candles_5m) < 20:
@@ -303,11 +364,13 @@ class ApexIndianEngine:
         cur_spot = float(candle.get("close", 0.0))
         cur_vwap = float(candle.get("vwap", cur_spot))
 
-        # 1. Add candle to signal engine
+        # 1. Add candle to signal engine & persist live cache (skip overwriting prod cache in test harness)
         sig_engine = self.signal_engines.get(idx)
         if not sig_engine:
             return None
         sig_engine.add_candle(candle)
+        if str(self.risk_manager.state_file) == str(Path(self.config.state_file)):
+            self.save_cached_candles()
 
         # 2. Check risk gate before evaluating signals (permit evaluation for high-potential candidate setups)
         skip_time = getattr(self, "ignore_time_checks", False)
@@ -324,15 +387,12 @@ class ApexIndianEngine:
         vix_params = self.vix_manager.get_parameters()
         sig_engine.min_consensus_threshold = vix_params.consensus_threshold
 
-        # 5. Evaluate 5-Advisor Council + ML + CPR/ORB Levels + OI Shield
+        # 5. Evaluate Multi-Advisor Council + CPR/ORB Levels + OI Shield
         cur_lvl = self.levels_trackers[idx].calculate_from_candles(sig_engine.candles_5m, cur_spot)
-        heavyweights_info = {
-            "HDFCBANK": self.heavyweight_prices.get("1333", 0.0),
-            "ICICIBANK": self.heavyweight_prices.get("4963", 0.0),
-            "RELIANCE": self.heavyweight_prices.get("2885", 0.0),
-        }
+        active_oi = oi_chain if oi_chain is not None else (self._latest_oi_chains.get(idx) or None)
+        heavyweights_info = self._get_heavyweights_info()
         res = sig_engine.evaluate_signal(
-            cur_spot, cur_vwap, oi_chain=oi_chain, key_levels=cur_lvl, is_preview=False, heavyweights=heavyweights_info
+            cur_spot, cur_vwap, oi_chain=active_oi, key_levels=cur_lvl, is_preview=False, heavyweights=heavyweights_info
         )
         if not res:
             return None
@@ -394,13 +454,13 @@ class ApexIndianEngine:
             )
             return None
 
-        # 7b. Capital Allocation & Expensive Contract Guard (e.g. BankNifty monthly)
+        # 7b. Capital Allocation & Margin Concentration Guard (BankNifty monthly 1-lot ~₹22k-₹32k; SL risk bounded 1-2%)
         cost_per_lot = prem * selected.lot_size
-        if cost_per_lot > (self.risk_manager.capital_inr * 0.20):
+        if cost_per_lot > (self.risk_manager.capital_inr * 0.45):
             if conviction < 0.70 or abs(score) < 0.65:
                 logger.warning(
                     f"🛡️ CAPITAL PROTECTION GUARD ({idx}): 1 lot costs ₹{cost_per_lot:,.0f} "
-                    f"(> 20% of capital ₹{self.risk_manager.capital_inr:,.0f}). "
+                    f"(> 45% of capital ₹{self.risk_manager.capital_inr:,.0f}). "
                     f"Requires Grade A+ setup (conviction >= 0.70, score >= 0.65). Skipping."
                 )
                 return None
@@ -689,16 +749,28 @@ class ApexIndianEngine:
         nf_lvl = self.levels_trackers["NIFTY"].calculate_from_candles(nifty_candles, nifty_spot)
 
         # Advisor Council Consensus & Bias
+        hw_info = self._get_heavyweights_info()
         bn_score = 0.0
         bn_conviction = 0.50
         bn_bias = "NEUTRAL"
         if len(bn_candles) >= 20:
             try:
-                res = self.signal_engines["BANKNIFTY"].evaluate_signal(bn_spot, bn_vwap, key_levels=bn_lvl, is_preview=True)
+                bn_sig = self.signal_engines["BANKNIFTY"]
+                bn_sig.min_consensus_threshold = vix_params.consensus_threshold
+                bn_oi = self._latest_oi_chains.get("BANKNIFTY") or None
+                res = bn_sig.evaluate_signal(
+                    bn_spot, bn_vwap, oi_chain=bn_oi, key_levels=bn_lvl, is_preview=True, heavyweights=hw_info
+                )
                 if res:
                     bn_bias = f"{res[0]} ({res[1]})"
                     bn_conviction = res[2]
                     bn_score = res[3]
+                else:
+                    diag = bn_sig.last_diagnostics
+                    bn_score = float(diag.get("net_score", 0.0))
+                    bn_conviction = min(0.95, round(0.50 + (abs(bn_score) * 0.45), 2))
+                    if diag.get("veto"):
+                        bn_bias = f"VETO: {str(diag['veto'])[:28]}"
             except Exception:
                 pass
 
@@ -707,11 +779,22 @@ class ApexIndianEngine:
         nf_bias = "NEUTRAL"
         if len(nifty_candles) >= 20:
             try:
-                res = self.signal_engines["NIFTY"].evaluate_signal(nifty_spot, nifty_vwap, key_levels=nf_lvl, is_preview=True)
+                nf_sig = self.signal_engines["NIFTY"]
+                nf_sig.min_consensus_threshold = vix_params.consensus_threshold
+                nf_oi = self._latest_oi_chains.get("NIFTY") or None
+                res = nf_sig.evaluate_signal(
+                    nifty_spot, nifty_vwap, oi_chain=nf_oi, key_levels=nf_lvl, is_preview=True, heavyweights=hw_info
+                )
                 if res:
                     nf_bias = f"{res[0]} ({res[1]})"
                     nf_conviction = res[2]
                     nf_score = res[3]
+                else:
+                    diag = nf_sig.last_diagnostics
+                    nf_score = float(diag.get("net_score", 0.0))
+                    nf_conviction = min(0.95, round(0.50 + (abs(nf_score) * 0.45), 2))
+                    if diag.get("veto"):
+                        nf_bias = f"VETO: {str(diag['veto'])[:28]}"
             except Exception:
                 pass
 
@@ -855,40 +938,74 @@ class ApexIndianEngine:
         return "▶️ Indian Engine trading RESUMED. Scanning for setups."
 
     async def _poll_live_ticks_loop(self):
-        """Continuous background batch poller for sub-second index LTP and active option prices."""
-        logger.info("Started background Angel One high-frequency live LTP poller loop.")
+        """Continuous non-blocking background poller for fallback spot LTP, heavyweights, and active option ticks."""
+        logger.info("Started background Angel One live LTP poller loop (non-blocking thread offload).")
+        # Seed baseline previous closes for BankNifty heavyweights once
+        if self.smart_api:
+            try:
+                base_res = await asyncio.to_thread(
+                    self.smart_api.getMarketData, "FULL", {"NSE": ["1333", "4963", "2885"]}
+                )
+                for item in (base_res or {}).get("data", {}).get("fetched", []):
+                    tok = str(item.get("symbolToken", ""))
+                    base_px = float(item.get("close", 0.0)) or float(item.get("open", 0.0))
+                    if tok and base_px > 0:
+                        self.heavyweight_baselines[tok] = base_px
+            except Exception as e:
+                logger.debug(f"Heavyweight baseline fetch error: {e}")
+
+        last_hw_poll = 0.0
         while self.is_running:
             try:
-                if self.smart_api:
-                    exchange_tokens = {"NSE": ["99926009", "99926000", "99926017", "1333", "4963", "2885"]}
-                    if self.executor.has_open_position():
+                now_t = time.time()
+                has_pos = self.executor.has_open_position()
+                ws_ok = bool(self.ws_streamer and self.ws_streamer.is_connected)
+                bn_age = now_t - (self.ws_streamer.last_tick_ts.get("BANKNIFTY", 0.0) if self.ws_streamer else 0.0)
+                nf_age = now_t - (self.ws_streamer.last_tick_ts.get("NIFTY", 0.0) if self.ws_streamer else 0.0)
+                need_spot_poll = (not ws_ok) or bn_age > 3.0 or nf_age > 3.0
+                need_hw_poll = (now_t - last_hw_poll) >= 2.5
+
+                if self.smart_api and (has_pos or need_spot_poll or need_hw_poll):
+                    exchange_tokens: dict[str, list[str]] = {}
+                    nse_toks: list[str] = []
+                    if need_spot_poll:
+                        nse_toks.extend(["99926009", "99926000", "99926017"])
+                    if need_hw_poll:
+                        nse_toks.extend(["1333", "4963", "2885"])
+                        last_hw_poll = now_t
+                    if nse_toks:
+                        exchange_tokens["NSE"] = nse_toks
+                    if has_pos:
                         trade = self.executor.active_trade
                         exchange_tokens["NFO"] = [str(trade.token)]
 
-                    mkt_res = self.smart_api.getMarketData("LTP", exchange_tokens)
-                    fetched = mkt_res.get("data", {}).get("fetched", [])
-                    for item in fetched:
-                        tok = str(item.get("symbolToken", ""))
-                        ltp = float(item.get("ltp", 0.0))
-                        if ltp <= 0:
-                            continue
+                    if exchange_tokens:
+                        mkt_res = await asyncio.to_thread(self.smart_api.getMarketData, "LTP", exchange_tokens)
+                        fetched = (mkt_res or {}).get("data", {}).get("fetched", [])
+                        for item in fetched:
+                            tok = str(item.get("symbolToken", ""))
+                            ltp = float(item.get("ltp", 0.0))
+                            if ltp <= 0:
+                                continue
 
-                        if tok == "99926009" and self.ws_streamer:
-                            self.ws_streamer.update_external_tick("BANKNIFTY", ltp)
-                        elif tok == "99926000" and self.ws_streamer:
-                            self.ws_streamer.update_external_tick("NIFTY", ltp)
-                        elif tok == "99926017":
-                            self.vix_manager.update_vix(ltp)
-                        elif tok in ("1333", "4963", "2885"):
-                            self.heavyweight_prices[tok] = ltp
-                        elif self.executor.has_open_position() and tok == str(self.executor.active_trade.token):
-                            spot_px = self.ws_streamer.latest_prices.get(self.executor.active_trade.index_name, 0.0) if self.ws_streamer else 0.0
-                            self.process_tick(current_option_price=ltp, current_spot_price=spot_px)
+                            if tok == "99926009" and self.ws_streamer:
+                                self.ws_streamer.update_external_tick("BANKNIFTY", ltp)
+                            elif tok == "99926000" and self.ws_streamer:
+                                self.ws_streamer.update_external_tick("NIFTY", ltp)
+                            elif tok == "99926017":
+                                self.vix_manager.update_vix(ltp)
+                            elif tok in ("1333", "4963", "2885"):
+                                self.heavyweight_prices[tok] = ltp
+                                if tok not in self.heavyweight_baselines:
+                                    self.heavyweight_baselines[tok] = ltp
+                            elif self.executor.has_open_position() and tok == str(self.executor.active_trade.token):
+                                spot_px = self.ws_streamer.latest_prices.get(self.executor.active_trade.index_name, 0.0) if self.ws_streamer else 0.0
+                                self.process_tick(current_option_price=ltp, current_spot_price=spot_px)
 
             except Exception as e:
                 logger.debug(f"Live tick poller exception: {e}")
 
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.75 if self.executor.has_open_position() else 1.0)
 
     async def _poll_oi_loop(self):
         """Periodic background poller (every 60s) for institutional Option Chain & Delta-OI."""
@@ -925,8 +1042,8 @@ class ApexIndianEngine:
                                     tokens_map[tok] = {"strike": s, "option_type": opt, "symbol": c["symbol"]}
 
                         if tokens_list:
-                            res = self.smart_api.getMarketData("FULL", {"NFO": tokens_list})
-                            fetched = res.get("data", {}).get("fetched", [])
+                            res = await asyncio.to_thread(self.smart_api.getMarketData, "FULL", {"NFO": tokens_list})
+                            fetched = (res or {}).get("data", {}).get("fetched", [])
                             
                             prev_map = self._prev_oi_map.get(idx, {})
                             curr_map = {}
@@ -954,6 +1071,7 @@ class ApexIndianEngine:
                             self._prev_oi_map[idx] = curr_map
 
                             if chain_data:
+                                self._latest_oi_chains[idx] = chain_data
                                 tracker = self.oi_trackers.get(idx)
                                 if tracker:
                                     tracker.update_chain(chain_data, cur_spot)
@@ -997,7 +1115,8 @@ class ApexIndianEngine:
 
                 async def _on_candle(sym: str, c_dict: dict[str, Any]):
                     if sym in ("NIFTY", "BANKNIFTY"):
-                        self.process_candle(sym, c_dict)
+                        oi_ch = self._latest_oi_chains.get(sym) or None
+                        self.process_candle(sym, c_dict, oi_chain=oi_ch)
 
                 async def _on_tick(sym: str, px: float, vol: float):
                     if self.executor.has_open_position():
@@ -1006,6 +1125,8 @@ class ApexIndianEngine:
                             spot_px = self.ws_streamer.latest_prices.get(t.index_name, 0.0) if self.ws_streamer else 0.0
                             self.process_tick(current_option_price=px, current_spot_price=spot_px)
 
+                for seed_sym in ("NIFTY", "BANKNIFTY"):
+                    self.ws_streamer.seed_session_vwap(seed_sym, self.signal_engines[seed_sym].candles_5m)
                 self.ws_streamer.on_vix_updated = _on_vix
                 self.ws_streamer.on_candle_closed = _on_candle
                 self.ws_streamer.on_tick = _on_tick
