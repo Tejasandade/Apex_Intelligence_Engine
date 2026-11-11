@@ -222,10 +222,10 @@ def compute_auction_location(symbol: str, direction: str, price: float, atr: flo
         or (dir_u in ("SHORT", "SELL") and (lev.get("sweep_bearish") or lev.get("fvg_bearish")))
     )
 
-    if at_origin and ext_atr <= 0.90:
+    if at_origin and ext_atr <= 0.85:
         return round(ext_atr, 2), -0.02, "ORIGIN/VALUE"
-    if ext_atr > 1.2:
-        penalty = min(0.06, round(0.025 * (ext_atr - 1.2), 3))
+    if ext_atr > 1.1:
+        penalty = min(0.08, round(0.03 * (ext_atr - 1.1), 3))
         return round(ext_atr, 2), penalty, f"STRETCHED({ext_atr:.1f}ATR)"
     return round(ext_atr, 2), 0.0, "BALANCED"
 
@@ -234,7 +234,7 @@ def get_calibrated_threshold(symbol: str, regime: str = "UNKNOWN", loc_delta: fl
     Asset-Calibrated Conviction Thresholds with Regime & Auction Location Sensitivity.
     """
     sym = symbol.upper()
-    base = 0.59 if "ETH" in sym else 0.57
+    base = 0.57
     reg_l = str(regime).lower()
     if "trending_high_vol" in reg_l:
         base -= 0.02
@@ -1197,13 +1197,31 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL, bypass_retest: b
         if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
         return False
 
+    # ── RANGE STRUCTURE QUALITY GATE (Block blind range entries when Structure abstains) ──
+    reg_u = str(getattr(signal, "regime", "")).upper()
+    struct_vote = (getattr(signal, "council_votes", {}) or {}).get("Structure", {}).get("vote", "ABSTAIN")
+    if "RANGING" in reg_u and struct_vote != "APPROVE" and not is_high_prob:
+        log_msg = f"[{sym}] RANGING STRUCTURE GATE: Structure={struct_vote} in {reg_u} — skipping low-edge chop"
+        trade_log.append(log_msg)
+        _record_gate_rejection(sym, sig_desc, log_msg)
+        if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
+        return False
+
     entry = mkt["ask"] if direction == "LONG" else mkt["bid"]
     if entry <= 0: entry = mkt.get("ltp", 0.0)
     if entry <= 0: return False
 
+    # ── DEAD-VOL MICRO-CHOP FILTER ──
+    sym_atr = symbol_regime_info.get(sym, {}).get("atr", 0.0)
+    if sym_atr > 0 and (sym_atr / entry) < 0.00045 and not is_high_prob:
+        log_msg = f"[{sym}] LOW-VOL CHOP GATE: 5m ATR (${sym_atr:.2f} = {(sym_atr/entry)*100:.3f}%) too compressed for clean R:R"
+        trade_log.append(log_msg)
+        _record_gate_rejection(sym, sig_desc, log_msg)
+        if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
+        return False
+
     # ── NO-CHASE GATE ──
     # Prohibit entering only if market price slipped > 0.50 ATR from trigger (avoids spread/tick noise false-skips)
-    sym_atr = symbol_regime_info.get(sym, {}).get("atr", 0.0)
     sig_price = getattr(signal, "entry_price", 0.0) or getattr(signal, "price", 0.0)
     if sym_atr > 0 and sig_price > 0:
         chase_dist = (entry - sig_price) if direction == "LONG" else (sig_price - entry)
@@ -1223,6 +1241,25 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL, bypass_retest: b
         (direction == "LONG" and (lev_snap.get("sweep_bullish") or lev_snap.get("breakout_bullish")))
         or (direction == "SHORT" and (lev_snap.get("sweep_bearish") or lev_snap.get("breakout_bearish")))
     )
+
+    # ── OPPOSING S/R RUNWAY GUARD (Do not enter into daily/Asian wall < 1.1 ATR away without breakout) ──
+    if sym_atr > 0 and lev_snap:
+        if direction == "SHORT" and not lev_snap.get("breakout_bearish"):
+            ns = float(lev_snap.get("nearest_support", 0.0))
+            if 0 < ns < entry and (entry - ns) < (sym_atr * 1.10) and not is_high_prob:
+                log_msg = f"[{sym}] SUPPORT WALL GUARD: Support ${ns:,.2f} only ${(entry-ns):.2f} (< 1.1 ATR) below entry"
+                trade_log.append(log_msg)
+                _record_gate_rejection(sym, sig_desc, log_msg)
+                if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
+                return False
+        elif direction == "LONG" and not lev_snap.get("breakout_bullish"):
+            nr = float(lev_snap.get("nearest_resistance", 0.0))
+            if nr > entry and (nr - entry) < (sym_atr * 1.10) and not is_high_prob:
+                log_msg = f"[{sym}] RESISTANCE WALL GUARD: Resistance ${nr:,.2f} only ${(nr-entry):.2f} (< 1.1 ATR) above entry"
+                trade_log.append(log_msg)
+                _record_gate_rejection(sym, sig_desc, log_msg)
+                if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
+                return False
 
     # ── 5m V-REVERSAL, ANTI-BOUNCE, EXHAUSTION & EXTREME OBI COUNTER-FLOW GUARD ──
     c5_list = list(symbol_candles_5m.get(sym, []))
@@ -1279,21 +1316,26 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL, bypass_retest: b
             if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
             return False
 
-        # 2. Extreme Rubber-Band Exhaustion check (> 2.8 ATR stretch away from 5m EMA20)
+        # 2. Late-Move & Rubber-Band Exhaustion check (1.95 ATR limit off EMA20; 4-bar sprint guard > 2.2 ATR)
         closes_20 = [float(x["close"]) for x in c5_list[-20:]]
         ema20 = closes_20[0]
         k = 2.0 / 21.0
         for val in closes_20[1:]:
             ema20 = (val - ema20) * k + ema20
         if sym_atr > 0:
-            if direction == "SHORT" and (ema20 - entry) > (2.8 * sym_atr):
-                log_msg = f"[{sym}] EXHAUSTION GUARD: Cancelled SHORT {ema20 - entry:.1f} pts (> 2.8 ATR) oversold below 5m EMA20"
+            max_ext = 2.45 if has_sweep_or_brk else 1.95
+            ext_val = (ema20 - entry) if direction == "SHORT" else (entry - ema20)
+            if ext_val > (max_ext * sym_atr):
+                log_msg = f"[{sym}] LATE EXHAUSTION GUARD: Cancelled {direction} {ext_val:.1f} pts (> {max_ext:.2f} ATR) away from 5m EMA20"
                 trade_log.append(log_msg)
                 _record_gate_rejection(sym, sig_desc, log_msg)
                 if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
                 return False
-            if direction == "LONG" and (entry - ema20) > (2.8 * sym_atr):
-                log_msg = f"[{sym}] EXHAUSTION GUARD: Cancelled LONG {entry - ema20:.1f} pts (> 2.8 ATR) overbought above 5m EMA20"
+
+            sprint_base = float(c5_list[-5]["open"])
+            sprint_dist = (sprint_base - entry) if direction == "SHORT" else (entry - sprint_base)
+            if not has_sweep_or_brk and sprint_dist > (2.2 * sym_atr) and ext_val > (1.30 * sym_atr):
+                log_msg = f"[{sym}] LATE SPRINT GUARD: Move already ran {sprint_dist:.1f} pts ({sprint_dist/sym_atr:.1f} ATR) over 4 bars without pullback"
                 trade_log.append(log_msg)
                 _record_gate_rejection(sym, sig_desc, log_msg)
                 if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
@@ -1389,18 +1431,18 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL, bypass_retest: b
             if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
             return False
 
-    # ── MARKET-ANCHORED TARGET ARCHITECTURE (TP1 Fast Lock + Wide ATR Runner Ceiling) ──
+    # ── MARKET-ANCHORED TARGET ARCHITECTURE (TP1 Solid Lock + Wide ATR Runner Ceiling) ──
     eff_atr = sym_atr if sym_atr > 0 else sl_dist
     if trade_mode == "SWING":
-        tp1_dist = max(sl_dist * 1.3, min(sl_dist * 1.6, eff_atr * 2.8))
-        tp2_dist = max(sl_dist * 5.5, eff_atr * 8.0)
+        tp1_dist = max(sl_dist * 1.45, min(sl_dist * 1.80, eff_atr * 3.0))
+        tp2_dist = max(sl_dist * 5.5, eff_atr * 8.5)
         max_duration_min = 2880.0  # 48h
         adverse_decay_min = 480.0  # 8h adverse hold
     else:
         max_duration_min = 360.0   # 6h
         adverse_decay_min = 240.0  # 4h
-        base_tp1_r = 1.25 if is_ranging else 1.4
-        tp1_dist = max(sl_dist * 1.15, min(sl_dist * base_tp1_r, eff_atr * 1.8))
+        base_tp1_r = 1.35 if is_ranging else 1.55
+        tp1_dist = max(sl_dist * 1.25, min(sl_dist * base_tp1_r, eff_atr * 2.2))
         tp2_dist = max(sl_dist * 4.5, eff_atr * 6.5)
 
     tp1 = round(entry + tp1_dist if direction == "LONG" else entry - tp1_dist, 2)
@@ -1613,9 +1655,9 @@ def _check_exit_for_symbol(sym: str):
         if is_win and sym_eng and port["signal_id"]:
             sym_eng.resolve_signal(port["signal_id"], True, total)
 
-        # Update prop firm challenge progress
+        # Update prop firm challenge progress (only with unbooked leg net_usd; partial was booked on TP1)
         if PROP_FIRM_MODE and prop_firm_manager:
-            prop_firm_manager.on_trade_closed(total, reason)
+            prop_firm_manager.on_trade_closed(net_usd, reason)
 
         if not is_be:
             account["total"]   += 1
@@ -1779,16 +1821,16 @@ def _check_exit_for_symbol(sym: str):
         _schedule_broker_sync(t_id, port["sl_price"], port["tp2_price"])
 
     # ── DYNAMIC EARLY PROFIT HARVEST: Runner-Preserving OFI Reversal Protection ──
-    if r_mult >= 0.85 and is_past_min_hold:
+    if r_mult >= 1.35 and is_past_min_hold:
         try:
             m_eng = momentum_engines.get(sym, momentum_eng)
             mom_d = m_eng.get_diagnostics()
             ofi_v = float(mom_d.get("ofi", 0.0))
-            is_opposing = (direction == "LONG" and ofi_v <= -0.75) or (direction == "SHORT" and ofi_v >= 0.75)
+            is_opposing = (direction == "LONG" and ofi_v <= -0.85) or (direction == "SHORT" and ofi_v >= 0.85)
             if is_opposing:
                 if port.get("phase", 1) == 1:
-                    # Bank 40% partial profit, ratchet SL to Break-Even, and KEEP 60% RUNNER OPEN!
-                    part_frac = 0.40
+                    # Bank 35% partial profit, ratchet SL to Break-Even, and KEEP 65% RUNNER OPEN!
+                    part_frac = 0.35
                     partial = port["unrealized_pnl"] * part_frac
                     port["banked_pnl"] += partial
                     account["balance"] += partial
@@ -1798,15 +1840,16 @@ def _check_exit_for_symbol(sym: str):
                     port["sl_price"] = entry + fee_buf if direction == "LONG" else entry - fee_buf
                     port["phase"] = 2
                     port["risk_tier"] = 3
+                    port["peak_fav_r"] = max(float(port.get("peak_fav_r", 0.0)), r_mult)
                     if PROP_FIRM_MODE and prop_firm_manager:
                         prop_firm_manager.on_trade_closed(partial, f"OFI HARVEST PARTIAL (+{r_mult:.1f}R)")
 
-                    log_msg = f"[{now_str}] {sym} OFI REVERSAL (+{r_mult:.1f}R): Banked 40% (+${partial:.2f}), SL→BE, RUNNER KEPT OPEN FOR TREND"
+                    log_msg = f"[{now_str}] {sym} OFI REVERSAL (+{r_mult:.1f}R): Banked 35% (+${partial:.2f}), SL→BE, 65% RUNNER KEPT OPEN"
                     trade_log.append(log_msg)
                     if HEADLESS: print(f"  ⚡ {log_msg}", flush=True)
                     send_challenge_alert("OFI HARVEST (RUNNER OPEN)", {
                         "symbol": sym, "action": direction, "price": cur, "pnl_usd": partial,
-                        "reason": f"Banked 40% at +{r_mult:.1f}R, 60% runner trailing to TP2",
+                        "reason": f"Banked 35% at +{r_mult:.1f}R, 65% runner trailing to TP2",
                     })
 
                     # Execute physical partial close on MT5 broker
@@ -1816,19 +1859,19 @@ def _check_exit_for_symbol(sym: str):
                         min_step = 0.02 if "ETH" in sym else 0.01
                         part_vol = max(min_step, part_vol)
                         _schedule_broker_sync(t_id, port["sl_price"], part_vol=part_vol)
-                elif port.get("phase", 1) == 2 and r_mult >= 2.5:
-                    # In Phase 2, only close runner if it is already past +2.5R
+                elif port.get("phase", 1) == 2 and r_mult >= 3.2:
+                    # In Phase 2, only close runner on extreme opposing flow past +3.2R
                     close(cur, f"OFI RUNNER HARVEST (OFI {ofi_v:+.2f} at +{r_mult:.1f}R)")
                     return
         except Exception:
             pass
 
-    # ── DYNAMIC TIER 3: Partial TP at TP1 (Bank 40%, move SL to BE, let 60% runner ride ATR trail) ──
+    # ── DYNAMIC TIER 3: Partial TP at TP1 (Bank 35%, move SL to BE, let 65% runner ride ATR trail) ──
     is_swing = (port.get("trade_mode") == "SWING")
     if port["phase"] == 1:
         hit = (direction=="LONG" and cur>=tp1) or (direction=="SHORT" and cur<=tp1)
         if hit:
-            part_frac = 0.40
+            part_frac = 0.35
             partial = port["unrealized_pnl"] * part_frac
             port["banked_pnl"] += partial
             account["balance"]      += partial
@@ -1860,31 +1903,40 @@ def _check_exit_for_symbol(sym: str):
                 else:
                     _schedule_broker_sync(t_id, port["sl_price"], port["tp2_price"], part_vol=0.0, err_label="TP1 BE sync err")
 
-    # ── DYNAMIC TIER 4: Adaptive Runner Chandelier Trail (1.65 ATR tightening to 1.05 ATR past +2.5R) ──
+    # ── DYNAMIC TIER 4: High-Water Chandelier Runner Trail (Preserves Big Moves) ──
     if port["phase"] == 2:
         peak_fav_r = max(float(port.get("peak_fav_r", 0.0)), r_mult)
         port["peak_fav_r"] = peak_fav_r
+        anchor_px = float(port.get("highest_fav", cur))
         if is_swing:
-            trail_mult = 1.40 if peak_fav_r >= 3.0 else 2.20
-            trail_buf = max(atr * trail_mult, 15.0 if "ETH" in sym else (6.0 if "GOLD" in sym else 220.0))
+            trail_mult = 1.60 if peak_fav_r >= 3.5 else 2.60
+            trail_buf = max(atr * trail_mult, sl_dist * (0.65 if peak_fav_r >= 3.5 else 1.0))
         else:
-            trail_mult = 1.05 if peak_fav_r >= 2.5 else 1.65
-            trail_buf = max(atr * trail_mult, 4.0 if "ETH" in sym else (2.5 if "GOLD" in sym else 80.0))
+            if peak_fav_r >= 4.0:
+                trail_mult = 1.05
+                min_sl_buf = sl_dist * 0.45
+            elif peak_fav_r >= 2.8:
+                trail_mult = 1.35
+                min_sl_buf = sl_dist * 0.65
+            else:
+                trail_mult = 2.15
+                min_sl_buf = sl_dist * 0.90
+            trail_buf = max(atr * trail_mult, min_sl_buf)
 
-        ratchet_step = 2.0 if "ETH" in sym else 25.0
+        ratchet_step = 2.0 if "ETH" in sym else (0.8 if ("GOLD" in sym or "PAXG" in sym) else 25.0)
         if direction == "LONG":
-            new_sl = cur - trail_buf
+            new_sl = anchor_px - trail_buf
             if new_sl > port["sl_price"]:
                 old_sl = port["sl_price"]
-                port["sl_price"] = round(new_sl, 1)
+                port["sl_price"] = round(new_sl, 2)
                 if (new_sl - old_sl) >= ratchet_step:
                     _schedule_broker_sync(t_id, port["sl_price"], port["tp2_price"])
             if cur >= tp2: close(cur, f"FULL TP2 ({port.get('tp2_rr', 3.5):.1f}R [{port.get('trade_mode','SCALP')}])"); return
         else:
-            new_sl = cur + trail_buf
+            new_sl = anchor_px + trail_buf
             if new_sl < port["sl_price"]:
                 old_sl = port["sl_price"]
-                port["sl_price"] = round(new_sl, 1)
+                port["sl_price"] = round(new_sl, 2)
                 if (old_sl - new_sl) >= ratchet_step:
                     _schedule_broker_sync(t_id, port["sl_price"], port["tp2_price"])
             if cur <= tp2: close(cur, f"FULL TP2 ({port.get('tp2_rr', 3.5):.1f}R [{port.get('trade_mode','SCALP')}])"); return
@@ -2005,7 +2057,7 @@ async def _candle_worker():
                     direction = "LONG" if sig.direction == "BUY" else "SHORT"
 
                     # ── Apply Institutional Market Intelligence Synergy ──
-                    liq_delta, liq_reason = liquidity_engine.evaluate_signal_synergy(sym, direction)
+                    liq_delta, liq_reason = liquidity_engine.evaluate_signal_synergy(sym, direction, current_price=sig.price)
                     ll_delta, ll_reason = lead_lag_engine.evaluate_synergy(sym, direction)
                     
                     # Microstructure CVD & L2 Order Book Imbalance (OBI)
@@ -2043,7 +2095,20 @@ async def _candle_worker():
                         fund_reason = f"Warning: Overcrowded Shorts (Funding {fund_pct:+.4f}%)"
 
                     total_intel_delta = liq_delta + ll_delta + micro_delta + fund_delta
-                    calibrated_conviction = round(float(np.clip(sig.conviction + total_intel_delta, 0.0, 1.0)), 4)
+
+                    # Macro-Aligned Council Confluence calibration for secondary assets (ETH/PAXG) whose
+                    # isotonic calibrators compress strong structural setups near 0.50-0.54
+                    council_boost = 0.0
+                    if sym != PRIMARY_SYMBOL and sig.council_approved and sig.council_score >= 0.64 and total_intel_delta >= 0.03:
+                        macro_d = symbol_macro_structure.get(sym, {})
+                        macro_dir_ok = (
+                            (direction == "LONG" and "BEAR" not in str(macro_d.get("trend_4h", "")))
+                            or (direction == "SHORT" and "BULL" not in str(macro_d.get("trend_4h", "")))
+                        )
+                        if macro_dir_ok:
+                            council_boost = min(0.055, round((sig.council_score - 0.60) * 0.25, 4))
+
+                    calibrated_conviction = round(float(np.clip(sig.conviction + total_intel_delta + council_boost, 0.0, 1.0)), 4)
                     ext_atr, loc_delta, loc_note = compute_auction_location(sym, direction, sig.price, sig.atr)
                     required_threshold = get_calibrated_threshold(sym, sig.regime, loc_delta=loc_delta)
 
@@ -3398,8 +3463,10 @@ def _do_close_symbol(sym: str, exit_profit: float, exit_price: float, reason: st
     if sym_port.get("position") != "OPEN":
         return
     cur_dir = sym_port.get("direction", "LONG")
-    is_be = abs(exit_profit) < 0.50
-    is_win = exit_profit >= 0.50
+    banked = float(sym_port.get("banked_pnl", 0.0))
+    total_profit = round(banked + exit_profit, 2)
+    is_be = abs(total_profit) < 0.50
+    is_win = total_profit >= 0.50
     account["balance"] += exit_profit
     update_health()
     if PROP_FIRM_MODE and prop_firm_manager:
@@ -3411,12 +3478,12 @@ def _do_close_symbol(sym: str, exit_profit: float, exit_price: float, reason: st
     elif is_win:
         account["wins"] += 1
         account["consecutive_losses"] = 0
-        account["total_wins_usd"] += exit_profit
+        account["total_wins_usd"] += total_profit
         outcome_str = "WIN"
     else:
         account["losses"] += 1
         account["consecutive_losses"] += 1
-        account["total_losses_usd"] += abs(exit_profit)
+        account["total_losses_usd"] += abs(total_profit)
         account["last_loss_time"] = time.time()
         outcome_str = "LOSS"
         if account["consecutive_losses"] >= 2:
@@ -3429,23 +3496,23 @@ def _do_close_symbol(sym: str, exit_profit: float, exit_price: float, reason: st
         account["avg_win"]  = round(account["total_wins_usd"]/account["wins"], 2) if account["wins"] > 0 else 0
         account["avg_loss"] = round(account["total_losses_usd"]/account["losses"], 2) if account["losses"] > 0 else 0
         account["profit_factor"] = round(account["total_wins_usd"]/account["total_losses_usd"], 3) if account["total_losses_usd"] > 0 else 999.0
-        account["best"]  = max(account["best"], exit_profit)
-        account["worst"] = min(account["worst"], exit_profit)
+        account["best"]  = max(account["best"], total_profit)
+        account["worst"] = min(account["worst"], total_profit)
 
-    s = "+" if exit_profit >= 0 else ""
+    s = "+" if total_profit >= 0 else ""
     trade_log.append(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] "
-                     f"CLOSE [{sym}] @${exit_price:,.2f} PnL:{s}${exit_profit:.2f} | {reason}")
+                     f"CLOSE [{sym}] @${exit_price:,.2f} PnL:{s}${total_profit:.2f} | {reason}")
     send_challenge_alert("TRADE CLOSED", {
         "symbol": sym,
         "action": cur_dir,
         "price": exit_price,
-        "pnl_usd": exit_profit,
+        "pnl_usd": total_profit,
         "reason": reason,
     })
     for t in reversed(trade_journal):
         if t.get("symbol") == sym and t.get("outcome") == "OPEN":
             t.update({"exit_ts": datetime.datetime.now().isoformat(),
-                      "exit_price": exit_price, "pnl_usd": exit_profit,
+                      "exit_price": exit_price, "pnl_usd": total_profit,
                       "outcome": outcome_str,
                       "exit_reason": reason})
             break

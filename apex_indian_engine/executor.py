@@ -355,6 +355,14 @@ class IndianOrderExecutor:
                 trade.sl_price = round(entry + (sl_dist * 0.50), 2)
                 logger.info(f"{trade.symbol} TP1 Hit (1-Lot): Guaranteed +0.50R Profit Lock @ ₹{trade.sl_price:.2f}")
 
+        # 5b. Tier 4 Momentum Lock (+1.75R) -> Trail SL up to +1.10R to protect large expansions
+        if trade.trailing_tier == 3 and r_mult >= 1.75:
+            runner_sl = round(entry + (sl_dist * 1.10), 2)
+            if runner_sl > trade.sl_price:
+                trade.sl_price = runner_sl
+                trade.trailing_tier = 4
+                logger.info(f"{trade.symbol} TIER 4 (+1.75R): Runner SL locked to +1.10R @ ₹{runner_sl:.2f}")
+
         # 6. Full Take Profit 2 -> Full Exit of Remaining Position
         if cur >= trade.tp2_price:
             return self.close_trade(cur, reason=f"FULL TARGET TP2 (+{r_mult:.1f}R)")

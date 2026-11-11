@@ -76,9 +76,13 @@ class IndianSignalEngine:
 
     def add_candle(self, c: dict[str, Any]) -> None:
         """
-        Add a completed 5-minute candle:
+        Add a completed 5-minute candle (deduplicating matching boot/close timestamps):
         {timestamp, open, high, low, close, volume, [vwap]}
         """
+        ts = str(c.get("timestamp", ""))
+        if self.candles_5m and ts and str(self.candles_5m[-1].get("timestamp", "")) == ts:
+            self.candles_5m[-1] = c
+            return
         self.candles_5m.append(c)
         if len(self.candles_5m) > 120:
             self.candles_5m.pop(0)
@@ -121,6 +125,7 @@ class IndianSignalEngine:
         key_levels: Optional[IndexKeyLevels] = None,
         is_preview: bool = False,
         heavyweights: Optional[dict[str, Any]] = None,
+        oi_flow: str = "",
     ) -> Optional[tuple[str, str, float, float, list[str], Optional[OIMetrics]]]:
         """
         Evaluates current technical posture across 5 Council Advisors + OI Wall Shield + Liquidity Traps.
@@ -368,6 +373,12 @@ class IndianSignalEngine:
                             self._last_veto_log[f"OI_{reason}"] = now_t
                     return _veto(reason)
 
+            # VETO 6b: Counter-Macro + Bearish OI Flow Requires Strong Confirmation
+            if key_levels and cur_close < min(key_levels.tc, key_levels.bc) and oi_flow in ("CALL_WRITING_BEARISH", "LONG_UNWINDING_CRASH"):
+                req_hi = max(self.min_consensus_threshold + 0.12, 0.70)
+                if net_score < req_hi:
+                    return _veto(f"Counter-macro CE below CPR vs {oi_flow} (need {req_hi:.2f}, got {net_score:.2f})")
+
             # VETO 7: Fair Value Gap (FVG) Bearish Supply Veto
             if key_levels and key_levels.fvg_supply:
                 if not is_preview:
@@ -448,6 +459,12 @@ class IndianSignalEngine:
                             logger.warning(f"Signal Vetoed by OI Shield: {reason}")
                             self._last_veto_log[f"OI_{reason}"] = now_t
                     return _veto(reason)
+
+            # VETO 6b: Counter-Macro + Bullish OI Flow Requires Strong Confirmation (Stops weak PE vs Bull Day dips)
+            if key_levels and cur_close > max(key_levels.tc, key_levels.bc) and oi_flow in ("PUT_WRITING_BULLISH", "SHORT_COVERING_RALLY"):
+                req_hi = max(self.min_consensus_threshold + 0.12, 0.70)
+                if abs(net_score) < req_hi:
+                    return _veto(f"Counter-macro PE above CPR vs {oi_flow} (need -{req_hi:.2f}, got {net_score:+.2f})")
 
             # VETO 7: Fair Value Gap (FVG) Bullish Demand Veto
             if key_levels and key_levels.fvg_demand:

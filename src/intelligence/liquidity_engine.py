@@ -180,7 +180,7 @@ class LiquidityEngine:
     def get_levels(self, symbol: str) -> dict[str, Any]:
         return self._levels.get(symbol.upper(), {})
 
-    def evaluate_signal_synergy(self, symbol: str, direction: str) -> tuple[float, str]:
+    def evaluate_signal_synergy(self, symbol: str, direction: str, current_price: float = 0.0) -> tuple[float, str]:
         """
         Evaluate how current liquidity alignment affects signal conviction.
         Returns: (conviction_delta: float, reason: str)
@@ -218,9 +218,7 @@ class LiquidityEngine:
 
         # 4. Gold London Fix Institutional Anchor Synergy
         if any(g in sym for g in ("PAXG", "XAU", "GOLD")):
-            cur_p = lev.get("nearest_support", 0.0) or lev.get("nearest_resistance", 0.0)
-            if cur_p == 0.0 and lev.get("pdc", 0.0) > 0.0:
-                cur_p = lev.get("pdc", 0.0)
+            cur_p = current_price if current_price > 0 else (lev.get("nearest_support", 0.0) or lev.get("nearest_resistance", 0.0) or lev.get("pdc", 0.0))
             for fix_name, fix_val in [("LBMA PM Fix", lev.get("lbma_pm_fix", 0.0)), ("LBMA AM Fix", lev.get("lbma_am_fix", 0.0))]:
                 if fix_val > 0 and cur_p > 0:
                     dist = abs(cur_p - fix_val) / fix_val

@@ -101,6 +101,7 @@ class ApexIndianEngine:
 
         self._prev_oi_map: dict[str, dict[Any, int]] = {"NIFTY": {}, "BANKNIFTY": {}}
         self._latest_oi_chains: dict[str, list[dict[str, Any]]] = {"NIFTY": [], "BANKNIFTY": []}
+        self._latest_oi_flows: dict[str, str] = {"NIFTY": "BALANCED", "BANKNIFTY": "BALANCED"}
         self.heavyweight_prices: dict[str, float] = {"1333": 0.0, "4963": 0.0, "2885": 0.0}
         self.heavyweight_baselines: dict[str, float] = {}
         self.candle_cache_file = Path("data/indian_candles_cache.json")
@@ -392,7 +393,13 @@ class ApexIndianEngine:
         active_oi = oi_chain if oi_chain is not None else (self._latest_oi_chains.get(idx) or None)
         heavyweights_info = self._get_heavyweights_info()
         res = sig_engine.evaluate_signal(
-            cur_spot, cur_vwap, oi_chain=active_oi, key_levels=cur_lvl, is_preview=False, heavyweights=heavyweights_info
+            cur_spot,
+            cur_vwap,
+            oi_chain=active_oi,
+            key_levels=cur_lvl,
+            is_preview=False,
+            heavyweights=heavyweights_info,
+            oi_flow=self._latest_oi_flows.get(idx, ""),
         )
         if not res:
             return None
@@ -447,12 +454,31 @@ class ApexIndianEngine:
 
         c_body = abs(float(candle.get("close", cur_spot)) - float(candle.get("open", cur_spot)))
         vwap_ext = (cur_spot - cur_vwap) if opt_type == "CE" else (cur_vwap - cur_spot)
-        if atr > 0 and vwap_ext > (2.5 * atr) and c_body > (1.4 * atr):
-            logger.warning(
-                f"⚠️ CLIMAX EXHAUSTION GUARD ({idx} {opt_type}): Spot extended {vwap_ext:.1f} pts (>2.5 ATR) "
-                f"from VWAP on huge {c_body:.1f} pt bar. Skipping buying peak!"
-            )
-            return None
+        if atr > 0:
+            # 1) Absolute Climax Stretch: Never enter > 3.2 ATR away from session VWAP (eliminates -5.9 ATR bottom shorts)
+            if vwap_ext > (3.2 * atr):
+                logger.warning(
+                    f"⚠️ CLIMAX STRETCH GUARD ({idx} {opt_type}): Spot extended {vwap_ext:.1f} pts ({vwap_ext/atr:.1f} ATR > 3.2 ATR) "
+                    f"from session VWAP. Skipping exhausted move!"
+                )
+                return None
+            # 2) Single-Bar Climax Blowoff (> 2.5 ATR & 1.4 ATR candle body)
+            if vwap_ext > (2.5 * atr) and c_body > (1.4 * atr):
+                logger.warning(
+                    f"⚠️ CLIMAX EXHAUSTION GUARD ({idx} {opt_type}): Spot extended {vwap_ext:.1f} pts (>2.5 ATR) "
+                    f"from VWAP on huge {c_body:.1f} pt bar. Skipping buying peak!"
+                )
+                return None
+            # 3) Multi-Bar Sprint Exhaustion (4-bar run > 3.0 ATR AND already > 2.0 ATR off VWAP)
+            if len(sig_engine.candles_5m) >= 5:
+                base_4 = float(sig_engine.candles_5m[-5].get("open", cur_spot))
+                sprint_4 = (cur_spot - base_4) if opt_type == "CE" else (base_4 - cur_spot)
+                if sprint_4 > (3.0 * atr) and vwap_ext > (2.0 * atr):
+                    logger.warning(
+                        f"⚠️ MULTI-BAR EXHAUSTION GUARD ({idx} {opt_type}): Moved {sprint_4:.1f} pts ({sprint_4/atr:.1f} ATR) in 4 bars "
+                        f"at {vwap_ext/atr:.1f} ATR off VWAP. Waiting for pullback!"
+                    )
+                    return None
 
         # 7b. Capital Allocation & Margin Concentration Guard (BankNifty monthly 1-lot ~₹22k-₹32k; SL risk bounded 1-2%)
         cost_per_lot = prem * selected.lot_size
@@ -759,7 +785,13 @@ class ApexIndianEngine:
                 bn_sig.min_consensus_threshold = vix_params.consensus_threshold
                 bn_oi = self._latest_oi_chains.get("BANKNIFTY") or None
                 res = bn_sig.evaluate_signal(
-                    bn_spot, bn_vwap, oi_chain=bn_oi, key_levels=bn_lvl, is_preview=True, heavyweights=hw_info
+                    bn_spot,
+                    bn_vwap,
+                    oi_chain=bn_oi,
+                    key_levels=bn_lvl,
+                    is_preview=True,
+                    heavyweights=hw_info,
+                    oi_flow=self._latest_oi_flows.get("BANKNIFTY", ""),
                 )
                 if res:
                     bn_bias = f"{res[0]} ({res[1]})"
@@ -783,7 +815,13 @@ class ApexIndianEngine:
                 nf_sig.min_consensus_threshold = vix_params.consensus_threshold
                 nf_oi = self._latest_oi_chains.get("NIFTY") or None
                 res = nf_sig.evaluate_signal(
-                    nifty_spot, nifty_vwap, oi_chain=nf_oi, key_levels=nf_lvl, is_preview=True, heavyweights=hw_info
+                    nifty_spot,
+                    nifty_vwap,
+                    oi_chain=nf_oi,
+                    key_levels=nf_lvl,
+                    is_preview=True,
+                    heavyweights=hw_info,
+                    oi_flow=self._latest_oi_flows.get("NIFTY", ""),
                 )
                 if res:
                     nf_bias = f"{res[0]} ({res[1]})"
@@ -1074,7 +1112,8 @@ class ApexIndianEngine:
                                 self._latest_oi_chains[idx] = chain_data
                                 tracker = self.oi_trackers.get(idx)
                                 if tracker:
-                                    tracker.update_chain(chain_data, cur_spot)
+                                    snap = tracker.update_chain(chain_data, cur_spot)
+                                    self._latest_oi_flows[idx] = snap.flow_sentiment
 
                         await asyncio.sleep(2.0)
 

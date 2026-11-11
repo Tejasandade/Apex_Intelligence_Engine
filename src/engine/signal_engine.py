@@ -473,15 +473,20 @@ class LiveSignalEngine:
         if self.council and self._enable_council:
             # All signals go through the Council's democratic process. No overrides.
             strat_type = member_predictions.get("strategy_type", "UNKNOWN")
+            df_15m_ctx = self.mtf_buffer.get_15m_df() if self.mtf_buffer.is_ready() else None
+            df_1h_ctx = self.mtf_buffer.get_1h_df() if self.mtf_buffer.is_ready() else None
             council_decision = self.council.evaluate(
                 features=features,
                 direction=direction,
                 price=close,
                 regime=effective_regime,
                 atr=atr,
+                symbol=self.symbol,
+                candles_15m=df_15m_ctx.to_dict("records") if df_15m_ctx is not None else [],
+                candles_1h=df_1h_ctx.to_dict("records") if df_1h_ctx is not None else [],
                 df_5m=self.mtf_buffer.get_5m_df() if self.mtf_buffer.is_ready() else None,
-                df_15m=self.mtf_buffer.get_15m_df() if self.mtf_buffer.is_ready() else None,
-                df_1h=self.mtf_buffer.get_1h_df() if self.mtf_buffer.is_ready() else None,
+                df_15m=df_15m_ctx,
+                df_1h=df_1h_ctx,
                 df_4h=self.mtf_buffer.get_4h_df() if self.mtf_buffer.is_ready() else None,
                 mtf_ready=self.mtf_buffer.is_ready(),
                 oracle_levels=oracle_levels or [],
