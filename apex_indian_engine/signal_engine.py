@@ -202,8 +202,9 @@ class IndianSignalEngine:
         # ── 4. Advisor 3: Session VWAP Positioning & Breakout ──
         adv3_score = 0.0
         vwap_diff = cur_close - vwap
-        if abs(vwap_diff) > atr * 3.5:
-            # Overextended trend: keep same-side bias at reduced weight instead of flipping counter-trend
+        ema20_fast = self._calc_ema(closes, min(20, len(closes)))
+        if abs(vwap_diff) > atr * 5.0 and abs(cur_close - ema20_fast) > atr * 2.2:
+            # Overextended climax off both VWAP and 5m EMA20: reduce VWAP trend weight
             adv3_score = round(w_vwap * 0.35, 2) * (1.0 if vwap_diff > 0 else -1.0)
             adv3_log = f"VWAP (Weight: {int(w_vwap*100)}%): Spot={cur_close:.0f} vs VWAP={vwap:.0f} [EXTENDED: {vwap_diff:+.1f} pts] (Score: {adv3_score:+.2f})"
         elif vwap_diff >= atr * 0.08:
@@ -250,10 +251,18 @@ class IndianSignalEngine:
             cpr_bot = min(key_levels.tc, key_levels.bc)
             half_l = w_lvl * 0.5
             cpr_bias = 0.0
-            if cur_close > cpr_top:
-                cpr_bias = half_l
-            elif cur_close < cpr_bot:
-                cpr_bias = -half_l
+            cpr_stale = (key_levels.pivot <= 0) or (abs(cur_close - key_levels.pivot) > (6.0 * atr))
+            if not cpr_stale and cpr_top > 0:
+                if cur_close > cpr_top:
+                    cpr_bias = half_l
+                elif cur_close < cpr_bot:
+                    cpr_bias = -half_l
+            else:
+                # Gap day (> 6 ATR from prior CPR): anchor institutional structure to 5m EMA50 instead of stale pivot
+                if cur_close > (ema50 + atr * 0.15):
+                    cpr_bias = half_l
+                elif cur_close < (ema50 - atr * 0.15):
+                    cpr_bias = -half_l
 
             orb_bias = 0.0
             if key_levels.orb_formed and key_levels.orh > 0 and key_levels.orl > 0:
@@ -262,13 +271,14 @@ class IndianSignalEngine:
                 elif cur_close < key_levels.orl:
                     orb_bias = -half_l
             if orb_bias == 0.0 and key_levels.pdh > 0 and key_levels.pdl > 0:
-                if cur_close > key_levels.pdh:
+                if abs(cur_close - key_levels.pdh) <= (6.0 * atr) and cur_close > key_levels.pdh:
                     orb_bias = half_l
-                elif cur_close < key_levels.pdl:
+                elif abs(cur_close - key_levels.pdl) <= (6.0 * atr) and cur_close < key_levels.pdl:
                     orb_bias = -half_l
 
             adv5_score = round(max(-w_lvl, min(w_lvl, cpr_bias + orb_bias)), 2)
-            adv5_log = f"CPR/ORB (Weight: {int(w_lvl*100)}%): Spot={cur_close:.0f} vs CPR=[{cpr_bot:.0f}-{cpr_top:.0f}] | ORB=[{key_levels.orl:.0f}-{key_levels.orh:.0f}] (Score: {adv5_score:+.2f})"
+            cpr_tag = f"EMA50={ema50:.0f}(gap)" if cpr_stale else f"CPR=[{cpr_bot:.0f}-{cpr_top:.0f}]"
+            adv5_log = f"CPR/ORB (Weight: {int(w_lvl*100)}%): Spot={cur_close:.0f} vs {cpr_tag} | ORB=[{key_levels.orl:.0f}-{key_levels.orh:.0f}] (Score: {adv5_score:+.2f})"
 
         # ── 7. Council Aggregation ──
         net_score = round(adv1_score + adv2_score + adv3_score + adv4_score + adv5_score, 2)

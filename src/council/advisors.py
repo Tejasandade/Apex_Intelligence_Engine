@@ -57,7 +57,11 @@ class MomentumAdvisor(BaseAdvisor):
         row = features.iloc[0]
         cvd = float(row.get("CVD", 0.0))
         of_imb = float(row.get("order_flow_imbalance", 0.0))
-        vwap = float(row.get("VWAP", price))
+        vwap_z = float(row.get("VWAP_zscore", 0.0))
+        has_vwap = "VWAP" in row.index and pd.notna(row.get("VWAP")) and float(row.get("VWAP", 0.0)) > 0
+        vwap = float(row.get("VWAP", price)) if has_vwap else price
+        below_vwap = (price < vwap) if has_vwap else (vwap_z < 0.0)
+        above_vwap = (price > vwap) if has_vwap else (vwap_z > 0.0)
 
         factors = 0
         reasons = []
@@ -69,7 +73,7 @@ class MomentumAdvisor(BaseAdvisor):
             if of_imb > 0:
                 factors += 1
                 reasons.append("Aggressive Buy Orders (Imbalance)")
-            if price > vwap:
+            if above_vwap:
                 factors += 1
                 reasons.append("Price > VWAP")
         else:  # SELL
@@ -79,7 +83,7 @@ class MomentumAdvisor(BaseAdvisor):
             if of_imb < 0:
                 factors += 1
                 reasons.append("Aggressive Sell Orders (Imbalance)")
-            if price < vwap:
+            if below_vwap:
                 factors += 1
                 reasons.append("Price < VWAP")
 
@@ -287,14 +291,22 @@ class StructureAdvisor(BaseAdvisor):
                 factors += 1.0
                 reasons.append("4H Macro Trend Aligned (Bearish)")
 
-        # Strict HTF Trend Veto if no confirmed smart-money liquidity sweep
+        # Reject counter-HTF only if 5m EMA20 also opposes direction (never veto early 5m reversals when 15m EMA50 lags)
         if htf_macro_counter and not liquidity_sweep_confirmed:
-            trend_desc = "downtrend" if direction == "BUY" else "uptrend"
-            return self._make_vote(
-                Vote.REJECT, 0.65,
-                f"Structure REJECT: Counter-trend {direction} in 15m EMA50/200 {trend_desc} without liquidity sweep confirmation",
-                {"ema_50": ema_50_val, "ema_200": ema_200_val, "price": price}
-            )
+            ema20_opposes = False
+            if df_5m is not None and len(df_5m) >= 20:
+                ema20_5m = float(df_5m["close"].ewm(span=20, adjust=False).mean().iloc[-1])
+                ema20_opposes = (price < ema20_5m) if direction == "BUY" else (price > ema20_5m)
+            else:
+                ema20_opposes = True
+            if ema20_opposes:
+                trend_desc = "downtrend" if direction == "BUY" else "uptrend"
+                return self._make_vote(
+                    Vote.REJECT, 0.65,
+                    f"Structure REJECT: Counter-trend {direction} below 5m EMA20 & 15m EMA50/200 {trend_desc}",
+                    {"ema_50": ema_50_val, "ema_200": ema_200_val, "price": price}
+                )
+            reasons.append("15m EMA counter-trend offset by active 5m shift")
 
         # ── 1d. Dedicated Gold MTL / FVG Structural Shield (Adapted from xau_c) ──
         symbol_str = str(kwargs.get("symbol", "")).upper()
@@ -437,7 +449,7 @@ class VolumeAdvisor(BaseAdvisor):
     ) -> AdvisorVote:
         row = features.iloc[0]
         cvd = float(row.get("CVD", 0.0))
-        obv = float(row.get("OBV", 0.0))
+        obv = float(row.get("OBV", 0.0) or row.get("OBV_Slope", 0.0))
         ofi = float(row.get("order_flow_imbalance", 0.0))
 
         # --- Volume Profile Analysis ---
@@ -503,6 +515,9 @@ class VolumeAdvisor(BaseAdvisor):
                 reasons.append(f"OFI={ofi:.2f} (mild buy)")
             elif ofi < -0.1:
                 factors -= 1
+            if obv > 0:
+                factors += 0.5
+                reasons.append("OBV slope bullish")
                 
         else:  # SELL
             if cvd < 0:
@@ -519,6 +534,9 @@ class VolumeAdvisor(BaseAdvisor):
                 reasons.append(f"OFI={ofi:.2f} (mild sell)")
             elif ofi > 0.1:
                 factors -= 1
+            if obv < 0:
+                factors += 0.5
+                reasons.append("OBV slope bearish")
 
         # Base conviction on absolute positive factors
         conviction = min(max(factors, 0) / 2.0, 1.0)
@@ -808,18 +826,18 @@ class RiskAdvisor(BaseAdvisor):
         # Note: We rely on PositionManager's 'cooldown_remaining' for loss management 
         # instead of a hard VETO, which was causing a permanent deadlock.
 
-        # Overextension Check (Prevent chasing pumps/dumps)
+        # Overextension Check (aligned with 2.45 ATR exhaustion ceiling so 1.6-2.4 ATR trend breakouts are not collapsed)
         df_5m = kwargs.get("df_5m")
         if df_5m is not None and len(df_5m) >= 20:
             ema_20_5m = df_5m.close.ewm(span=20).mean().iloc[-1]
             distance = price - ema_20_5m
-            if direction == "BUY" and distance > (atr * 1.5):
+            if direction == "BUY" and distance > (atr * 2.45):
                 return self._make_vote(
                     Vote.REJECT, 1.0,
                     f"VETO: Price overextended {distance/atr:.1f}x ATR above 5m EMA (Chasing pump)",
                     {"distance": distance, "atr": atr},
                 )
-            elif direction == "SELL" and distance < -(atr * 1.5):
+            elif direction == "SELL" and distance < -(atr * 2.45):
                 return self._make_vote(
                     Vote.REJECT, 1.0,
                     f"VETO: Price overextended {abs(distance)/atr:.1f}x ATR below 5m EMA (Chasing dump)",

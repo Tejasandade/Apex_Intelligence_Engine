@@ -234,26 +234,35 @@ def get_calibrated_threshold(symbol: str, regime: str = "UNKNOWN", loc_delta: fl
     Asset-Calibrated Conviction Thresholds with Regime & Auction Location Sensitivity.
     """
     sym = symbol.upper()
-    base = 0.57
+    if "PAXG" in sym or "GOLD" in sym or "XAU" in sym:
+        base = 0.54
+        lo_clip, hi_clip = 0.53, 0.61
+    elif "ETH" in sym:
+        base = 0.55
+        lo_clip, hi_clip = 0.53, 0.65
+    else:
+        base = 0.56
+        lo_clip, hi_clip = 0.53, 0.65
+
     reg_l = str(regime).lower()
     if "trending_high_vol" in reg_l:
-        base -= 0.02
+        base -= 0.01
     elif "ranging_low_vol" in reg_l:
-        base += 0.03
-    elif "ranging_high_vol" in reg_l:
         base += 0.02
+    elif "ranging_high_vol" in reg_l:
+        base += 0.03
 
     s_name = session.get("name", "UNKNOWN")
     if s_name in ("LONDON", "NEW_YORK"):
         base -= 0.01
     elif s_name == "PACIFIC":
-        base += 0.04
+        base += 0.03
 
     if session.get("is_kill_zone", False):
-        base -= 0.01
+        base -= 0.005
 
     base += loc_delta
-    return round(float(np.clip(base, 0.53, 0.66)), 3)
+    return round(float(np.clip(base, lo_clip, hi_clip)), 3)
 
 # Risk
 BASE_RISK_PCT   = _rc("sizing", "min_allocation_pct", 0.010)   # from risk.yaml
@@ -577,8 +586,24 @@ symbol_gate_rejections: dict[str, dict] = {}
 # Institutional Fair-Value Pullback Retest Queue {symbol: {signal, direction, retest_px, inv_px, expires_ts}}
 pending_retest_zones: dict[str, dict] = {}
 
-def _is_grade_a_plus(prob: float, council: float) -> bool:
+symbol_model_health: dict[str, dict[str, bool]] = {sym: {} for sym in TRADED_SYMBOLS}
+
+def _model_is_healthy(sym: str, regime: str, direction: str) -> bool:
+    """Return True unless bag metadata marks the regime/direction model statistically invalid."""
+    sym_u = sym.upper()
+    reg_u = str(regime).upper()
+    dir_u = "LONG" if direction.upper() in ("LONG", "BUY") else "SHORT"
+    key = f"{reg_u}_{dir_u}"
+    health_map = symbol_model_health.get(sym_u, {})
+    return health_map.get(key, True)
+
+def _is_grade_a_plus(prob: float, council: float, symbol: str = "", regime: str = "", direction: str = "") -> bool:
     """Unified Grade A+ institutional threshold across worker, gates, and execution."""
+    reg_u = str(regime).upper()
+    if "RANGING_HIGH_VOL" in reg_u:
+        return False
+    if symbol and regime and direction and not _model_is_healthy(symbol, reg_u, direction):
+        return False
     return (prob >= 0.65 and council >= 0.68) or prob >= 0.70
 
 def _record_gate_rejection(sym: str, signal_desc: str, reason: str):
@@ -1142,7 +1167,7 @@ def check_pending_retests(sym: str, price: float):
     if touched:
         pending_retest_zones.pop(sym, None)
         sig = z["signal"]
-        is_hp = _is_grade_a_plus(sig.conviction, sig.council_score)
+        is_hp = _is_grade_a_plus(sig.conviction, sig.council_score, sym, getattr(sig, "regime", ""), direction)
         ok, _ = can_trade_symbol(sym, direction, is_high_prob=is_hp)
         if ok and portfolios.get(sym, portfolio)["position"] == "FLAT":
             trade_log.append(f"[{sym}] RETEST FILLED @ ${price:,.2f} (Zone: ${z['retest_px']:,.2f})")
@@ -1180,7 +1205,8 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL, bypass_retest: b
     direction = "LONG" if signal.direction == "BUY" else "SHORT"
     prob      = signal.conviction
     council   = signal.council_score
-    is_high_prob = _is_grade_a_plus(prob, council)
+    reg_u     = str(getattr(signal, "regime", "")).upper()
+    is_high_prob = _is_grade_a_plus(prob, council, sym, reg_u, direction)
     sig_desc = f"[{sym}] {direction} p={prob:.3f}"
 
     ok, reason = can_trade_symbol(sym, direction, is_high_prob=is_high_prob)
@@ -1197,10 +1223,15 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL, bypass_retest: b
         if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
         return False
 
-    # ── RANGE STRUCTURE QUALITY GATE (Block blind range entries when Structure abstains) ──
-    reg_u = str(getattr(signal, "regime", "")).upper()
+    # ── HIGH-VOLATILITY CHOP & RANGE STRUCTURE QUALITY GATES (Un-bypassable) ──
     struct_vote = (getattr(signal, "council_votes", {}) or {}).get("Structure", {}).get("vote", "ABSTAIN")
-    if "RANGING" in reg_u and struct_vote != "APPROVE" and not is_high_prob:
+    if "RANGING_HIGH_VOL" in reg_u:
+        log_msg = f"[{sym}] HIGH-VOL CHOP GATE: Skipping noisy {reg_u} chop regime (proven negative edge)"
+        trade_log.append(log_msg)
+        _record_gate_rejection(sym, sig_desc, log_msg)
+        if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
+        return False
+    if "RANGING" in reg_u and struct_vote != "APPROVE":
         log_msg = f"[{sym}] RANGING STRUCTURE GATE: Structure={struct_vote} in {reg_u} — skipping low-edge chop"
         trade_log.append(log_msg)
         _record_gate_rejection(sym, sig_desc, log_msg)
@@ -1246,7 +1277,7 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL, bypass_retest: b
     if sym_atr > 0 and lev_snap:
         if direction == "SHORT" and not lev_snap.get("breakout_bearish"):
             ns = float(lev_snap.get("nearest_support", 0.0))
-            if 0 < ns < entry and (entry - ns) < (sym_atr * 1.10) and not is_high_prob:
+            if 0 < ns < entry and (entry - ns) < (sym_atr * 1.10):
                 log_msg = f"[{sym}] SUPPORT WALL GUARD: Support ${ns:,.2f} only ${(entry-ns):.2f} (< 1.1 ATR) below entry"
                 trade_log.append(log_msg)
                 _record_gate_rejection(sym, sig_desc, log_msg)
@@ -1254,7 +1285,7 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL, bypass_retest: b
                 return False
         elif direction == "LONG" and not lev_snap.get("breakout_bullish"):
             nr = float(lev_snap.get("nearest_resistance", 0.0))
-            if nr > entry and (nr - entry) < (sym_atr * 1.10) and not is_high_prob:
+            if nr > entry and (nr - entry) < (sym_atr * 1.10):
                 log_msg = f"[{sym}] RESISTANCE WALL GUARD: Resistance ${nr:,.2f} only ${(nr-entry):.2f} (< 1.1 ATR) above entry"
                 trade_log.append(log_msg)
                 _record_gate_rejection(sym, sig_desc, log_msg)
@@ -1296,6 +1327,39 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL, bypass_retest: b
                 and lc_c < sma10
             ):
                 log_msg = f"[{sym}] ANTI-CRASH GUARD: Cancelled LONG into 3-bar lower-high selloff below 5m SMA10"
+                trade_log.append(log_msg)
+                _record_gate_rejection(sym, sig_desc, log_msg)
+                if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
+                return False
+
+        # 0b. Closed 5m Candle-Direction Confirmation & 3h Range Location Guard (Un-bypassable; prevents shorting green bottom bounces)
+        c_body = lc_c - lc_o
+        if sym_atr > 0:
+            if direction == "SHORT" and c_body > (0.15 * sym_atr):
+                log_msg = f"[{sym}] CANDLE CONFIRMATION GUARD: Refused SHORT on closed green 5m candle (+{c_body:.2f} > 0.15 ATR)"
+                trade_log.append(log_msg)
+                _record_gate_rejection(sym, sig_desc, log_msg)
+                if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
+                return False
+            if direction == "LONG" and (-c_body) > (0.15 * sym_atr):
+                log_msg = f"[{sym}] CANDLE CONFIRMATION GUARD: Refused LONG on closed red 5m candle ({c_body:.2f} < -0.15 ATR)"
+                trade_log.append(log_msg)
+                _record_gate_rejection(sym, sig_desc, log_msg)
+                if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
+                return False
+
+        if "RANGING" in reg_u and len(c5_list) >= 36:
+            w_hi = max(float(x["high"]) for x in c5_list[-36:])
+            w_lo = min(float(x["low"]) for x in c5_list[-36:])
+            rpos = (lc_c - w_lo) / max(w_hi - w_lo, 1e-9)
+            if direction == "SHORT" and rpos < 0.50 and lc_c > w_lo:
+                log_msg = f"[{sym}] 3H RANGE LOCATION GUARD: Refused RANGING SHORT in bottom half ({rpos*100:.1f}% < 50%)"
+                trade_log.append(log_msg)
+                _record_gate_rejection(sym, sig_desc, log_msg)
+                if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
+                return False
+            if direction == "LONG" and rpos > 0.50 and lc_c < w_hi:
+                log_msg = f"[{sym}] 3H RANGE LOCATION GUARD: Refused RANGING LONG in top half ({rpos*100:.1f}% > 50%)"
                 trade_log.append(log_msg)
                 _record_gate_rejection(sym, sig_desc, log_msg)
                 if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
@@ -2127,7 +2191,7 @@ async def _candle_worker():
                         )
                         continue
 
-                    is_high_prob = _is_grade_a_plus(sig.conviction, sig.council_score)
+                    is_high_prob = _is_grade_a_plus(sig.conviction, sig.council_score, sym, sig.regime, direction)
                     ok, reason = can_trade_symbol(sym, direction, is_high_prob=is_high_prob)
                     sym_port = portfolios.get(sym, portfolio)
                     if sym_port["position"] == "FLAT" and ok and sig.council_approved and sig.direction in ("BUY", "SELL"):
@@ -2324,21 +2388,40 @@ def prewarm():
                     if model_path.exists() and meta_path.exists():
                         try:
                             meta = json.load(open(meta_path))
+                            if bag_n == 1:
+                                mt = meta.get("metrics", {})
+                                healthy = (
+                                    float(mt.get("train_samples", 0)) >= 250
+                                    and float(mt.get("val_samples", 0)) >= 30
+                                    and float(mt.get("best_iteration", 0)) >= 10
+                                    and float(mt.get("precision", 0)) >= 0.25
+                                )
+                                symbol_model_health.setdefault(sym, {})[f"{regime.upper()}_{direction}"] = healthy
                             m = ApexXGBoostModel(name=name, feature_columns=meta["feature_columns"])
                             m.load(path=MODEL_DIR)
                             models[name] = m
                         except Exception as e:
                             print(f"    WARN: Could not load {name}: {e}")
 
-        # Also try to load transformer model if available
+        # Also try to load transformer model only if OOS metrics pass degeneracy check
         try:
             from src.models.transformer_model import ApexTransformerModel
             tf_path = MODEL_DIR / f"{sym_key}_crypto_transformer.pth"
+            tf_meta_path = MODEL_DIR / f"{sym_key}_crypto_transformer_meta.json"
             if tf_path.exists():
-                tf_model = ApexTransformerModel.load(f"{sym_key}_crypto_transformer", str(MODEL_DIR))
-                if tf_model:
-                    models[f"{sym_key}_crypto_transformer"] = tf_model
-                    print(f"  ✓ Transformer model loaded ({sym})")
+                tf_healthy = True
+                if tf_meta_path.exists():
+                    t_meta = json.load(open(tf_meta_path)).get("metadata", {})
+                    t_acc = float(t_meta.get("accuracy", 0.0))
+                    t_ll = float(t_meta.get("log_loss", 1.0))
+                    if t_acc < 0.45 or t_ll > 0.75:
+                        tf_healthy = False
+                        print(f"  ⚠️ [{sym}] Skipping degenerate Transformer (acc={t_acc:.3f}, ll={t_ll:.3f})")
+                if tf_healthy:
+                    tf_model = ApexTransformerModel.load(f"{sym_key}_crypto_transformer", str(MODEL_DIR))
+                    if tf_model:
+                        models[f"{sym_key}_crypto_transformer"] = tf_model
+                        print(f"  ✓ Transformer model loaded ({sym})")
         except Exception:
             pass
 

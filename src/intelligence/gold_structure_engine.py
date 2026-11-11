@@ -258,13 +258,14 @@ class GoldStructureEngine:
                 result["nearest_demand_fvg"] = z
                 result["c1_level"] = z.get("c1", 0.0)
                 result["c2_level"] = z.get("c2", 0.0)
-                # FATAL SHORT VETO: Never short directly into an institutional demand FVG
-                result["veto_short"] = True
-                result["veto_reason"] = (
-                    f"Gold Structure VETO: Price ${current_price:,.2f} is resting inside a {z['timeframe']} "
-                    f"Bullish FVG Demand Zone [${lower:,.1f} - ${upper:,.1f}]. Short entries strictly locked."
-                )
-                result["structural_bias"] = "BULLISH_DEMAND"
+                # Veto shorts on fresh untouched demand or above midpoint; allow breakdown once overlapped below midpoint
+                if z.get("status", "untouched") == "untouched" or current_price >= z.get("midpoint", upper):
+                    result["veto_short"] = True
+                    result["veto_reason"] = (
+                        f"Gold Structure VETO: Price ${current_price:,.2f} is resting inside a {z['timeframe']} "
+                        f"Bullish FVG Demand Zone [${lower:,.1f} - ${upper:,.1f}]. Short entries strictly locked."
+                    )
+                    result["structural_bias"] = "BULLISH_DEMAND"
                 break
             # Approaching demand floor from above (within 0.20%)
             elif current_price > upper and (current_price - upper) / current_price < 0.002:
@@ -281,13 +282,14 @@ class GoldStructureEngine:
                 result["nearest_supply_fvg"] = z
                 result["c1_level"] = z.get("c1", 0.0)
                 result["c2_level"] = z.get("c2", 0.0)
-                # FATAL LONG VETO: Never buy directly into an institutional supply FVG
-                result["veto_long"] = True
-                result["veto_reason"] = (
-                    f"Gold Structure VETO: Price ${current_price:,.2f} is resting inside a {z['timeframe']} "
-                    f"Bearish FVG Supply Zone [${lower:,.1f} - ${upper:,.1f}]. Long entries strictly locked."
-                )
-                result["structural_bias"] = "BEARISH_SUPPLY"
+                # Veto longs on fresh untouched supply or below midpoint; allow breakout once overlapped above midpoint
+                if z.get("status", "untouched") == "untouched" or current_price <= z.get("midpoint", lower):
+                    result["veto_long"] = True
+                    result["veto_reason"] = (
+                        f"Gold Structure VETO: Price ${current_price:,.2f} is resting inside a {z['timeframe']} "
+                        f"Bearish FVG Supply Zone [${lower:,.1f} - ${upper:,.1f}]. Long entries strictly locked."
+                    )
+                    result["structural_bias"] = "BEARISH_SUPPLY"
                 break
             # Approaching supply ceiling from below (within 0.20%)
             elif current_price < lower and (lower - current_price) / current_price < 0.002:

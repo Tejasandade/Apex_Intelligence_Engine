@@ -182,7 +182,12 @@ class ApexIndianEngine:
             with open(self.candle_cache_file, "r", encoding="utf-8") as f:
                 cached = json.load(f)
             for idx in ["BANKNIFTY", "NIFTY"]:
-                candles = cached.get(idx, [])
+                raw_cached = cached.get(idx, [])
+                # Keep only regular NSE session bars (09:15-15:25) so off-hours ticks never corrupt EMA/ATR warmup
+                candles = [
+                    c for c in raw_cached
+                    if len(str(c.get("timestamp", ""))) < 16 or ("09:15" <= str(c.get("timestamp", ""))[11:16] <= "15:25")
+                ]
                 if candles:
                     sig_engine = self.signal_engines[idx]
                     sig_engine.candles_5m.clear()
@@ -453,30 +458,32 @@ class ApexIndianEngine:
             return None
 
         c_body = abs(float(candle.get("close", cur_spot)) - float(candle.get("open", cur_spot)))
-        vwap_ext = (cur_spot - cur_vwap) if opt_type == "CE" else (cur_vwap - cur_spot)
+        closes_5m = [float(c["close"]) for c in sig_engine.candles_5m]
+        ema20_5m = sig_engine._calc_ema(closes_5m, min(20, len(closes_5m))) if closes_5m else cur_vwap
+        ema_ext = (cur_spot - ema20_5m) if opt_type == "CE" else (ema20_5m - cur_spot)
         if atr > 0:
-            # 1) Absolute Climax Stretch: Never enter > 3.2 ATR away from session VWAP (eliminates -5.9 ATR bottom shorts)
-            if vwap_ext > (3.2 * atr):
+            # 1) Absolute Climax Stretch: Anchor to fast 5m EMA20 so afternoon trend continuations are not blocked by morning VWAP
+            if ema_ext > (2.6 * atr):
                 logger.warning(
-                    f"⚠️ CLIMAX STRETCH GUARD ({idx} {opt_type}): Spot extended {vwap_ext:.1f} pts ({vwap_ext/atr:.1f} ATR > 3.2 ATR) "
-                    f"from session VWAP. Skipping exhausted move!"
+                    f"⚠️ CLIMAX STRETCH GUARD ({idx} {opt_type}): Spot extended {ema_ext:.1f} pts ({ema_ext/atr:.1f} ATR > 2.6 ATR) "
+                    f"from 5m EMA20. Skipping exhausted move!"
                 )
                 return None
-            # 2) Single-Bar Climax Blowoff (> 2.5 ATR & 1.4 ATR candle body)
-            if vwap_ext > (2.5 * atr) and c_body > (1.4 * atr):
+            # 2) Single-Bar Climax Blowoff (> 2.0 ATR off EMA20 & > 1.4 ATR candle body)
+            if ema_ext > (2.0 * atr) and c_body > (1.4 * atr):
                 logger.warning(
-                    f"⚠️ CLIMAX EXHAUSTION GUARD ({idx} {opt_type}): Spot extended {vwap_ext:.1f} pts (>2.5 ATR) "
-                    f"from VWAP on huge {c_body:.1f} pt bar. Skipping buying peak!"
+                    f"⚠️ CLIMAX EXHAUSTION GUARD ({idx} {opt_type}): Spot extended {ema_ext:.1f} pts (>2.0 ATR) "
+                    f"from 5m EMA20 on huge {c_body:.1f} pt bar. Skipping extreme bar!"
                 )
                 return None
-            # 3) Multi-Bar Sprint Exhaustion (4-bar run > 3.0 ATR AND already > 2.0 ATR off VWAP)
+            # 3) Multi-Bar Sprint Exhaustion (4-bar run > 3.0 ATR AND already > 1.8 ATR off 5m EMA20)
             if len(sig_engine.candles_5m) >= 5:
                 base_4 = float(sig_engine.candles_5m[-5].get("open", cur_spot))
                 sprint_4 = (cur_spot - base_4) if opt_type == "CE" else (base_4 - cur_spot)
-                if sprint_4 > (3.0 * atr) and vwap_ext > (2.0 * atr):
+                if sprint_4 > (3.0 * atr) and ema_ext > (1.8 * atr):
                     logger.warning(
                         f"⚠️ MULTI-BAR EXHAUSTION GUARD ({idx} {opt_type}): Moved {sprint_4:.1f} pts ({sprint_4/atr:.1f} ATR) in 4 bars "
-                        f"at {vwap_ext/atr:.1f} ATR off VWAP. Waiting for pullback!"
+                        f"at {ema_ext/atr:.1f} ATR off 5m EMA20. Waiting for pullback!"
                     )
                     return None
 

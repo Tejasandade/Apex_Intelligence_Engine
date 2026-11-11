@@ -148,17 +148,23 @@ class InstitutionalLevelsTracker:
         active_sweep = "None"
         spot = current_spot or (float(today_candles[-1]["close"]) if today_candles else p)
         buf = 10.0 if "BANK" in self.index_name else 5.0
+        today_low = min((float(c["low"]) for c in today_candles), default=spot)
+        today_high = max((float(c["high"]) for c in today_candles), default=spot)
+        # On large gap-up/gap-down days where spot never traded near PDH/PDL, anchor to intraday ORB instead
+        pdh_in_play = (pdh > 0) and (today_low <= (pdh + (spot * 0.004)))
+        pdl_in_play = (pdl > 0) and (today_high >= (pdl - (spot * 0.004)))
 
-        # Check PDH / PDL Outright Breakouts first (Higher priority than range levels)
-        if pdh > 0 and spot > (pdh + buf):
+        # Prioritize intraday ORB when a session gaps far above PDH/below PDL or breaks intraday ORB opposite to prior PDH/PDL
+        if orb_formed and orl > 0 and spot < (orl - buf):
+            active_sweep = "PDL Bearish Breakdown" if (pdl_in_play and spot < (pdl - buf)) else "ORL Bearish Breakdown"
+        elif orb_formed and orh > 0 and spot > (orh + buf) and not pdh_in_play:
+            active_sweep = "ORH Bullish Breakout"
+        elif pdh_in_play and spot > (pdh + buf):
             active_sweep = "PDH Bullish Breakout"
-        elif pdl > 0 and spot < (pdl - buf):
+        elif pdl_in_play and spot < (pdl - buf):
             active_sweep = "PDL Bearish Breakdown"
-        # Check Opening Range (ORB) Breakouts
         elif orb_formed and orh > 0 and spot > (orh + buf):
             active_sweep = "ORH Bullish Breakout"
-        elif orb_formed and orl > 0 and spot < (orl - buf):
-            active_sweep = "ORL Bearish Breakdown"
         # Check Recent Turtle Soup Sweeps (Only active if occurred within recent 15 minutes / 3 candles)
         elif pdh > 0 and pdl > 0 and today_candles:
             recent_candles = today_candles[-3:]
@@ -174,7 +180,7 @@ class InstitutionalLevelsTracker:
                 if not (orb_formed and spot < orl):
                     active_sweep = "PDL Sweep Reclaim (Bullish Trap)"
 
-        # 5. Fair Value Gap (FVG) Imbalance Detection across recent candles
+        # 5. Fair Value Gap (FVG) Imbalance Detection across recent candles (skip invalidated FVGs)
         fvg_supply = False
         fvg_demand = False
         fvg_top = 0.0
@@ -187,17 +193,22 @@ class InstitutionalLevelsTracker:
                 c1_l = float(c1.get("low", 0.0))
                 c3_h = float(c3.get("high", 0.0))
                 c3_l = float(c3.get("low", 0.0))
+                subsequent = candles_5m[i + 1 :] if i + 1 < len(candles_5m) else []
 
-                # Bullish FVG Demand: c3_l > c1_h
+                # Bullish FVG Demand: c3_l > c1_h (invalidated once any later bar closes below c1_h)
                 if c3_l > c1_h and c1_h > 0:
+                    if subsequent and any(float(sc.get("close", c1_h)) < c1_h for sc in subsequent):
+                        continue
                     if c1_h <= spot <= c3_l:
                         fvg_demand = True
                         fvg_top = c3_l
                         fvg_bot = c1_h
                         break
 
-                # Bearish FVG Supply: c3_h < c1_l
+                # Bearish FVG Supply: c3_h < c1_l (invalidated once any later bar closes above c1_l)
                 elif c3_h < c1_l and c3_h > 0:
+                    if subsequent and any(float(sc.get("close", c1_l)) > c1_l for sc in subsequent):
+                        continue
                     if c3_h <= spot <= c1_l:
                         fvg_supply = True
                         fvg_top = c1_l

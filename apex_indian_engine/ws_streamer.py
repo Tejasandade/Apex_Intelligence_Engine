@@ -244,10 +244,15 @@ class IndianWebSocketStreamer:
         return round((completed_tp_sum + cur_tp) / max(completed_bars + 1, 1), 2)
 
     def _aggregate_candle(self, symbol: str, price: float, volume: float) -> None:
-        """Aggregates ticks into 5-minute wall-clock aligned candles (:00, :05, :10, :15, etc.) with cumulative session VWAP."""
+        """Aggregates ticks into 5-minute wall-clock aligned candles (:00, :05, :10, :15, etc.) during NSE hours."""
         now = time.time()
         slot_start = int(now // 300) * 300
-        today_str = datetime.fromtimestamp(slot_start).strftime("%Y-%m-%d")
+        slot_dt = datetime.fromtimestamp(slot_start)
+        hhmm = slot_dt.strftime("%H:%M")
+        # Do not synthesize post-market / pre-market flat 5m candles outside NSE session (09:15-15:25)
+        if not ("09:15" <= hhmm <= "15:25"):
+            return
+        today_str = slot_dt.strftime("%Y-%m-%d")
 
         if self._session_date.get(symbol) != today_str:
             self._session_date[symbol] = today_str

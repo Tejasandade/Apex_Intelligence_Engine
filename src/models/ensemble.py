@@ -224,13 +224,15 @@ class ModelEnsemble:
             return w
 
         elif self.weighting == WeightingMethod.REGIME:
-            # Boost models trained for the current regime
+            # Boost models trained for the current regime (substring-safe for symbol-prefixed member names)
             base_weight = max(member.recent_accuracy, self.min_weight)
-            if member.regime == "lstm":
+            m_reg = member.regime.lower()
+            cur_r = current_regime.lower()
+            if m_reg == "lstm":
                 return base_weight * 3.0  # 3x boost for deep learning sequential brain
-            elif member.regime.startswith(current_regime.lower()):
+            elif m_reg.startswith(cur_r) or (cur_r and cur_r in m_reg):
                 return base_weight * 2.0  # 2x boost for matching regime
-            elif member.regime == "all":
+            elif m_reg == "all":
                 return base_weight * 1.0  # Neutral for general models
             else:
                 return base_weight * 0.5  # Penalty for wrong-regime model
