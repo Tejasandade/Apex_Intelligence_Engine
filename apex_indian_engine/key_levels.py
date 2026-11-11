@@ -134,7 +134,7 @@ class InstitutionalLevelsTracker:
                     c for c in today_candles
                     if any(t in str(c.get("timestamp", "")) for t in ("09:15:", "09:20:", "09:25:"))
                 ]
-                if len(orb_candles) >= 2:
+                if len(orb_candles) >= 3:
                     orh = max(float(c["high"]) for c in orb_candles)
                     orl = min(float(c["low"]) for c in orb_candles)
                     orb_formed = True

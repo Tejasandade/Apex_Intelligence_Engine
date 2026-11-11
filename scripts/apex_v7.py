@@ -187,7 +187,6 @@ MIN_PROB        = _rc("conviction", "min_signal_threshold", 0.58)   # from risk.
 STRONG_PROB     = 0.65      # High-conviction → full risk
 MIN_PROB_DIFF   = 0.06      # Long vs Short separation
 MIN_RR          = _rc("trade_management", "default_rr_target", 2.2)   # Realistic intraday R:R from risk.yaml
-MIN_SL_USD      = 250.0     # Never tighter than $250 stop
 MAX_SL_USD      = 800.0     # Never wider than $800
 
 def compute_auction_location(symbol: str, direction: str, price: float, atr: float) -> tuple[float, float, str]:
@@ -1163,6 +1162,16 @@ def check_pending_retests(sym: str, price: float):
         trade_log.append(f"[{sym}] RETEST INVALIDATED: Structure broke ${z['inv_px']:,.2f} before entry ($0 loss)")
         return
 
+    # ATR runaway expiry: if price runs > 1.50 ATR away in trade direction, cancel stale retest queue
+    sig_px = z.get("signal_price", 0.0)
+    sym_atr_val = z.get("sym_atr", 0.0)
+    if sig_px > 0 and sym_atr_val > 0:
+        runaway_dist = (price - sig_px) if direction == "LONG" else (sig_px - price)
+        if runaway_dist > (1.50 * sym_atr_val):
+            pending_retest_zones.pop(sym, None)
+            trade_log.append(f"[{sym}] RETEST CANCELLED: Price ran {runaway_dist:.1f} pts (> 1.50 ATR) away without pullback")
+            return
+
     touched = (direction == "LONG" and price <= z["retest_px"]) or (direction == "SHORT" and price >= z["retest_px"])
     if touched:
         pending_retest_zones.pop(sym, None)
@@ -1332,17 +1341,18 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL, bypass_retest: b
                 if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
                 return False
 
-        # 0b. Closed 5m Candle-Direction Confirmation & 3h Range Location Guard (Un-bypassable; prevents shorting green bottom bounces)
+        # 0b. Closed 5m Candle-Direction Confirmation & 3h Range Location Guard
+        # Permits healthy pullbacks (<= 0.35 ATR); defers strong opposing expansion candles (> 0.35 ATR)
         c_body = lc_c - lc_o
         if sym_atr > 0:
-            if direction == "SHORT" and c_body > (0.15 * sym_atr):
-                log_msg = f"[{sym}] CANDLE CONFIRMATION GUARD: Refused SHORT on closed green 5m candle (+{c_body:.2f} > 0.15 ATR)"
+            if direction == "SHORT" and c_body > (0.35 * sym_atr):
+                log_msg = f"[{sym}] CANDLE CONFIRMATION GUARD: Refused SHORT on strong green 5m expansion (+{c_body:.2f} > 0.35 ATR)"
                 trade_log.append(log_msg)
                 _record_gate_rejection(sym, sig_desc, log_msg)
                 if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
                 return False
-            if direction == "LONG" and (-c_body) > (0.15 * sym_atr):
-                log_msg = f"[{sym}] CANDLE CONFIRMATION GUARD: Refused LONG on closed red 5m candle ({c_body:.2f} < -0.15 ATR)"
+            if direction == "LONG" and (-c_body) > (0.35 * sym_atr):
+                log_msg = f"[{sym}] CANDLE CONFIRMATION GUARD: Refused LONG on strong red 5m expansion ({c_body:.2f} < -0.35 ATR)"
                 trade_log.append(log_msg)
                 _record_gate_rejection(sym, sig_desc, log_msg)
                 if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
@@ -1455,6 +1465,8 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL, bypass_retest: b
                 "direction": direction,
                 "retest_px": retest_px,
                 "inv_px": inv_px,
+                "signal_price": entry,
+                "sym_atr": sym_atr,
                 "expires_ts": time.time() + 600.0,
             }
             log_msg = f"[{sym}] RETEST LIMIT QUEUED ({direction}): Wait pullback to ${retest_px:,.2f} (from ${entry:,.2f}, inv ${inv_px:,.2f})"
@@ -1498,16 +1510,23 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL, bypass_retest: b
     # ── MARKET-ANCHORED TARGET ARCHITECTURE (TP1 Solid Lock + Wide ATR Runner Ceiling) ──
     eff_atr = sym_atr if sym_atr > 0 else sl_dist
     if trade_mode == "SWING":
-        tp1_dist = max(sl_dist * 1.45, min(sl_dist * 1.80, eff_atr * 3.0))
+        base_tp1_r = 2.40 if is_ranging else 2.80
+        tp1_dist = max(sl_dist * 2.00, min(sl_dist * base_tp1_r, eff_atr * 3.5))
         tp2_dist = max(sl_dist * 5.5, eff_atr * 8.5)
         max_duration_min = 2880.0  # 48h
         adverse_decay_min = 480.0  # 8h adverse hold
     else:
-        max_duration_min = 360.0   # 6h
-        adverse_decay_min = 240.0  # 4h
-        base_tp1_r = 1.35 if is_ranging else 1.55
-        tp1_dist = max(sl_dist * 1.25, min(sl_dist * base_tp1_r, eff_atr * 2.2))
-        tp2_dist = max(sl_dist * 4.5, eff_atr * 6.5)
+        # SCALP mode: push TP1 to 1.85R - 2.15R so partial lock is substantial and expectancy is positive
+        if not is_ranging:
+            max_duration_min = 600.0   # 10h trending hold
+            adverse_decay_min = 420.0  # 7h
+            base_tp1_r = 2.10
+        else:
+            max_duration_min = 360.0   # 6h ranging
+            adverse_decay_min = 240.0  # 4h
+            base_tp1_r = 1.75
+        tp1_dist = max(sl_dist * 1.65, min(sl_dist * base_tp1_r, eff_atr * 2.6))
+        tp2_dist = max(sl_dist * 4.0, eff_atr * 6.0)
 
     tp1 = round(entry + tp1_dist if direction == "LONG" else entry - tp1_dist, 2)
     tp2 = round(entry + tp2_dist if direction == "LONG" else entry - tp2_dist, 2)
@@ -1857,26 +1876,26 @@ def _check_exit_for_symbol(sym: str):
         if direction == "LONG" and cur <= sl: close(cur, "STOP LOSS"); return
         if direction == "SHORT" and cur >= sl: close(cur, "STOP LOSS"); return
 
-    # ── DYNAMIC TIER 1: Risk Reduction at +0.90R (Tighten SL to -0.35R with breathing room for pullbacks) ──
-    if port.get("risk_tier", 0) < 1 and r_mult >= 0.90:
-        new_sl = entry - sl_dist * 0.35 if direction == "LONG" else entry + sl_dist * 0.35
+    # ── DYNAMIC TIER 1: Risk Reduction at +1.00R (Tighten SL to -0.30R with breathing room for pullbacks) ──
+    if port.get("risk_tier", 0) < 1 and r_mult >= 1.00:
+        new_sl = entry - sl_dist * 0.30 if direction == "LONG" else entry + sl_dist * 0.30
         port["sl_price"] = round(new_sl, 1)
         port["risk_tier"] = 1
-        log_msg = f"[{now_str}] {sym} TIER 1 (+0.90R): Risk reduced 65% | SL tightened to -0.35R @${new_sl:,.1f}"
+        log_msg = f"[{now_str}] {sym} TIER 1 (+1.00R): Risk reduced 70% | SL tightened to -0.30R @${new_sl:,.1f}"
         trade_log.append(log_msg)
         if HEADLESS: print(f"  ⚡ {log_msg}", flush=True)
-        send_challenge_alert("RISK REDUCED 65%", {
+        send_challenge_alert("RISK REDUCED 70%", {
             "symbol": sym, "action": direction, "price": cur, "new_sl": port["sl_price"],
         })
         _schedule_broker_sync(t_id, port["sl_price"], port["tp2_price"])
 
-    # ── DYNAMIC TIER 2: Break-Even Lock at +1.15R ──
-    if port.get("risk_tier", 0) < 2 and r_mult >= 1.15:
+    # ── DYNAMIC TIER 2: Break-Even Lock at +1.55R (Avoid premature BE stop-outs on normal 5m retests) ──
+    if port.get("risk_tier", 0) < 2 and r_mult >= 1.55:
         fee_buf = entry * (ROUNDTRIP_BPS * 1.5 / 10000.0)
         new_sl = entry + fee_buf if direction == "LONG" else entry - fee_buf
         port["sl_price"] = round(new_sl, 1)
         port["risk_tier"] = 2
-        log_msg = f"[{now_str}] {sym} TIER 2 (+1.15R): SL moved to Break-Even + fees @${new_sl:,.1f} | RISK FREE"
+        log_msg = f"[{now_str}] {sym} TIER 2 (+1.55R): SL moved to Break-Even + fees @${new_sl:,.1f} | RISK FREE"
         trade_log.append(log_msg)
         if HEADLESS: print(f"  ⚡ {log_msg}", flush=True)
         send_challenge_alert("BREAK-EVEN LOCKED", {
@@ -1930,12 +1949,12 @@ def _check_exit_for_symbol(sym: str):
         except Exception:
             pass
 
-    # ── DYNAMIC TIER 3: Partial TP at TP1 (Bank 35%, move SL to BE, let 65% runner ride ATR trail) ──
+    # ── DYNAMIC TIER 3: Partial TP at TP1 (Bank 25%, move SL to BE, let 75% runner ride ATR trail) ──
     is_swing = (port.get("trade_mode") == "SWING")
     if port["phase"] == 1:
         hit = (direction=="LONG" and cur>=tp1) or (direction=="SHORT" and cur<=tp1)
         if hit:
-            part_frac = 0.35
+            part_frac = 0.25
             partial = port["unrealized_pnl"] * part_frac
             port["banked_pnl"] += partial
             account["balance"]      += partial
@@ -2015,8 +2034,8 @@ def _check_exit_for_symbol(sym: str):
         close(cur, f"TIME DECAY {adv_dur/60:.0f}h adverse ({port.get('trade_mode', 'SCALP')})")
         return
 
-    # 4b. Early Structural Invalidation (cuts losses at -0.75R instead of waiting for -1.0R hard SL when 1H flips against us)
-    if dur_min >= 45.0 and port.get("phase", 1) == 1 and r_mult <= -0.75:
+    # 4b. Early Structural Invalidation (cuts losses at -0.85R instead of waiting for -1.0R hard SL when 1H flips against us after 75m)
+    if dur_min >= 75.0 and port.get("phase", 1) == 1 and r_mult <= -0.85:
         try:
             macro_t = symbol_macro_structure.get(sym, {})
             t_1h = str(macro_t.get("trend_1h", "NEUTRAL")).upper()

@@ -626,12 +626,9 @@ class LiveSignalEngine:
         self._last_signal = signal
         self._last_signal_direction = direction
         
-        # Suppress duplicate signals — reduced from 5/2 to 3/1 (P2 improvement)
-        # 3 candles = 15min cooldown for approved; 1 candle = 5min for blocked
-        if signal.council_approved:
-            self._suppression_counter = 3
-        else:
-            self._suppression_counter = 1
+        # Deduplicate immediate identical signal on next candle (1 candle cooldown)
+        # Note: Multi-candle cooldown is managed at trade execution level in live runners
+        self._suppression_counter = 1
 
         logger.info(
             "signal_generated",

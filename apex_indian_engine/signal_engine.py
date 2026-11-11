@@ -57,7 +57,8 @@ class IndianSignalEngine:
     def __init__(self, index_name: str = "BANKNIFTY"):
         self.index_name = index_name.upper()
         self.candles_5m: list[dict[str, Any]] = []
-        self.min_consensus_threshold = 0.55
+        # Calibrated for 5-advisor weighted council (0.42 allows strong 3-4 advisor consensus while vetos protect)
+        self.min_consensus_threshold = 0.42
 
         # Initialize ML Predictor (XGBoost models for BankNifty / Nifty)
         self.ml_predictor = IndianMLPredictor(index_name=self.index_name)
@@ -97,9 +98,11 @@ class IndianSignalEngine:
         if len(closes) < 15:
             return "NEUTRAL"
 
-        # Resample last 45 5m closes (up to 3.75 hours) into 15m close bars
-        recent_closes = closes[-45:] if len(closes) >= 45 else closes
-        c15 = recent_closes[::3]
+        # Correctly aggregate 15m candle closes from 5m series:
+        # Every 3rd 5m candle marks the close of a 15m candle.
+        # Ensure latest 5m close is included as current forming/closed 15m bar
+        n = len(closes)
+        c15 = [closes[i] for i in range(n - 1, max(-1, n - 46), -3)][::-1]
         if len(c15) < 3:
             return "NEUTRAL"
 

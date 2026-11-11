@@ -439,11 +439,12 @@ class ApexIndianEngine:
         # Adaptive Risk-Proportional Stop Loss (No micro-pip whipsaws on expensive options)
         prem = float(selected.est_premium)
         if "BANK" in idx:
-            # BankNifty option SL: 14% of premium, bounded 30-55 pts (keeps TP2 ~65-115 pts achievable!)
-            sl_pts = max(30.0, min(prem * 0.14, 55.0))
+            # BankNifty option SL: 14% of premium, bounded min 18.0 pts to max 50.0 pts
+            # (avoids taking 35-40% haircuts on cheaper ₹100-150 options)
+            sl_pts = max(18.0, min(prem * 0.14, 50.0))
         else:
-            # Nifty 50 option SL: 18% of premium, bounded 14-26 pts
-            sl_pts = max(14.0, min(prem * 0.18, 26.0))
+            # Nifty 50 option SL: 16% of premium, bounded min 10.0 pts to max 24.0 pts
+            sl_pts = max(10.0, min(prem * 0.16, 24.0))
         sl_pts = round(sl_pts, 1)
 
         # 7a. Institutional No-Chase & Climax Exhaustion Guard
@@ -522,13 +523,20 @@ class ApexIndianEngine:
         adj_lots = max(1, int(round(sizing["lots"] * vix_params.size_multiplier)))
         adj_qty = adj_lots * selected.lot_size
 
+        # Check if live tick exists for this token in ws_streamer
+        live_opt_px = selected.est_premium
+        if self.ws_streamer:
+            tick_px = self.ws_streamer.latest_prices.get(str(selected.token)) or self.ws_streamer.latest_prices.get(selected.symbol)
+            if tick_px and float(tick_px) > 1.0:
+                live_opt_px = float(tick_px)
+
         # 9. Execute Marketable Limit Order
         trade = self.executor.open_option_trade(
             index_name=idx,
             symbol=selected.symbol,
             token=selected.token,
             option_type=opt_type,
-            current_option_price=selected.est_premium,
+            current_option_price=live_opt_px,
             lots=adj_lots,
             quantity=adj_qty,
             sl_points=sl_pts,
