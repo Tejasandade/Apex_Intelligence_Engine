@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime, timedelta, timezone
 from typing import Any, Optional
 
 logger = logging.getLogger("apex.indian.key_levels")
@@ -128,17 +128,28 @@ class InstitutionalLevelsTracker:
         orl = 0.0
         orb_formed = False
         if today_candles:
-            has_clock_ts = any("T" in str(c.get("timestamp", "")) or " " in str(c.get("timestamp", "")) for c in today_candles)
-            if has_clock_ts:
-                orb_candles = [
-                    c for c in today_candles
-                    if any(t in str(c.get("timestamp", "")) for t in ("09:15:", "09:20:", "09:25:"))
-                ]
-                if len(orb_candles) >= 3:
-                    orh = max(float(c["high"]) for c in orb_candles)
-                    orl = min(float(c["low"]) for c in orb_candles)
-                    orb_formed = True
-            elif len(today_candles) >= 3:
+            def _is_orb_ts(ts_val) -> bool:
+                ts_str = str(ts_val)
+                if any(t in ts_str for t in ("09:15:", "09:20:", "09:25:", "09:15", "09:20", "09:25")):
+                    return True
+                try:
+                    num = float(ts_val)
+                    if num > 1e11:  # ms
+                        num /= 1000.0
+                    if num > 1e8:   # sec
+                        dt_ist = datetime.fromtimestamp(num, timezone.utc) + timedelta(hours=5, minutes=30)
+                        return (dt_ist.hour == 9 and 15 <= dt_ist.minute <= 25)
+                except Exception:
+                    pass
+                return False
+
+            orb_candles = [c for c in today_candles if _is_orb_ts(c.get("timestamp", ""))]
+            if len(orb_candles) >= 3:
+                orh = max(float(c["high"]) for c in orb_candles)
+                orl = min(float(c["low"]) for c in orb_candles)
+                orb_formed = True
+            elif not any(_is_orb_ts(c.get("timestamp", "")) for c in today_candles) and len(today_candles) >= 3:
+                # Time-agnostic synthetic sequence fallback (e.g. unit tests without timestamps)
                 first_three = today_candles[:3]
                 orh = max(float(c["high"]) for c in first_three)
                 orl = min(float(c["low"]) for c in first_three)

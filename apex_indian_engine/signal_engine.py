@@ -283,8 +283,28 @@ class IndianSignalEngine:
             cpr_tag = f"EMA50={ema50:.0f}(gap)" if cpr_stale else f"CPR=[{cpr_bot:.0f}-{cpr_top:.0f}]"
             adv5_log = f"CPR/ORB (Weight: {int(w_lvl*100)}%): Spot={cur_close:.0f} vs {cpr_tag} | ORB=[{key_levels.orl:.0f}-{key_levels.orh:.0f}] (Score: {adv5_score:+.2f})"
 
-        # ── 7. Council Aggregation ──
-        net_score = round(adv1_score + adv2_score + adv3_score + adv4_score + adv5_score, 2)
+        # ── 7. Council Aggregation & Conflict Detection ──
+        advisor_scores = [adv1_score, adv2_score, adv3_score, adv4_score, adv5_score]
+        bull_scores = [s for s in advisor_scores if s > 0]
+        bear_scores = [abs(s) for s in advisor_scores if s < 0]
+        sum_bull = sum(bull_scores)
+        sum_bear = sum(bear_scores)
+
+        # Minimum Quorum: At least 2 advisors must actively affirm the direction (score >= 0.07)
+        affirmative_bull = sum(1 for s in bull_scores if s >= 0.07)
+        affirmative_bear = sum(1 for s in bear_scores if s >= 0.07)
+
+        # Conflict Penalty: If opposing advisors actively dissent, apply conflict deduction
+        opposing_weight = min(sum_bull, sum_bear)
+        conflict_penalty = opposing_weight * 0.50
+
+        if sum_bull > sum_bear:
+            net_score = round(max(0.0, sum_bull - sum_bear - conflict_penalty), 2)
+        elif sum_bear > sum_bull:
+            net_score = round(-max(0.0, sum_bear - sum_bull - conflict_penalty), 2)
+        else:
+            net_score = 0.0
+
         notes = [ml_log, adv2_log, adv3_log, adv4_log, adv5_log]
 
         # ── 8. Open Interest & PCR Wall Shield Evaluation ──
@@ -305,7 +325,9 @@ class IndianSignalEngine:
             "net_score": net_score,
             "threshold": self.min_consensus_threshold,
             "veto": "",
-            "candidate": "LONG (CE)" if net_score >= self.min_consensus_threshold else ("SHORT (PE)" if net_score <= -self.min_consensus_threshold else "NEUTRAL"),
+            "candidate": "LONG (CE)" if (net_score >= self.min_consensus_threshold and affirmative_bull >= 2) else (
+                "SHORT (PE)" if (net_score <= -self.min_consensus_threshold and affirmative_bear >= 2) else "NEUTRAL"
+            ),
             "ml_reliable": ml_active,
             "htf_bias": htf_bias,
         }
@@ -317,6 +339,11 @@ class IndianSignalEngine:
 
         # ── 10. Institutional Council Gate & Veto Protocol ──
         if net_score >= self.min_consensus_threshold:
+            if affirmative_bull < 2:
+                if not is_preview:
+                    logger.warning(f"CE Entry VETOED on {self.index_name}: Insufficient affirmative advisor quorum ({affirmative_bull}/2)")
+                return _veto("Insufficient Advisor Quorum (< 2 affirmative advisors)")
+
             # Bullish Candidate: Buy CALL (CE)
             direction, opt_type = "LONG", "CE"
             conviction = min(0.95, round(0.50 + (net_score * 0.45), 2))
@@ -404,6 +431,11 @@ class IndianSignalEngine:
             return direction, opt_type, conviction, net_score, notes, oi_metrics
 
         elif net_score <= -self.min_consensus_threshold:
+            if affirmative_bear < 2:
+                if not is_preview:
+                    logger.warning(f"PE Entry VETOED on {self.index_name}: Insufficient affirmative advisor quorum ({affirmative_bear}/2)")
+                return _veto("Insufficient Advisor Quorum (< 2 affirmative advisors)")
+
             # Bearish Candidate: Buy PUT (PE)
             direction, opt_type = "SHORT", "PE"
             conviction = min(0.95, round(0.50 + (abs(net_score) * 0.45), 2))

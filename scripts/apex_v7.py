@@ -1341,21 +1341,47 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL, bypass_retest: b
                 if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
                 return False
 
-        # 0b. Closed 5m Candle-Direction Confirmation & 3h Range Location Guard
-        # Permits healthy pullbacks (<= 0.35 ATR); defers strong opposing expansion candles (> 0.35 ATR)
+        # 0b. Closed 5m Candle-Direction Confirmation & Retest Queue Deferral
+        # Permits healthy pullbacks (<= 0.35 ATR); for strong opposing expansion candles (> 0.35 ATR),
+        # defers immediate entry and queues a fair-value retest limit so entries are caught on exhaustion.
         c_body = lc_c - lc_o
-        if sym_atr > 0:
-            if direction == "SHORT" and c_body > (0.35 * sym_atr):
-                log_msg = f"[{sym}] CANDLE CONFIRMATION GUARD: Refused SHORT on strong green 5m expansion (+{c_body:.2f} > 0.35 ATR)"
+        if sym_atr > 0 and not bypass_retest:
+            atr_pct = sym_atr / max(entry, 1.0)
+            retest_bars = max(2, min(5, int(round(0.006 / max(atr_pct, 0.001)))))
+            expires_sec = retest_bars * 300.0
+            if direction == "SHORT" and c_body > (0.35 * sym_atr) and not (has_sweep_or_brk and is_high_prob):
+                retest_px = round(lc_c + 0.20 * sym_atr, 2)
+                inv_px = round(lc_c + 0.85 * sym_atr, 2)
+                pending_retest_zones[sym] = {
+                    "signal": signal,
+                    "direction": direction,
+                    "retest_px": retest_px,
+                    "inv_px": inv_px,
+                    "signal_price": entry,
+                    "sym_atr": sym_atr,
+                    "expires_ts": time.time() + expires_sec,
+                }
+                log_msg = f"[{sym}] RETEST QUEUED ({direction}): Strong green expansion (+{c_body:.2f} > 0.35 ATR) — waiting pullback to ${retest_px:,.2f}"
                 trade_log.append(log_msg)
                 _record_gate_rejection(sym, sig_desc, log_msg)
-                if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
+                if HEADLESS: print(f"  ⏳ {log_msg}", flush=True)
                 return False
-            if direction == "LONG" and (-c_body) > (0.35 * sym_atr):
-                log_msg = f"[{sym}] CANDLE CONFIRMATION GUARD: Refused LONG on strong red 5m expansion ({c_body:.2f} < -0.35 ATR)"
+            if direction == "LONG" and (-c_body) > (0.35 * sym_atr) and not (has_sweep_or_brk and is_high_prob):
+                retest_px = round(lc_c - 0.20 * sym_atr, 2)
+                inv_px = round(lc_c - 0.85 * sym_atr, 2)
+                pending_retest_zones[sym] = {
+                    "signal": signal,
+                    "direction": direction,
+                    "retest_px": retest_px,
+                    "inv_px": inv_px,
+                    "signal_price": entry,
+                    "sym_atr": sym_atr,
+                    "expires_ts": time.time() + expires_sec,
+                }
+                log_msg = f"[{sym}] RETEST QUEUED ({direction}): Strong red expansion ({c_body:.2f} < -0.35 ATR) — waiting pullback to ${retest_px:,.2f}"
                 trade_log.append(log_msg)
                 _record_gate_rejection(sym, sig_desc, log_msg)
-                if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
+                if HEADLESS: print(f"  ⏳ {log_msg}", flush=True)
                 return False
 
         if "RANGING" in reg_u and len(c5_list) >= 36:
@@ -1460,6 +1486,9 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL, bypass_retest: b
                 retest_px = round(max(mid_bar, entry + 0.25 * sym_atr), 2)
                 inv_px = round(float(lc["high"]) + 0.35 * sym_atr, 2)
 
+            atr_pct = sym_atr / max(entry, 1.0)
+            retest_bars = max(2, min(5, int(round(0.006 / max(atr_pct, 0.001)))))
+            expires_sec = retest_bars * 300.0
             pending_retest_zones[sym] = {
                 "signal": signal,
                 "direction": direction,
@@ -1467,7 +1496,7 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL, bypass_retest: b
                 "inv_px": inv_px,
                 "signal_price": entry,
                 "sym_atr": sym_atr,
-                "expires_ts": time.time() + 600.0,
+                "expires_ts": time.time() + expires_sec,
             }
             log_msg = f"[{sym}] RETEST LIMIT QUEUED ({direction}): Wait pullback to ${retest_px:,.2f} (from ${entry:,.2f}, inv ${inv_px:,.2f})"
             trade_log.append(log_msg)
@@ -1922,6 +1951,7 @@ def _check_exit_for_symbol(sym: str):
                     fee_buf = entry * (ROUNDTRIP_BPS * 1.5 / 10000.0)
                     port["sl_price"] = entry + fee_buf if direction == "LONG" else entry - fee_buf
                     port["phase"] = 2
+                    port["phase2_trigger"] = "OFI_HARVEST"
                     port["risk_tier"] = 3
                     port["peak_fav_r"] = max(float(port.get("peak_fav_r", 0.0)), r_mult)
                     if PROP_FIRM_MODE and prop_firm_manager:
@@ -1963,6 +1993,7 @@ def _check_exit_for_symbol(sym: str):
             fee_buf = entry * (ROUNDTRIP_BPS * 1.5 / 10000.0)
             port["sl_price"] = entry + fee_buf if direction=="LONG" else entry - fee_buf
             port["phase"] = 2
+            port["phase2_trigger"] = "TP1"
             port["risk_tier"] = 3
             port["peak_fav_r"] = max(float(port.get("peak_fav_r", 0.0)), r_mult)
             if PROP_FIRM_MODE and prop_firm_manager:
@@ -1995,7 +2026,12 @@ def _check_exit_for_symbol(sym: str):
             trail_mult = 1.60 if peak_fav_r >= 3.5 else 2.60
             trail_buf = max(atr * trail_mult, sl_dist * (0.65 if peak_fav_r >= 3.5 else 1.0))
         else:
-            if peak_fav_r >= 4.0:
+            is_ofi_early = (port.get("phase2_trigger") == "OFI_HARVEST")
+            if is_ofi_early and peak_fav_r < 2.0:
+                # Early OFI harvest entered Phase 2 at +1.35R; give runner wide breathing room until +2.0R
+                trail_mult = 2.80
+                min_sl_buf = sl_dist * 1.25
+            elif peak_fav_r >= 4.0:
                 trail_mult = 1.05
                 min_sl_buf = sl_dist * 0.45
             elif peak_fav_r >= 2.8:
