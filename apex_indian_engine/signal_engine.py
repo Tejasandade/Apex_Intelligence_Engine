@@ -129,6 +129,7 @@ class IndianSignalEngine:
         is_preview: bool = False,
         heavyweights: Optional[dict[str, Any]] = None,
         oi_flow: str = "",
+        peer_posture: Optional[dict[str, Any]] = None,
     ) -> Optional[tuple[str, str, float, float, list[str], Optional[OIMetrics]]]:
         """
         Evaluates current technical posture across 5 Council Advisors + OI Wall Shield + Liquidity Traps.
@@ -385,12 +386,22 @@ class IndianSignalEngine:
                             self._last_veto_log["HTF_CE_VETO"] = now_t
                     return _veto("Macro 15m Trend is Bearish")
 
-            # VETO 4: Banking Heavyweight Opposing (BankNifty)
-            if heavyweights and "BANK" in self.index_name:
+            # VETO 4: Banking Heavyweight Opposing (Applies to both BankNifty and Nifty 50)
+            if heavyweights:
                 if heavyweights.get("BANKING_FLOW") == "BEARISH":
                     if not is_preview:
                         logger.warning(f"CE Entry VETOED on {self.index_name}: Heavyweights HDFC/ICICI are BEARISH")
-                    return _veto("Heavyweights HDFC/ICICI opposing")
+                    return _veto("Heavyweights HDFC/ICICI opposing (SMT Conflict)")
+
+            # VETO 4b: Cross-Index Inter-Market Coherence (Nifty vs BankNifty SMT Divergence)
+            if peer_posture:
+                p_sym = peer_posture.get("symbol", "")
+                p_flow = peer_posture.get("oi_flow", "")
+                p_sweep = peer_posture.get("active_sweep", "")
+                if "BEARISH" in p_flow or "Bearish" in p_sweep or "UNWINDING" in p_flow:
+                    if not is_preview:
+                        logger.warning(f"CE Entry VETOED on {self.index_name}: Peer {p_sym} is BEARISH ({p_flow} / {p_sweep})")
+                    return _veto(f"Inter-Market SMT Conflict: Cannot BUY CE on {self.index_name} while {p_sym} is Bearish ({p_flow})")
 
             # VETO 5: Institutional PDH Sweep Trap
             if key_levels and "PDH Sweep Rejection" in key_levels.active_sweep:
@@ -462,6 +473,12 @@ class IndianSignalEngine:
             if oi_metrics and oi_metrics.pcr < 0.72:
                 return _veto(f"Call Buying VETO: Depressed PCR ({oi_metrics.pcr:.2f} < 0.72) — heavy overhead call resistance")
 
+            # VETO 11: Opening Range High Resistance Ceiling Guard (No buying directly into ORH without breakout)
+            if key_levels and key_levels.orh > 0 and cur_close < key_levels.orh:
+                dist_to_orh = key_levels.orh - cur_close
+                if atr > 0 and dist_to_orh < (atr * 0.50):
+                    return _veto(f"Buying into ORH Ceiling ({cur_close:.0f} only {dist_to_orh:.1f} pts below ORH {key_levels.orh:.0f})")
+
             return direction, opt_type, conviction, net_score, notes, oi_metrics
 
         elif net_score <= -self.min_consensus_threshold:
@@ -510,12 +527,22 @@ class IndianSignalEngine:
                             self._last_veto_log["HTF_PE_VETO"] = now_t
                     return _veto("Macro 15m Trend is Bullish")
 
-            # VETO 4: Banking Heavyweight Opposing (BankNifty)
-            if heavyweights and "BANK" in self.index_name:
+            # VETO 4: Banking Heavyweight Opposing (Applies to both BankNifty and Nifty 50)
+            if heavyweights:
                 if heavyweights.get("BANKING_FLOW") == "BULLISH":
                     if not is_preview:
-                        logger.warning(f"PE Entry VETOED on {self.index_name}: Heavyweights HDFC/ICICI are BULLISH")
-                    return _veto("Heavyweights HDFC/ICICI opposing")
+                        logger.warning(f"PE Entry VETOED on {self.index_name}: Heavyweights HDFC/ICICI are BULLISH (Banking drives 38% of Nifty)")
+                    return _veto("Heavyweights HDFC/ICICI opposing (SMT Conflict)")
+
+            # VETO 4b: Cross-Index Inter-Market Coherence (Nifty vs BankNifty SMT Divergence)
+            if peer_posture:
+                p_sym = peer_posture.get("symbol", "")
+                p_flow = peer_posture.get("oi_flow", "")
+                p_sweep = peer_posture.get("active_sweep", "")
+                if "BULLISH" in p_flow or "Bullish" in p_sweep:
+                    if not is_preview:
+                        logger.warning(f"PE Entry VETOED on {self.index_name}: Peer {p_sym} is BULLISH ({p_flow} / {p_sweep})")
+                    return _veto(f"Inter-Market SMT Conflict: Cannot BUY PE on {self.index_name} while {p_sym} is Bullish ({p_flow})")
 
             # VETO 5: Institutional PDL Sweep Trap
             if key_levels and "PDL Sweep Reclaim" in key_levels.active_sweep:
@@ -586,6 +613,12 @@ class IndianSignalEngine:
             # VETO 10: PCR High Ceiling Filter for PE (Heavy overhead put support)
             if oi_metrics and oi_metrics.pcr > 1.45:
                 return _veto(f"Put Buying VETO: Elevated PCR ({oi_metrics.pcr:.2f} > 1.45) — heavy floor put support")
+
+            # VETO 11: Opening Range Low Demand Floor Guard (No selling directly into ORL without breakdown)
+            if key_levels and key_levels.orl > 0 and cur_close > key_levels.orl:
+                dist_to_orl = cur_close - key_levels.orl
+                if atr > 0 and dist_to_orl < (atr * 0.50):
+                    return _veto(f"Selling into ORL Floor ({cur_close:.0f} only {dist_to_orl:.1f} pts above ORL {key_levels.orl:.0f})")
 
             return direction, opt_type, conviction, net_score, notes, oi_metrics
 

@@ -395,10 +395,19 @@ class ApexIndianEngine:
         vix_params = self.vix_manager.get_parameters()
         sig_engine.min_consensus_threshold = vix_params.consensus_threshold
 
-        # 5. Evaluate Multi-Advisor Council + CPR/ORB Levels + OI Shield
+        # 5. Evaluate Multi-Advisor Council + CPR/ORB Levels + OI Shield + Inter-Market SMT Flow
         cur_lvl = self.levels_trackers[idx].calculate_from_candles(sig_engine.candles_5m, cur_spot)
         active_oi = oi_chain if oi_chain is not None else (self._latest_oi_chains.get(idx) or None)
         heavyweights_info = self._get_heavyweights_info()
+
+        peer_idx = "BANKNIFTY" if idx == "NIFTY" else "NIFTY"
+        peer_lvl = getattr(self.levels_trackers.get(peer_idx), "current_levels", None)
+        peer_posture = {
+            "symbol": peer_idx,
+            "oi_flow": self._latest_oi_flows.get(peer_idx, ""),
+            "active_sweep": getattr(peer_lvl, "active_sweep", "") if peer_lvl else "",
+        }
+
         res = sig_engine.evaluate_signal(
             cur_spot,
             cur_vwap,
@@ -407,6 +416,7 @@ class ApexIndianEngine:
             is_preview=False,
             heavyweights=heavyweights_info,
             oi_flow=self._latest_oi_flows.get(idx, ""),
+            peer_posture=peer_posture,
         )
         if not res:
             return None

@@ -239,11 +239,11 @@ class IndianRiskManager:
 
         raw_lots = int(round(budget_inr / max(cost_per_lot, 1.0)))
 
-        # On Grade A+ setups with sufficient daily budget, take 2 lots so TP1 partial cash harvest activates
-        if is_grade_a_plus and self.consecutive_losses == 0 and budget_inr >= (cost_per_lot * 1.5):
-            raw_lots = max(2, raw_lots)
-
-        lots = max(1, min(raw_lots, 10))  # Max 10 lots for retail protection
+        # Strict Single-Lot Discipline for capital < ₹2,00,000
+        # On a ₹1 Lakh account, 1 lot of Nifty (65 qty * 15 pt SL = ₹975) or BankNifty (30 qty * 30 pt SL = ₹900)
+        # consumes the full 1.0% risk budget. Taking 2 lots is strictly prohibited to avoid doubling loss.
+        max_allowed_lots = 1 if self.capital_inr < 200_000.0 else max(1, int(self.capital_inr // 100_000.0))
+        lots = max(1, min(raw_lots, max_allowed_lots))
         qty = lots * lot_size
         planned_risk = round(qty * sl_points, 2)
 
