@@ -1283,6 +1283,32 @@ def execute_signal(signal: TradingSignal, symbol: str = SYMBOL, bypass_retest: b
         if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
         return False
 
+    # ── ALTCOIN (ETH) CROSS-MARKET COHERENCE GATE ──
+    # Altcoins cannot trade opposite or without directional confirmation from Bitcoin
+    if "ETH" in sym:
+        if prob < 0.64 and not is_high_prob:
+            log_msg = f"[{sym}] ETH QUALITY GATE: Conviction {prob:.3f} below Altcoin threshold (0.64) — skipping marginal trade"
+            trade_log.append(log_msg)
+            _record_gate_rejection(sym, sig_desc, log_msg)
+            if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
+            return False
+
+        btc_port = portfolios.get("BTCUSDT", {})
+        if btc_port.get("position") == "OPEN" and btc_port.get("direction") != direction:
+            log_msg = f"[{sym}] ETH-BTC CONFLICT GATE: Cannot {direction} ETH while BTC holds opposing {btc_port.get('direction')}"
+            trade_log.append(log_msg)
+            _record_gate_rejection(sym, sig_desc, log_msg)
+            if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
+            return False
+
+        xm_vote = (getattr(signal, "council_votes", {}) or {}).get("CrossMarket", {}).get("vote", "ABSTAIN")
+        if xm_vote != "APPROVE" and not is_high_prob:
+            log_msg = f"[{sym}] CROSS-MARKET COHERENCE GATE: BTC/Macro CrossMarket={xm_vote} (requires APPROVE for ETH)"
+            trade_log.append(log_msg)
+            _record_gate_rejection(sym, sig_desc, log_msg)
+            if HEADLESS: print(f"  🛡️ {log_msg}", flush=True)
+            return False
+
     entry = mkt["ask"] if direction == "LONG" else mkt["bid"]
     if entry <= 0: entry = mkt.get("ltp", 0.0)
     if entry <= 0: return False
