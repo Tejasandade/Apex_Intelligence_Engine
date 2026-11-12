@@ -50,9 +50,11 @@ class ApexIndianEngine:
     Production-Grade Autonomous Engine for Indian Options (NIFTY & BANKNIFTY).
     """
 
-    def __init__(self, mode: str = "PAPER", initial_capital: float = 100_000.0):
+    def __init__(self, mode: str = "PAPER", initial_capital: float = 100_000.0, state_file: Optional[str] = None):
         self.config = EngineConfig(mode=mode)
         self.config.risk.initial_capital_inr = initial_capital
+        if state_file:
+            self.config.state_file = state_file
         
         self.scrip_master = ScripMaster(cache_path=self.config.scrip_cache_file)
         self.greeks_engine = GreeksEngine()
@@ -380,7 +382,7 @@ class ApexIndianEngine:
 
         # 2. Check risk gate before evaluating signals (permit evaluation for high-potential candidate setups)
         skip_time = getattr(self, "ignore_time_checks", False)
-        can_trade, gate_reason = self.risk_manager.can_trade(skip_time_check=skip_time, is_high_prob=True)
+        can_trade, gate_reason = self.risk_manager.can_trade(skip_time_check=skip_time, is_high_prob=True, index_name=idx)
         if not can_trade:
             logger.debug(f"Trading gate locked: {gate_reason}")
             return None
@@ -419,7 +421,7 @@ class ApexIndianEngine:
 
         # 6. Dynamic Risk Gate Verification based on Signal Potential
         is_high_prob = (conviction >= 0.70 or abs(score) >= 0.65)
-        can_trade_final, gate_reason_final = self.risk_manager.can_trade(skip_time_check=skip_time, is_high_prob=is_high_prob)
+        can_trade_final, gate_reason_final = self.risk_manager.can_trade(skip_time_check=skip_time, is_high_prob=is_high_prob, index_name=idx)
         if not can_trade_final:
             logger.info(f"Dynamic Risk Gate Locked ({idx} {direction}): {gate_reason_final}")
             return None
@@ -436,15 +438,18 @@ class ApexIndianEngine:
             logger.error(f"Could not resolve optimal strike for {idx} {opt_type}")
             return None
 
-        # Adaptive Risk-Proportional Stop Loss (No micro-pip whipsaws on expensive options)
+        # Adaptive Risk-Proportional Stop Loss (Strict Capital Risk Ceiling <= ₹1,000 / trade)
         prem = float(selected.est_premium)
+        lot_sz = selected.lot_size
+        max_risk_allowed = self.risk_manager.rules.initial_capital_inr * (self.risk_manager.rules.max_risk_per_trade_pct / 100.0) # ₹1,000 max
         if "BANK" in idx:
-            # BankNifty option SL: 14% of premium, bounded min 18.0 pts to max 50.0 pts
-            # (avoids taking 35-40% haircuts on cheaper ₹100-150 options)
-            sl_pts = max(18.0, min(prem * 0.14, 50.0))
+            # BankNifty option SL: cap SL points so nominal risk strictly <= ₹1,000 (30 qty * 30 pts = ₹900)
+            max_bank_sl = max(18.0, min(30.0, max_risk_allowed / max(lot_sz, 1)))
+            sl_pts = min(max(18.0, prem * 0.12), max_bank_sl)
         else:
-            # Nifty 50 option SL: 16% of premium, bounded min 10.0 pts to max 24.0 pts
-            sl_pts = max(10.0, min(prem * 0.16, 24.0))
+            # Nifty 50 option SL: max risk ₹1,000 / 65 qty = 15.3 pts cap, standard 10-15 pts
+            max_nifty_sl = max(10.0, min(15.0, max_risk_allowed / max(lot_sz, 1)))
+            sl_pts = min(max(10.0, prem * 0.14), max_nifty_sl)
         sl_pts = round(sl_pts, 1)
 
         # 7a. Institutional No-Chase & Climax Exhaustion Guard
@@ -652,6 +657,8 @@ class ApexIndianEngine:
                 sell_price=closed["exit_price"],
                 qty=trade.quantity,
                 reason=closed["exit_reason"],
+                index_name=trade.index_name,
+                option_type=trade.option_type,
             )
 
             # Notify Telegram

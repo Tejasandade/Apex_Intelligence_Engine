@@ -20,10 +20,10 @@ def run_simulation():
     print("=" * 70)
 
     # 1. Initialize engine in PAPER mode with isolated state file
-    engine = ApexIndianEngine(mode="PAPER", initial_capital=100_000.0)
-    engine.ignore_time_checks = True
     test_state_file = Path("data/test_indian_state.json")
-    engine.risk_manager.state_file = test_state_file
+    engine = ApexIndianEngine(mode="PAPER", initial_capital=100_000.0, state_file=str(test_state_file))
+    engine.ignore_time_checks = True
+    engine.risk_manager.force_reset(100_000.0)
     engine.executor.journal_file = Path("data/test_indian_trade_journal.json")
     
     # Load Scrip Master (offline cache)
@@ -40,8 +40,8 @@ def run_simulation():
     print(f"  ✓ Loaded {len(df):,} historical BankNifty candles.")
 
     # 3. Feed a sequence of candles to build indicators & trigger ML
-    # We take candles 0 to 55 which contains a verified high-conviction breakdown
-    slice_df = df.iloc[0:55]
+    # We take candles 0 to 120 which contains verified institutional momentum setups
+    slice_df = df.iloc[0:120]
     
     opened_trade = None
     candles_fed = 0

@@ -57,8 +57,8 @@ class IndianSignalEngine:
     def __init__(self, index_name: str = "BANKNIFTY"):
         self.index_name = index_name.upper()
         self.candles_5m: list[dict[str, Any]] = []
-        # Calibrated for 5-advisor weighted council (0.42 allows strong 3-4 advisor consensus while vetos protect)
-        self.min_consensus_threshold = 0.42
+        # Calibrated for 5-advisor weighted council (0.50 ensures multi-factor institutional consensus)
+        self.min_consensus_threshold = 0.50
 
         # Initialize ML Predictor (XGBoost models for BankNifty / Nifty)
         self.ml_predictor = IndianMLPredictor(index_name=self.index_name)
@@ -161,7 +161,7 @@ class IndianSignalEngine:
         if ml_active:
             w_ml, w_ema, w_vwap, w_disp, w_lvl = 0.30, 0.20, 0.15, 0.15, 0.20
         else:
-            w_ml, w_ema, w_vwap, w_disp, w_lvl = 0.00, 0.30, 0.25, 0.20, 0.25
+            w_ml, w_ema, w_vwap, w_disp, w_lvl = 0.00, 0.25, 0.25, 0.25, 0.25
 
         # ── 2. Advisor 1: Institutional ML Model ──
         adv1_score = 0.0
@@ -338,11 +338,12 @@ class IndianSignalEngine:
             return None
 
         # ── 10. Institutional Council Gate & Veto Protocol ──
+        min_affirmative = 3 if not ml_active else 2
         if net_score >= self.min_consensus_threshold:
-            if affirmative_bull < 2:
+            if affirmative_bull < min_affirmative:
                 if not is_preview:
-                    logger.warning(f"CE Entry VETOED on {self.index_name}: Insufficient affirmative advisor quorum ({affirmative_bull}/2)")
-                return _veto("Insufficient Advisor Quorum (< 2 affirmative advisors)")
+                    logger.warning(f"CE Entry VETOED on {self.index_name}: Insufficient affirmative advisor quorum ({affirmative_bull}/{min_affirmative})")
+                return _veto(f"Insufficient Advisor Quorum (< {min_affirmative} affirmative advisors)")
 
             # Bullish Candidate: Buy CALL (CE)
             direction, opt_type = "LONG", "CE"
@@ -428,13 +429,46 @@ class IndianSignalEngine:
                         self._last_veto_log["FVG_SUPPLY_VETO"] = now_t
                 return _veto(f"Inside Bearish FVG Supply Zone ({key_levels.fvg_zone_bottom:.0f}-{key_levels.fvg_zone_top:.0f})")
 
+            # VETO 8: Climax Overextension from 5m EMA20 (No chasing stretched candles)
+            closes_all = [float(c["close"]) for c in self.candles_5m]
+            ema20_5m = self._calc_ema(closes_all, min(20, len(closes_all))) if closes_all else vwap
+            ema_ext = cur_close - ema20_5m
+            if atr > 0 and ema_ext > (1.30 * atr):
+                if not is_preview:
+                    now_t = time.time()
+                    if (now_t - self._last_veto_log.get("EMA_EXT_CE", 0.0)) >= 60.0:
+                        logger.warning(f"CE Entry VETOED on {self.index_name}: Overextended {ema_ext:.1f} pts ({ema_ext/atr:.1f} ATR > 1.30 ATR) from 5m EMA20. Chasing skipped.")
+                        self._last_veto_log["EMA_EXT_CE"] = now_t
+                return _veto(f"Overextended from 5m EMA20 ({ema_ext/atr:.1f} ATR > 1.30 ATR) — wait for pullback")
+
+            # VETO 9: Actionable Trigger Verification (No entering dormant sideways drift)
+            has_trigger = False
+            if len(self.candles_5m) >= 4:
+                prior_3 = self.candles_5m[-4:-1]
+                highest_prior_close = max(float(c.get("close", 0)) for c in prior_3)
+                lowest_prior_low = min(float(c.get("low", cur_close)) for c in prior_3)
+                is_impulse = (cur_close > highest_prior_close and cur_close > c_open and body >= (0.35 * atr))
+                is_pullback_bounce = (lowest_prior_low <= (ema21 + 0.45 * atr) and cur_close > c_open and cur_close >= ema9)
+                is_orb_sweep = key_levels and any(k in getattr(key_levels, "active_sweep", "") for k in ("Breakout", "ORH Bullish", "Reclaim"))
+                if is_impulse or is_pullback_bounce or is_orb_sweep:
+                    has_trigger = True
+            else:
+                has_trigger = True
+
+            if not has_trigger:
+                return _veto("No active impulse breakout or confirmed pullback bounce (dormant sideways candle)")
+
+            # VETO 10: PCR Low Floor Filter for CE (Heavy overhead call writing)
+            if oi_metrics and oi_metrics.pcr < 0.72:
+                return _veto(f"Call Buying VETO: Depressed PCR ({oi_metrics.pcr:.2f} < 0.72) — heavy overhead call resistance")
+
             return direction, opt_type, conviction, net_score, notes, oi_metrics
 
         elif net_score <= -self.min_consensus_threshold:
-            if affirmative_bear < 2:
+            if affirmative_bear < min_affirmative:
                 if not is_preview:
-                    logger.warning(f"PE Entry VETOED on {self.index_name}: Insufficient affirmative advisor quorum ({affirmative_bear}/2)")
-                return _veto("Insufficient Advisor Quorum (< 2 affirmative advisors)")
+                    logger.warning(f"PE Entry VETOED on {self.index_name}: Insufficient affirmative advisor quorum ({affirmative_bear}/{min_affirmative})")
+                return _veto(f"Insufficient Advisor Quorum (< {min_affirmative} affirmative advisors)")
 
             # Bearish Candidate: Buy PUT (PE)
             direction, opt_type = "SHORT", "PE"
@@ -519,6 +553,39 @@ class IndianSignalEngine:
                         logger.warning(f"PE Entry VETOED on {self.index_name}: Inside Bullish FVG Demand Zone ({key_levels.fvg_zone_bottom:.0f}-{key_levels.fvg_zone_top:.0f})")
                         self._last_veto_log["FVG_DEMAND_VETO"] = now_t
                 return _veto(f"Inside Bullish FVG Demand Zone ({key_levels.fvg_zone_bottom:.0f}-{key_levels.fvg_zone_top:.0f})")
+
+            # VETO 8: Climax Overextension below 5m EMA20 (No chasing dump candles)
+            closes_all = [float(c["close"]) for c in self.candles_5m]
+            ema20_5m = self._calc_ema(closes_all, min(20, len(closes_all))) if closes_all else vwap
+            ema_ext = ema20_5m - cur_close
+            if atr > 0 and ema_ext > (1.30 * atr):
+                if not is_preview:
+                    now_t = time.time()
+                    if (now_t - self._last_veto_log.get("EMA_EXT_PE", 0.0)) >= 60.0:
+                        logger.warning(f"PE Entry VETOED on {self.index_name}: Overextended {ema_ext:.1f} pts ({ema_ext/atr:.1f} ATR > 1.30 ATR) below 5m EMA20. Chasing skipped.")
+                        self._last_veto_log["EMA_EXT_PE"] = now_t
+                return _veto(f"Overextended below 5m EMA20 ({ema_ext/atr:.1f} ATR > 1.30 ATR) — wait for pullback")
+
+            # VETO 9: Actionable Trigger Verification (No entering dormant sideways drift)
+            has_trigger = False
+            if len(self.candles_5m) >= 4:
+                prior_3 = self.candles_5m[-4:-1]
+                lowest_prior_close = min(float(c.get("close", 999999)) for c in prior_3)
+                highest_prior_high = max(float(c.get("high", cur_close)) for c in prior_3)
+                is_impulse = (cur_close < lowest_prior_close and cur_close < c_open and body >= (0.35 * atr))
+                is_pullback_bounce = (highest_prior_high >= (ema21 - 0.45 * atr) and cur_close < c_open and cur_close <= ema9)
+                is_orb_sweep = key_levels and any(k in getattr(key_levels, "active_sweep", "") for k in ("Breakdown", "ORL Bearish", "Rejection"))
+                if is_impulse or is_pullback_bounce or is_orb_sweep:
+                    has_trigger = True
+            else:
+                has_trigger = True
+
+            if not has_trigger:
+                return _veto("No active impulse breakdown or confirmed pullback rejection (dormant sideways candle)")
+
+            # VETO 10: PCR High Ceiling Filter for PE (Heavy overhead put support)
+            if oi_metrics and oi_metrics.pcr > 1.45:
+                return _veto(f"Put Buying VETO: Elevated PCR ({oi_metrics.pcr:.2f} > 1.45) — heavy floor put support")
 
             return direction, opt_type, conviction, net_score, notes, oi_metrics
 

@@ -50,6 +50,9 @@ class IndianRiskManager:
         self.status = "READY"              # READY | IN_PROGRESS | DAILY_HALT | CLOSED
         self.halt_reason = ""
         self.halt_until_ts = 0.0
+        self.last_exit_times: dict[str, float] = {}
+        self.last_exit_prices: dict[str, float] = {}
+        self.last_exit_types: dict[str, str] = {}
 
         self.load_state()
 
@@ -93,6 +96,7 @@ class IndianRiskManager:
         now_time: Optional[dtime] = None,
         skip_time_check: bool = False,
         is_high_prob: bool = False,
+        index_name: Optional[str] = None,
     ) -> tuple[bool, str]:
         """
         Validates whether opening a new option trade is permitted right now.
@@ -121,12 +125,17 @@ class IndianRiskManager:
                 rem_m = (self.halt_until_ts - time.time()) / 60.0
                 return False, f"Consecutive loss cooling pause active ({rem_m:.0f}m remaining)"
 
-        # 3. Dynamic Daily Trades Cap (Sniper Discipline: Grade A+ required after base limit)
+        # 2b. Post-Exit Anti-Churn Cooldown (15 minutes on the same index)
+        if index_name and index_name in self.last_exit_times:
+            cooldown_sec = 900.0  # 15 minutes lockout
+            elapsed = time.time() - self.last_exit_times[index_name]
+            if elapsed < cooldown_sec:
+                rem_m = (cooldown_sec - elapsed) / 60.0
+                return False, f"Post-exit anti-churn cooldown for {index_name} active ({rem_m:.1f}m remaining — prevents overtrading chop)"
+
+        # 3. Dynamic Daily Trades Cap (Hard stop at 3 sniper setups max)
         if self.trades_today >= self.rules.max_trades_per_day:
-            if not is_high_prob:
-                return False, f"Dynamic Trade Cap: Trade #{self.trades_today+1} requires Grade A+ setup (conviction >= 0.70 or council >= 0.65)"
-            if self.trades_today >= 5:
-                return False, f"Hard daily trades limit reached (5/5 executed today)"
+            return False, f"Hard daily trade limit reached ({self.trades_today}/{self.rules.max_trades_per_day} executed today) — Day Complete"
 
         # 4. Daily Loss Circuit Breaker
         current_net_pnl = self.daily_realized_pnl + self.daily_unrealized_pnl
@@ -247,6 +256,8 @@ class IndianRiskManager:
         sell_price: float,
         qty: int,
         reason: str = "",
+        index_name: str = "",
+        option_type: str = "",
     ) -> dict[str, Any]:
         """Record trade completion, deduct taxes & friction, and update capital."""
         self.check_day_reset()
@@ -261,6 +272,11 @@ class IndianRiskManager:
         self.daily_unrealized_pnl = 0.0
         self.trades_today += 1
 
+        if index_name:
+            self.last_exit_times[index_name.upper()] = time.time()
+            self.last_exit_prices[index_name.upper()] = sell_price
+            self.last_exit_types[index_name.upper()] = option_type.upper()
+
         is_win = (net_pnl > 0)
         if is_win:
             self.consecutive_losses = 0
@@ -268,6 +284,14 @@ class IndianRiskManager:
             self.consecutive_losses += 1
             if self.consecutive_losses >= self.rules.consecutive_loss_limit:
                 self.halt_until_ts = time.time() + 3600.0  # 60m cooldown
+
+        # Immediate Daily Circuit Breaker Evaluation
+        current_net_pnl = self.daily_realized_pnl + self.daily_unrealized_pnl
+        hard_limit = self.day_start_capital * (self.rules.max_daily_loss_pct / 100.0)
+        soft_buffer = self.day_start_capital * (self.rules.daily_safety_buffer_pct / 100.0)
+        if current_net_pnl <= -soft_buffer:
+            self.status = "DAILY_HALT"
+            self.halt_reason = f"Daily safety buffer hit (-₹{abs(current_net_pnl):,.2f} / -₹{hard_limit:,.2f})"
 
         self.save_state()
 
